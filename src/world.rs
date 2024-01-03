@@ -4,7 +4,7 @@ use crate::borrow::{Borrow, IntoBorrow};
 use crate::component::Unique;
 use crate::entity_id::EntityId;
 use crate::error;
-use crate::info::WorkloadsTypeUsage;
+use crate::info::WorkloadsInfo;
 use crate::memory_usage::WorldMemoryUsage;
 use crate::public_transport::ShipyardRwLock;
 use crate::reserve::BulkEntityIter;
@@ -1334,30 +1334,16 @@ impl World {
     ///
     /// - Scheduler borrow failed.
     #[track_caller]
-    pub fn workloads_type_usage(&self) -> WorkloadsTypeUsage {
-        let mut workload_type_info = hashbrown::HashMap::new();
-
+    pub fn workloads_info(&self) -> WorkloadsInfo {
         let scheduler = self.scheduler.borrow().unwrap();
 
-        for (workload_name, batches) in &scheduler.workloads {
-            workload_type_info.insert(
-                format!("{workload_name:?}"),
-                batches
-                    .sequential
-                    .iter()
-                    .map(|system_index| {
-                        let system_name = scheduler.system_names[*system_index].clone();
-                        let mut system_storage_borrowed = Vec::new();
-
-                        scheduler.system_generators[*system_index](&mut system_storage_borrowed);
-
-                        (format!("{:?}", system_name), system_storage_borrowed)
-                    })
-                    .collect(),
-            );
-        }
-
-        WorkloadsTypeUsage(workload_type_info)
+        WorkloadsInfo(
+            scheduler
+                .workloads_info
+                .iter()
+                .map(|(name, workload_info)| (format!("{:?}", name), workload_info.clone()))
+                .collect(),
+        )
     }
 }
 

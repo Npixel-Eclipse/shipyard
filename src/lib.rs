@@ -119,3 +119,9 @@ pub use view::{
     View, ViewMut,
 };
 pub use world::World;
+
+#[cfg(not(feature = "std"))]
+type ShipHashMap<K, V> =
+hashbrown::HashMap<K, V, core::hash::BuildHasherDefault<siphasher::sip::SipHasher>>;
+#[cfg(feature = "std")]
+type ShipHashMap<K, V> = hashbrown::HashMap<K, V>;

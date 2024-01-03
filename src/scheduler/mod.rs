@@ -27,6 +27,7 @@ use crate::World;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use hashbrown::HashMap;
+use crate::info::WorkloadInfo;
 
 /// List of indexes into both systems and system_names
 #[derive(Default)]
@@ -77,6 +78,7 @@ pub(crate) struct Scheduler {
     lookup_table: HashMap<TypeId, usize>,
     /// workload name to list of "batches"
     pub(crate) workloads: HashMap<Box<dyn Label>, Batches>,
+    pub(crate) workloads_info: HashMap<Box<dyn Label>, WorkloadInfo>,
     pub(crate) default: Box<dyn Label>,
 }
 
@@ -88,6 +90,7 @@ impl Default for Scheduler {
             system_generators: Vec::new(),
             lookup_table: HashMap::new(),
             workloads: HashMap::new(),
+            workloads_info: HashMap::new(),
             default: Box::new(""),
         }
     }

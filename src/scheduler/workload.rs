@@ -392,13 +392,16 @@ impl Workload {
             system_generators,
             lookup_table,
             workloads,
+            workloads_info,
             default,
         } = &mut *world
             .scheduler
             .borrow_mut()
             .map_err(|_| error::AddWorkload::Borrow)?;
 
-        create_workload(
+        let name = self.name.dyn_clone();
+
+        let workload_info = create_workload(
             self,
             systems,
             system_names,
@@ -406,7 +409,11 @@ impl Workload {
             lookup_table,
             workloads,
             default,
-        )
+        )?;
+
+        workloads_info.insert(name, workload_info.clone());
+
+        Ok(workload_info)
     }
     /// Returns the first [`Unique`] storage borrowed by this workload that is not present in `world`.\
     /// If the workload contains nested workloads they have to be present in the `World`.
@@ -567,23 +574,25 @@ fn create_workload(
         let batch_info = BatchInfo {
             systems: (
                 Some(SystemInfo {
-                    name: display_name,
+                    name: format!("{:?}", display_name),
                     type_id,
                     borrow: borrow_constraints,
                     conflict: None,
+                    before: Vec::new(),
+                    after: Vec::new(),
                 }),
                 Vec::new(),
             ),
         };
 
         return Ok(WorkloadInfo {
-            name: builder.name,
+            name: format!("{:?}", builder.name),
             batch_info: vec![batch_info],
         });
     }
 
     let mut workload_info = WorkloadInfo {
-        name: builder.name,
+        name: format!("{:?}", builder.name),
         batch_info: vec![],
     };
 
@@ -999,7 +1008,7 @@ fn insert_system(
                 | (None, Some(other_system_info))
                 | (Some(other_system_info), Some(_)) => {
                     let system_info = SystemInfo {
-                        name: display_name,
+                        name: format!("{:?}", display_name),
                         type_id,
                         borrow: borrow_constraints,
                         conflict: Some(Conflict::Borrow {
@@ -1010,6 +1019,8 @@ fn insert_system(
                             },
                             other_type_info: other_system_info.borrow.last().unwrap().clone(),
                         }),
+                        before: Vec::new(),
+                        after: Vec::new(),
                     };
 
                     if valid < batches.parallel.len() {
@@ -1035,10 +1046,12 @@ fn insert_system(
         }
 
         let system_info = SystemInfo {
-            name: display_name,
+            name: format!("{:?}", display_name),
             type_id,
             borrow: borrow_constraints,
             conflict: None,
+            before: Vec::new(),
+            after: Vec::new(),
         };
 
         if valid < batches.parallel.len() {
@@ -1064,7 +1077,7 @@ fn insert_system(
                 (&non_send_sync, &batch_info.systems.0)
             {
                 let system_info = SystemInfo {
-                    name: display_name,
+                    name: format!("{:?}", display_name),
                     type_id,
                     borrow: borrow_constraints,
                     conflict: Some(Conflict::Borrow {
@@ -1075,6 +1088,8 @@ fn insert_system(
                         },
                         other_type_info: other_system_info.borrow.last().unwrap().clone(),
                     }),
+                    before: Vec::new(),
+                    after: Vec::new(),
                 };
 
                 if valid < batches.parallel.len() {
@@ -1113,10 +1128,12 @@ fn insert_system(
         }
 
         let system_info = SystemInfo {
-            name: display_name,
+            name: format!("{:?}", display_name),
             type_id,
             borrow: borrow_constraints,
             conflict,
+            before: Vec::new(),
+            after: Vec::new(),
         };
 
         if valid < batches.parallel.len() {
@@ -1295,7 +1312,7 @@ fn insert_before_after_system(
             if let Some(other_system) = &workload_info.batch_info[parallel_position].systems.0 {
                 conflict = Some(Conflict::OtherNotSendSync {
                     system: SystemId {
-                        name: display_name.dyn_clone(),
+                        name: format!("{:?}", display_name),
                         type_id,
                     },
                     type_info: other_system.borrow[0].clone(),
@@ -1321,10 +1338,12 @@ fn insert_before_after_system(
     }
 
     let system_info = SystemInfo {
-        name: display_name.dyn_clone(),
+        name: format!("{:?}", display_name),
         type_id,
         borrow: borrow_constraints,
         conflict,
+        before: memoize_before[&index].to_string_vec(),
+        after: memoize_after[&index].to_string_vec(),
     };
 
     if !can_go_in || system_info.conflict.is_some() {
