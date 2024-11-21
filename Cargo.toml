@@ -8,13 +8,13 @@ license = "MIT OR Apache-2.0"
 name = "shipyard"
 readme = "README.md"
 repository = "https://github.com/leudz/shipyard"
-version = "0.7.3"
+version = "0.7.4"
 
 [workspace]
 members = ["bunny_demo", "shipyard_proc", "square_eater", "visualizer"]
 
 [dependencies]
-hashbrown = { version = "0.14.0", default-features = false, features = [
+hashbrown = { version = "0.15.1", default-features = false, features = [
     "inline-more",
     "allocator-api2",
 ] }
