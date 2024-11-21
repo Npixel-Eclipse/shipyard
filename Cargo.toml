@@ -32,7 +32,7 @@ default = ["parallel", "proc", "std"]
 parallel = ["rayon", "shipyard_proc/parallel"]
 proc = ["shipyard_proc"]
 serde1 = ["serde", "hashbrown/serde"]
-std = ["hashbrown/ahash"]
+std = ["hashbrown/default-hasher"]
 thread_local = []
 
 [dev-dependencies]
