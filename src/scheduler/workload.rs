@@ -20,10 +20,10 @@ use alloc::vec::Vec;
 use core::any::type_name;
 #[cfg(not(feature = "std"))]
 use core::any::Any;
-use core::hash::BuildHasherDefault;
 use std::collections::{BTreeMap, BTreeSet};
 #[cfg(feature = "std")]
 use std::error::Error;
+use hashbrown::DefaultHashBuilder;
 
 /// Used to create a [`Workload`].
 ///
@@ -747,9 +747,9 @@ impl Workload {
             systems: Vec::new(),
             system_names: Vec::new(),
             system_generators: Vec::new(),
-            lookup_table: ShipHashMap::with_hasher(BuildHasherDefault::default()),
+            lookup_table: ShipHashMap::with_hasher(DefaultHashBuilder::default()),
             tracking_to_enable: Vec::new(),
-            workloads: ShipHashMap::with_hasher(BuildHasherDefault::default()),
+            workloads: ShipHashMap::with_hasher(DefaultHashBuilder::default()),
         };
 
         let mut default: Box<dyn Label> = Box::new("");
@@ -937,8 +937,8 @@ fn create_workload(
     // a before c
     // b after a
     // c after b
-    let mut memoize_before = ShipHashMap::with_hasher(BuildHasherDefault::default());
-    let mut memoize_after = ShipHashMap::with_hasher(BuildHasherDefault::default());
+    let mut memoize_before = ShipHashMap::with_hasher(DefaultHashBuilder::default());
+    let mut memoize_after = ShipHashMap::with_hasher(DefaultHashBuilder::default());
     let mut collected_tags = Vec::new();
     let mut collected_require_in_workload = Vec::new();
     let mut collected_before = Vec::new();
