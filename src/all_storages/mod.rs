@@ -31,9 +31,9 @@ use crate::{error, ShipHashMap};
 use alloc::boxed::Box;
 use alloc::sync::Arc;
 use core::any::type_name;
-use core::hash::BuildHasherDefault;
 use core::marker::PhantomData;
 use core::sync::atomic::AtomicU64;
+use hashbrown::DefaultHashBuilder;
 use hashbrown::hash_map::Entry;
 
 #[allow(missing_docs)]
@@ -104,7 +104,7 @@ impl<Lock, ThreadId> AllStoragesBuilder<Lock, ThreadId> {
 
 impl AllStoragesBuilder<LockPresent, ThreadIdPresent> {
     pub(crate) fn build(self, counter: Arc<AtomicU64>) -> AtomicRefCell<AllStorages> {
-        let mut storages = ShipHashMap::with_hasher(BuildHasherDefault::default());
+        let mut storages = ShipHashMap::with_hasher(DefaultHashBuilder::default());
 
         storages.insert(StorageId::of::<Entities>(), SBox::new(Entities::new()));
 
@@ -170,7 +170,7 @@ unsafe impl Sync for AllStorages {}
 impl AllStorages {
     #[cfg(feature = "std")]
     pub(crate) fn new(counter: Arc<AtomicU64>) -> Self {
-        let mut storages = ShipHashMap::with_hasher(BuildHasherDefault::default());
+        let mut storages = ShipHashMap::with_hasher(DefaultHashBuilder::default());
 
         storages.insert(StorageId::of::<Entities>(), SBox::new(Entities::new()));
 

@@ -8,37 +8,37 @@ license = "MIT OR Apache-2.0"
 name = "shipyard"
 readme = "README.md"
 repository = "https://github.com/leudz/shipyard"
-version = "0.7.0"
+version = "0.7.4"
 
 [workspace]
 members = ["bunny_demo", "shipyard_proc", "square_eater", "visualizer"]
 
 [dependencies]
-hashbrown = { version = "0.14.0", default-features = false, features = [
+hashbrown = { version = "0.15.1", default-features = false, features = [
     "inline-more",
     "allocator-api2",
 ] }
-lock_api = "0.4.0"
-rayon = { version = "1.5.1", optional = true }
-serde = { version = "1.0.0", optional = true, default-features = false, features = [
+lock_api = "0.4.12"
+rayon = { version = "1.10.0", optional = true }
+serde = { version = "1.0.214", optional = true, default-features = false, features = [
     "derive",
 ] }
-shipyard_proc = { git = "https://github.com/leudz/shipyard", optional = true }
-siphasher = "1.0.0"
-tracing = { version = "0.1.0", default-features = false, optional = true }
+shipyard_proc = { version = "0.4", optional = true }
+siphasher = "1.0.1"
+tracing = { version = "0.1.40", default-features = false, optional = true }
 
 [features]
 default = ["parallel", "proc", "std"]
 parallel = ["rayon", "shipyard_proc/parallel"]
 proc = ["shipyard_proc"]
 serde1 = ["serde", "hashbrown/serde"]
-std = ["hashbrown/ahash"]
+std = ["hashbrown/default-hasher"]
 thread_local = []
 
 [dev-dependencies]
 bincode = "1.3.3"
-parking_lot = "0.12.0"
-serde_json = "1.0.78"
+parking_lot = "0.12.3"
+serde_json = "1.0.132"
 
 [package.metadata.docs.rs]
 all-features = true
