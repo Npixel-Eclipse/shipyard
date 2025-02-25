@@ -165,6 +165,15 @@ impl core::fmt::Debug for EntityId {
     }
 }
 
+impl IntoIterator for EntityId {
+    type Item = EntityId;
+    type IntoIter = std::iter::Once<EntityId>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        std::iter::once(self)
+    }
+}
+
 #[test]
 fn entity_id() {
     let mut entity_id = EntityId::new(0);

@@ -12,7 +12,7 @@ use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::any::type_name;
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicU64, Ordering};
 
 /// Trait used to add systems to a workload.
 ///
@@ -145,7 +145,7 @@ macro_rules! impl_into_workload_system {
                     $type::enable_tracking(&mut tracking_to_enable);
                 )+
 
-                let last_run = AtomicU32::new(0);
+                let last_run = AtomicU64::new(0);
                 Ok(WorkloadSystem {
                     borrow_constraints: borrows,
                     tracking_to_enable,
@@ -198,4 +198,8 @@ macro_rules! into_workload_system {
     }
 }
 
-into_workload_system![(A, 0); (B, 1) (C, 2) (D, 3) (E, 4) (F, 5) (G, 6) (H, 7) (I, 8) (J, 9)];
+into_workload_system![
+    (A, 0); (B, 1) (C, 2) (D, 3) (E, 4) (F, 5) (G, 6) (H, 7) (I, 8) (J, 9)
+    (K, 10) (L, 11) (M, 12) (N, 13) (O, 14) (P, 15) (Q, 16) (S, 17) (T, 18) (U, 19)
+    (V, 20) (W, 21) (X, 22) (Y, 23) (Z, 24) (AA, 25) (AB, 26) (AC, 27) (AD, 28) (AE, 29)
+];
