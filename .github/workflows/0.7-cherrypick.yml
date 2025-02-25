@@ -28,7 +28,7 @@ jobs:
         git fetch upstream
         git checkout 0.7+patched
         git reset --hard upstream/0.7
-        git push origin main --force
+        git push origin 0.7+patched --force
 
     - name: Cherry-pick custom changes
       run: |
@@ -42,7 +42,7 @@ jobs:
 
     - name: Push changes
       run: |
-        git push origin main
+        git push origin 0.7+patched
 
     - name: Create Pull Request if cherry-pick fails
       if: failure()
