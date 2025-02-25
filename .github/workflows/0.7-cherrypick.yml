@@ -1,0 +1,47 @@
+name: Update and Cherry-pick Custom Changes
+
+on:
+  workflow_dispatch:  # 수동 실행 옵션
+
+jobs:
+  update-and-cherry-pick:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v2
+      with:
+        fetch-depth: 0  # 전체 히스토리를 가져옵니다
+
+    - name: Set up Git
+      run: |
+        git config user.name github-actions
+        git config user.email github-actions@github.com
+
+    - name: Update from upstream
+      run: |
+        git remote add upstream https://github.com/leudz/shipyard.git
+        git fetch upstream
+        git checkout 0.7+patched
+        git reset --hard upstream/0.7
+        git push origin main --force
+
+    - name: Cherry-pick custom changes
+      run: |
+        # 커스텀 수정사항이 있는 커밋의 해시를 지정합니다
+        CUSTOM_COMMIT="055d08ae634394971a9b69a0af23d8ae4394a40a"
+        git cherry-pick $CUSTOM_COMMIT || {
+          echo "Cherry-pick failed. Manual intervention required."
+          git cherry-pick --abort
+          exit 1
+        }
+
+    - name: Push changes
+      run: |
+        git push origin main
+
+    - name: Create Pull Request if cherry-pick fails
+      if: failure()
+      uses: peter-evans/create-pull-request@v3
+      with:
+        title: 'Cherry-pick failed'
+        body: 'Automatic cherry-pick of custom changes failed. Manual intervention required.'
+        branch: cherry-pick-failed
