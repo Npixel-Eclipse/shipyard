@@ -2,6 +2,7 @@ mod add_component;
 mod bulk_add_entity;
 mod delete;
 mod drain;
+mod memory_usage;
 mod remove;
 mod sparse_array;
 mod window;
@@ -10,6 +11,7 @@ pub use add_component::TupleAddComponent;
 pub use bulk_add_entity::BulkAddEntity;
 pub use delete::TupleDelete;
 pub use drain::SparseSetDrain;
+pub use memory_usage::{SparseSetMemory, SparseSetMemoryUsage};
 pub use remove::TupleRemove;
 pub use sparse_array::SparseArray;
 
@@ -659,16 +661,17 @@ impl<T: Component> SparseSet<T> {
         }
 
         self.insertion_data.clear();
+        self.modification_data.clear();
 
         let is_tracking_deletion = self.is_tracking_deletion();
 
-        let iter = self
-            .dense
-            .drain(..)
-            .zip(self.data.drain(..))
-            .map(|(entity, component)| (entity, current, component));
+        let dense = self.dense.drain(..);
+        let data = self.data.drain(..);
 
         if is_tracking_deletion {
+            let iter = dense
+                .zip(data)
+                .map(|(entity, component)| (entity, current, component));
             self.deletion_data.extend(iter);
         }
     }
@@ -686,6 +689,9 @@ impl<T: Component> SparseSet<T> {
                 *self.sparse.get_mut_unchecked(*id) = EntityId::dead();
             }
         }
+
+        self.insertion_data.clear();
+        self.modification_data.clear();
 
         let dense_ptr = self.dense.as_ptr();
         let dense_len = self.dense.len();
@@ -741,37 +747,6 @@ impl<T: Component> SparseSet<T> {
                 removed += 1;
             }
         }
-    }
-}
-
-impl<T: Component> SparseSet<T> {
-    fn private_memory_usage(&self) -> StorageMemoryUsage {
-        StorageMemoryUsage {
-            storage_name: type_name::<Self>().into(),
-            allocated_memory_bytes: self.allocated_memory_bytes(),
-            used_memory_bytes: self.used_memory_bytes(),
-            component_count: self.len(),
-        }
-    }
-    fn allocated_memory_bytes(&self) -> usize {
-        self.sparse.reserved_memory()
-            + (self.dense.capacity() * size_of::<EntityId>())
-            + (self.data.capacity() * size_of::<T>())
-            + (self.insertion_data.capacity() * size_of::<TrackingTimestamp>())
-            + (self.modification_data.capacity() * size_of::<TrackingTimestamp>())
-            + (self.deletion_data.capacity() * size_of::<(EntityId, TrackingTimestamp, T)>())
-            + (self.removal_data.capacity() * size_of::<(EntityId, TrackingTimestamp)>())
-            + size_of::<Self>()
-    }
-    fn used_memory_bytes(&self) -> usize {
-        self.sparse.used_memory()
-            + (self.dense.len() * size_of::<EntityId>())
-            + (self.data.len() * size_of::<T>())
-            + (self.insertion_data.len() * size_of::<TrackingTimestamp>())
-            + (self.modification_data.len() * size_of::<TrackingTimestamp>())
-            + (self.deletion_data.len() * size_of::<(EntityId, TrackingTimestamp, T)>())
-            + (self.removal_data.len() * size_of::<(EntityId, TrackingTimestamp)>())
-            + size_of::<Self>()
     }
 }
 
@@ -1215,8 +1190,32 @@ mod tests {
     }
 
     #[test]
+    fn clear() {
+        let mut sparse_set = SparseSet::new();
+        sparse_set.track_all();
+
+        sparse_set
+            .insert(EntityId::new(0), I32(0), TrackingTimestamp::new(0))
+            .assert_inserted();
+        sparse_set
+            .insert(EntityId::new(1), I32(1), TrackingTimestamp::new(0))
+            .assert_inserted();
+
+        sparse_set.private_clear(TrackingTimestamp::new(0));
+
+        assert_eq!(sparse_set.len(), 0);
+        assert_eq!(sparse_set.private_get(EntityId::new(0)), None);
+        assert_eq!(sparse_set.private_get(EntityId::new(1)), None);
+        assert_eq!(sparse_set.insertion_data.len(), 0);
+        assert_eq!(sparse_set.modification_data.len(), 0);
+        assert_eq!(sparse_set.deletion_data.len(), 2);
+        assert_eq!(sparse_set.removal_data.len(), 0);
+    }
+
+    #[test]
     fn drain() {
         let mut sparse_set = SparseSet::new();
+        sparse_set.track_all();
 
         sparse_set
             .insert(EntityId::new(0), I32(0), TrackingTimestamp::new(0))
@@ -1235,6 +1234,11 @@ mod tests {
 
         assert_eq!(sparse_set.len(), 0);
         assert_eq!(sparse_set.private_get(EntityId::new(0)), None);
+        assert_eq!(sparse_set.private_get(EntityId::new(1)), None);
+        assert_eq!(sparse_set.insertion_data.len(), 0);
+        assert_eq!(sparse_set.modification_data.len(), 0);
+        assert_eq!(sparse_set.deletion_data.len(), 0);
+        assert_eq!(sparse_set.removal_data.len(), 2);
     }
 
     #[test]
@@ -1376,65 +1380,5 @@ mod tests {
 
         assert_eq!(sparse_set.insertion_data.len(), 1);
         assert_eq!(sparse_set.modification_data.len(), 1);
-    }
-
-    /// Makes sure the `memory_usage` method is up-to-date with the current `SparseSet` data.
-    #[test]
-    fn memory_usage() {
-        let mut sparse_set = SparseSet::new();
-        sparse_set.track_all();
-
-        sparse_set
-            .insert(
-                EntityId::new_from_parts(0, 0),
-                I32(0),
-                TrackingTimestamp::new(0),
-            )
-            .assert_inserted();
-        sparse_set.delete(
-            EntityId::new_from_index_and_gen(0, 0),
-            TrackingTimestamp::new(0),
-        );
-
-        sparse_set
-            .insert(
-                EntityId::new_from_parts(0, 0),
-                I32(1),
-                TrackingTimestamp::new(0),
-            )
-            .assert_inserted();
-        sparse_set.dyn_remove(
-            EntityId::new_from_index_and_gen(0, 0),
-            TrackingTimestamp::new(0),
-        );
-
-        sparse_set
-            .insert(
-                EntityId::new_from_parts(0, 0),
-                I32(2),
-                TrackingTimestamp::new(0),
-            )
-            .assert_inserted();
-
-        let expected_sparse_memory = sparse_set.sparse.used_memory();
-        let expected_dense_memory = 1 * size_of::<EntityId>();
-        let expected_data_memory = 1 * size_of::<I32>();
-        let expected_insertion_tracking_memory = 1 * size_of::<TrackingTimestamp>();
-        let expected_modification_tracking_memory = 1 * size_of::<TrackingTimestamp>();
-        let expected_deletion_tracking_memory = 1 * size_of::<(EntityId, TrackingTimestamp, I32)>();
-        let expected_removal_tracking_memory = 1 * size_of::<(EntityId, TrackingTimestamp)>();
-        let expected_self_memory = size_of::<SparseSet<I32>>();
-        let expected_total_memory = expected_sparse_memory
-            + expected_dense_memory
-            + expected_data_memory
-            + expected_insertion_tracking_memory
-            + expected_modification_tracking_memory
-            + expected_deletion_tracking_memory
-            + expected_removal_tracking_memory
-            + expected_self_memory;
-
-        let memory_usage = sparse_set.private_memory_usage();
-
-        assert_eq!(memory_usage.used_memory_bytes, expected_total_memory);
     }
 }
