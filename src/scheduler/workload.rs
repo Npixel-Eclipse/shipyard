@@ -23,8 +23,10 @@ use alloc::vec::Vec;
 use core::any::type_name;
 #[cfg(not(feature = "std"))]
 use core::any::Any;
+use std::collections::{BTreeMap, BTreeSet};
 #[cfg(feature = "std")]
 use std::error::Error;
+use std::println;
 
 /// Used to create a [`Workload`].
 ///
@@ -476,6 +478,236 @@ impl Workload {
 
         Ok(())
     }
+
+    #[allow(missing_docs)]
+    pub fn print_cycle(&self) {
+        self.check_cycle(true);
+        self.check_cycle(false);
+    }
+
+    fn check_cycle(&self, opposite: bool) {
+        let mut after_to_tag = BTreeMap::new();
+        let mut after_to_tag_systems = BTreeMap::new();
+        let mut after_to_before = BTreeMap::new();
+        let mut after_to_before_systems = BTreeMap::new();
+        let mut tag_group = BTreeMap::new();
+        let mut tag_group_systems = BTreeMap::new();
+
+        for system in &self.systems {
+            let system_name = Label::as_any(&system.display_name).downcast_ref::<&str>().unwrap();
+            let system_name = system_name.split("::").last().unwrap();
+
+            for tag in &system.tags {
+                let tag = Label::as_any(tag).downcast_ref::<&str>();
+                if tag.is_none() {
+                    continue;
+                }
+                let tag = *tag.unwrap();
+
+                for other_tag in &system.tags {
+                    let other_tag = Label::as_any(other_tag).downcast_ref::<&str>();
+                    if other_tag.is_none() {
+                        continue;
+                    }
+                    let other_tag = *other_tag.unwrap();
+
+                    if tag == other_tag {
+                        continue;
+                    }
+
+                    tag_group
+                        .entry(tag)
+                        .or_insert_with(BTreeSet::new)
+                        .insert(other_tag);
+
+                    tag_group_systems
+                        .entry((tag, other_tag))
+                        .or_insert_with(BTreeSet::new)
+                        .insert(system_name);
+                }
+
+                for after in if opposite { &system.before_all } else { &system.after_all } {
+                    let after = Label::as_any(after).downcast_ref::<&str>();
+                    if after.is_none() {
+                        continue;
+                    }
+                    let after = *after.unwrap();
+
+                    after_to_tag
+                        .entry(after)
+                        .or_insert_with(BTreeSet::new)
+                        .insert(tag);
+
+                    after_to_tag_systems
+                        .entry((after, tag))
+                        .or_insert_with(BTreeSet::new)
+                        .insert(system_name);
+                }
+            }
+
+            for after in if opposite { &system.before_all } else { &system.after_all } {
+                let after = Label::as_any(after).downcast_ref::<&str>();
+                if after.is_none() {
+                    continue;
+                }
+                let after = *after.unwrap();
+
+                for before in if opposite { &system.after_all } else { &system.before_all } {
+                    let before = Label::as_any(before).downcast_ref::<&str>();
+                    if before.is_none() {
+                        continue;
+                    }
+                    let before = *before.unwrap();
+
+                    after_to_before
+                        .entry(after)
+                        .or_insert_with(BTreeSet::new)
+                        .insert(before);
+
+                    after_to_before_systems
+                        .entry((after, before))
+                        .or_insert_with(BTreeSet::new)
+                        .insert(system_name);
+                }
+            }
+        }
+
+        let mut visited = BTreeSet::new();
+        for (after, _tags) in &after_to_tag {
+            visited = find_cycle(
+                after,
+                after,
+                &after_to_tag,
+                &after_to_tag_systems,
+                &after_to_before,
+                &after_to_before_systems,
+                &tag_group,
+                &tag_group_systems,
+                "",
+                &visited,
+                if opposite { "before_all" } else { "after_all" },
+                if opposite { '<' } else { '>' },
+            );
+        }
+
+        let mut visited = BTreeSet::new();
+        for (tag, other_tags) in tag_group {
+            for other_tag in other_tags {
+                if !(visited.insert((tag, other_tag)) && visited.insert((other_tag, tag))) {
+                    continue;
+                }
+                let after_to_before = after_to_before.get(tag);
+                if after_to_before.is_none() {
+                    continue;
+                }
+                let after_to_before = after_to_before.unwrap();
+                if !after_to_before.contains(other_tag) {
+                    continue;
+                }
+
+                let systems = tag_group_systems.get(&(tag, other_tag)).unwrap();
+                let log = format!("\n  {tag} == {other_tag} in {systems:?}");
+                let before_systems = after_to_before_systems.get(&(tag, other_tag)).unwrap();
+                let log = if opposite {
+                    format!("{log}\n  {other_tag} => {tag} in {before_systems:?}")
+                } else {
+                    format!("{log}\n  {tag} => {other_tag} in {before_systems:?}")
+                };
+                println!(
+                    "circular tag({}):{log}",
+                    log.bytes().filter(|&b| b == b'\n').count(),
+                );
+            }
+        }
+
+        fn find_cycle<'a>(
+            start: &'a str,
+            current: &'a str,
+            after_to_tag: &BTreeMap<&'a str, BTreeSet<&'a str>>,
+            after_to_tag_systems: &BTreeMap<(&'a str, &'a str), BTreeSet<&'a str>>,
+            after_to_before: &BTreeMap<&'a str, BTreeSet<&'a str>>,
+            after_to_before_systems: &BTreeMap<(&'a str, &'a str), BTreeSet<&'a str>>,
+            tag_group: &BTreeMap<&'a str, BTreeSet<&'a str>>,
+            tag_group_systems: &BTreeMap<(&'a str, &'a str), BTreeSet<&'a str>>,
+            log: &'a str,
+            visited: &BTreeSet<&'a str>,
+            dependency_name: &str,
+            direction: char,
+        ) -> BTreeSet<&'a str> {
+            let nexts = after_to_tag.get(current);
+            if nexts.is_none() {
+                return visited.clone();
+            }
+
+            let mut visited = visited.clone();
+            if !visited.insert(current) {
+                return visited;
+            }
+
+            for &next in nexts.unwrap() {
+                let system = after_to_tag_systems.get(&(current, next));
+                if system.is_none() {
+                    continue;
+                }
+                let system = system.unwrap();
+                let log = if direction == '>' {
+                    format!("{log}\n  {current} -> {next} in {system:?}")
+                } else {
+                    format!("{log}\n  {next} -> {current} in {system:?}")
+                };
+                if let Some(befores) = after_to_before.get(next) {
+                    for before in befores {
+                        if let Some(other_tags) = tag_group.get(before) {
+                            for &other_tag in other_tags {
+                                if start == other_tag {
+                                    let log = format!(
+                                        "\n  {} == {} in {:?}{log}",
+                                        start,
+                                        before,
+                                        tag_group_systems.get(&(start, before)).unwrap()
+                                    );
+                                    let before_systems = after_to_before_systems.get(&(next, before)).unwrap();
+                                    let log = if direction == '>' {
+                                        format!("{log}\n  {next} => {before} in {before_systems:?}")
+                                    } else {
+                                        format!("{log}\n  {before} => {next} in {before_systems:?}")
+                                    };
+                                    println!(
+                                        "circular tag({}):{log}",
+                                        log.bytes().filter(|&b| b == b'\n').count(),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+                if start == next {
+                    println!(
+                        "circular {dependency_name}({}):{log}",
+                        log.bytes().filter(|&b| b == b'\n').count(),
+                    );
+                    continue;
+                }
+                find_cycle(
+                    start,
+                    next,
+                    after_to_tag,
+                    after_to_tag_systems,
+                    after_to_before,
+                    after_to_before_systems,
+                    tag_group,
+                    tag_group_systems,
+                    &log,
+                    &visited,
+                    dependency_name,
+                    direction,
+                );
+            }
+
+            return visited;
+        }
+    }
+
     /// Returns the first [`Unique`] storage borrowed by this workload that is not present in `world`.\
     /// If the workload contains nested workloads they have to be present in the `World`.
     ///
