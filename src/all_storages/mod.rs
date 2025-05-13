@@ -13,7 +13,8 @@ use crate::entities::Entities;
 use crate::entity_id::EntityId;
 use crate::get_component::GetComponent;
 use crate::get_unique::GetUnique;
-use crate::iter_component::{IntoIterRef, IterComponent};
+use crate::iter::{ShiperatorCaptain, ShiperatorSailor};
+use crate::iter_component::{into_iter, IntoIterRef, IterComponent};
 use crate::memory_usage::AllStoragesMemoryUsage;
 use crate::public_transport::RwLock;
 use crate::public_transport::ShipyardRwLock;
@@ -398,7 +399,7 @@ impl AllStorages {
     /// ### Example
     ///
     /// ```
-    /// use shipyard::{AllStoragesViewMut, Component, SparseSet, World};
+    /// use shipyard::{AllStoragesViewMut, Component, sparse_set::SparseSet, World};
     ///
     /// #[derive(Component)]
     /// struct U32(u32);
@@ -982,7 +983,7 @@ let i = all_storages.run(sys1);
     /// ### Example
     ///
     /// ```
-    /// use shipyard::{AllStoragesViewMut, Component, SparseSet, World};
+    /// use shipyard::{AllStoragesViewMut, Component, sparse_set::SparseSet, World};
     ///
     /// #[derive(Component)]
     /// struct U32(u32);
@@ -1407,15 +1408,13 @@ for (i, j) in &mut iter {
     )]
     #[inline]
     #[track_caller]
-    pub fn iter<T: IterComponent>(&self) -> IntoIterRef<'_, T> {
+    pub fn iter<'a, T: IterComponent>(&'a self) -> IntoIterRef<'a, T>
+    where
+        <T as IterComponent>::Shiperator<'a>: ShiperatorCaptain + ShiperatorSailor,
+    {
         let current = self.get_current();
 
-        IntoIterRef {
-            all_storages: self,
-            all_borrow: None,
-            current,
-            phantom: PhantomData,
-        }
+        into_iter(self, None, current).unwrap()
     }
 
     /// Sets the on entity deletion callback.

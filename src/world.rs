@@ -12,13 +12,13 @@ use crate::entity_id::EntityId;
 use crate::error;
 use crate::get_component::GetComponent;
 use crate::get_unique::GetUnique;
-use crate::info::WorkloadsInfo;
-use crate::iter_component::{IntoIterRef, IterComponent};
+use crate::iter::{ShiperatorCaptain, ShiperatorSailor};
+use crate::iter_component::{into_iter, IntoIterRef, IterComponent};
 use crate::memory_usage::WorldMemoryUsage;
 use crate::r#mut::Mut;
 use crate::reserve::BulkEntityIter;
-use crate::scheduler::Label;
-use crate::scheduler::{AsLabel, Batches, Scheduler};
+use crate::scheduler::info::WorkloadsInfo;
+use crate::scheduler::{AsLabel, Batches, Label, Scheduler};
 use crate::sparse_set::{BulkAddEntity, TupleAddComponent, TupleDelete, TupleRemove};
 use crate::storage::{Storage, StorageId};
 use crate::system::System;
@@ -1005,7 +1005,7 @@ impl World {
     /// ### Example
     ///
     /// ```
-    /// use shipyard::{Component, SparseSet, World};
+    /// use shipyard::{Component, sparse_set::SparseSet, World};
     ///
     /// #[derive(Component)]
     /// struct U32(u32);
@@ -1038,7 +1038,7 @@ impl World {
     /// ### Example
     ///
     /// ```
-    /// use shipyard::{Component, SparseSet, World};
+    /// use shipyard::{Component, sparse_set::SparseSet, World};
     ///
     /// #[derive(Component)]
     /// struct U32(u32);
@@ -1387,7 +1387,10 @@ for (i, j) in &mut iter {
     )]
     #[inline]
     #[track_caller]
-    pub fn iter<T: IterComponent>(&self) -> IntoIterRef<'_, T> {
+    pub fn iter<'a, T: IterComponent>(&'a self) -> IntoIterRef<'a, T>
+    where
+        <T as IterComponent>::Shiperator<'a>: ShiperatorCaptain + ShiperatorSailor,
+    {
         let (all_storages, all_borrow) = unsafe {
             ARef::destructure(
                 self.all_storages
@@ -1399,12 +1402,7 @@ for (i, j) in &mut iter {
 
         let current = self.get_current();
 
-        IntoIterRef {
-            all_storages,
-            all_borrow: Some(all_borrow),
-            current,
-            phantom: core::marker::PhantomData,
-        }
+        into_iter(all_storages, Some(all_borrow), current).unwrap()
     }
 
     /// Sets the on entity deletion callback.

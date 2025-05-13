@@ -10,7 +10,7 @@ If you have any question or want to follow the development more closely <sub>[![
 [![Documentation](https://docs.rs/shipyard/badge.svg)](https://docs.rs/shipyard)
 [![LICENSE](https://img.shields.io/crates/l/shipyard)](LICENSE-APACHE)
 
-### [Guide Master](https://leudz.github.io/shipyard/guide/master) | [Guide 0.7](https://leudz.github.io/shipyard/guide/0.7) | [Demo](https://leudz.github.io/shipyard/bunny_demo) | [Visualizer](https://leudz.github.io/shipyard/visualizer)
+### [Guide Master](https://leudz.github.io/shipyard/guide/master) | [Guide 0.8](https://leudz.github.io/shipyard/guide/0.8) | [Demo](https://leudz.github.io/shipyard/bunny_demo) | [Visualizer](https://leudz.github.io/shipyard/visualizer)
 
 </div>
 
@@ -82,6 +82,7 @@ I initially wanted to make an ECS to learn how it works. After a failed attempt 
 ## Cargo Features
 
 - **parallel** _(default)_ &mdash; enables workload threading and add parallel iterators
+- **extended_tuple** &mdash; extends implementations from the default 10 to 32 tuple size at the cost of 4X build time
 - **proc** _(default)_ &mdash; re-exports macros from `shipyard_proc`, mainly to derive `Component`
 - **serde1** &mdash; adds (de)serialization support with [serde](https://github.com/serde-rs/serde)
 - **std** _(default)_ &mdash; lets Shipyard use the standard library

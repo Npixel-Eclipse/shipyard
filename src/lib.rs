@@ -5,6 +5,7 @@
 //! ## Features
 //!
 //! - **parallel** *(default)* &mdash; enables workload threading and add parallel iterators
+//! - **extended_tuple** &mdash; extends implementations from the default 10 to 32 tuple size at the cost of 4X build time
 //! - **proc** *(default)* &mdash; re-exports macros from `shipyard_proc`, mainly to derive `Component`
 //! - **serde1** &mdash; adds (de)serialization support with [serde](https://github.com/serde-rs/serde)
 //! - **std** *(default)* &mdash; lets Shipyard use the standard library
@@ -27,6 +28,8 @@
 #![warn(clippy::maybe_infinite_iter)]
 #![allow(clippy::uninlined_format_args)]
 #![allow(clippy::needless_lifetimes)]
+// The question mark operator can damage performance
+#![allow(clippy::question_mark)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![warn(missing_docs)]
 #![no_std]
@@ -39,9 +42,11 @@ extern crate alloc;
 mod add_component;
 mod add_distinct_component;
 mod add_entity;
-mod all_storages;
-mod atomic_refcell;
-/// Allows access to helper types needed to implement `Borrow`.
+#[allow(missing_docs)]
+pub mod all_storages;
+/// Inner lock similar to `RwLock`.
+pub mod atomic_refcell;
+/// Allows access to helper types needed to implement [`Borrow`](borrow::Borrow).
 pub mod borrow;
 mod component;
 mod contains;
@@ -50,30 +55,43 @@ mod entities;
 mod entity_id;
 pub mod error;
 mod get;
-mod get_component;
-mod get_unique;
+/// Trait bound for [`AllStorages::get`] and [`World::get`].
+pub mod get_component;
+/// Trait bound for [`AllStorages::get_unique`] and [`World::get_unique`].
+pub mod get_unique;
+#[allow(clippy::empty_docs)]
+///
+// We can't allow(missing_docs) without allowing it for everything inside
 pub mod iter;
-mod iter_component;
+#[allow(missing_docs)]
+pub mod iter_component;
 /// Module describing internal memory usage.
 pub mod memory_usage;
 mod r#mut;
 mod not;
+mod optional;
 mod or;
 mod public_transport;
 mod remove;
-mod reserve;
-mod scheduler;
+#[allow(missing_docs)]
+pub mod reserve;
+#[allow(missing_docs)]
+pub mod scheduler;
 mod seal;
-mod sparse_set;
+/// Default component storage.
+pub mod sparse_set;
 mod storage;
-mod system;
+#[allow(missing_docs)]
+pub mod system;
 /// Module related to storage tracking, like insertion or modification.
 pub mod track;
-mod tracking;
+#[allow(missing_docs)]
+pub mod tracking;
 mod type_id;
 mod unique;
 mod views;
-mod world;
+#[allow(missing_docs)]
+pub mod world;
 
 #[cfg(feature = "thread_local")]
 #[cfg_attr(docsrs, doc(cfg(feature = "thread_local")))]
@@ -87,54 +105,39 @@ pub use crate::borrow::NonSync;
 pub use add_component::AddComponent;
 pub use add_distinct_component::AddDistinctComponent;
 pub use add_entity::AddEntity;
-pub use all_storages::{
-    AllStorages, CustomStorageAccess, LockPresent, MissingLock, MissingThreadId, ThreadIdPresent,
-    TupleDeleteAny, TupleRetainStorage,
-};
-pub use atomic_refcell::{ARef, ARefMut};
-#[doc(hidden)]
-pub use atomic_refcell::{ExclusiveBorrow, SharedBorrow};
 #[doc(inline)]
-pub use borrow::{Borrow, BorrowInfo, Mutability, WorldBorrow};
+pub use all_storages::AllStorages;
 pub use component::{Component, Unique};
 pub use contains::Contains;
 pub use delete::Delete;
 pub use entities::Entities;
 pub use entity_id::EntityId;
 pub use get::Get;
-pub use get_component::{GetComponent, Ref, RefMut};
-pub use get_unique::GetUnique;
-pub use iter::{IntoIter, IntoWithId};
-pub use iter_component::{IntoIterRef, IterComponent, IterRef};
+#[doc(inline)]
+pub use iter::IntoIter;
 pub use not::Not;
+pub use optional::Optional;
 pub use or::{OneOfTwo, Or};
 pub use r#mut::Mut;
 pub use remove::Remove;
-pub use reserve::{BulkEntityIter, BulkReserve};
+#[doc(inline)]
 pub use scheduler::{
-    info, AsLabel, IntoWorkload, IntoWorkloadSystem, IntoWorkloadTrySystem, Label,
-    ScheduledWorkload, SystemModificator, Workload, WorkloadModificator, WorkloadSystem,
+    IntoWorkload, IntoWorkloadSystem, IntoWorkloadTrySystem, SystemModificator, Workload,
+    WorkloadModificator,
 };
 #[cfg(feature = "proc")]
 pub use shipyard_proc::{Borrow, BorrowInfo, Component, IntoIter, Label, Unique, WorldBorrow};
-pub use sparse_set::{
-    BulkAddEntity, SparseArray, SparseSet, SparseSetDrain, TupleAddComponent, TupleDelete,
-    TupleRemove,
-};
 pub use storage::{Storage, StorageId};
-#[doc(hidden)]
-pub use system::{AllSystem, Nothing, System};
-pub use tracking::{
-    DeletionTracking, Inserted, InsertedOrModified, InsertionTracking, ModificationTracking,
-    Modified, RemovalOrDeletionTracking, RemovalTracking, Tracking, TrackingTimestamp, TupleTrack,
-};
+#[doc(inline)]
+pub use tracking::{Inserted, InsertedOrModified, Modified};
 pub use unique::UniqueStorage;
 pub use views::{
     AllStoragesView, AllStoragesViewMut, EntitiesView, EntitiesViewMut, UniqueOrDefaultView,
     UniqueOrDefaultViewMut, UniqueOrInitView, UniqueOrInitViewMut, UniqueView, UniqueViewMut, View,
     ViewMut,
 };
-pub use world::{World, WorldBuilder};
+#[doc(inline)]
+pub use world::World;
 
 #[cfg(not(feature = "std"))]
 type ShipHashMap<K, V> =
@@ -143,10 +146,12 @@ type ShipHashMap<K, V> =
 type ShipHashMap<K, V> = hashbrown::HashMap<K, V>;
 
 #[cfg(not(feature = "std"))]
-type ShipHashSet<V> =
+#[doc(hidden)]
+pub type ShipHashSet<V> =
     hashbrown::HashSet<V, core::hash::BuildHasherDefault<siphasher::sip::SipHasher>>;
 #[cfg(feature = "std")]
-type ShipHashSet<V> = hashbrown::HashSet<V>;
+#[doc(hidden)]
+pub type ShipHashSet<V> = hashbrown::HashSet<V>;
 
 #[cfg(feature = "std")]
 fn std_thread_id_generator() -> u64 {
