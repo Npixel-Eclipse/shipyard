@@ -312,4 +312,6 @@ into_workload![
     (ViewZ, Z, Rz, 25) (ViewAA, AA, Raa, 26) (ViewBB, BB, Rbb, 27) (ViewCC, CC, Rcc, 28) (ViewDD, DD, Rdd, 29)
     (ViewEE, EE, Ree, 30) (ViewFF, FF, Rff, 31) (ViewGG, GG, Rgg, 32) (ViewHH, HH, Rhh, 33) (ViewII, II, Rii, 34)
     (ViewJJ, JJ, Rjj, 35) (ViewKK, KK, Rkk, 36) (ViewLL, LL, Rll, 37) (ViewMM, MM, Rmm, 38) (ViewNN, NN, Rnn, 39)
+    (ViewOO, OO, Roo, 40) (ViewPP, PP, Rpp, 41) (ViewQQ, QQ, Rqq, 42) (ViewRR, RR, Rrr, 43) (ViewSS, SS, Rss, 44)
+    (ViewTT, TT, Rtt, 45) (ViewUU, UU, Ruu, 46) (ViewVV, VV, Rvv, 47) (ViewWW, WW, Rww, 48) (ViewXX, XX, Rxx, 49)
 ];
