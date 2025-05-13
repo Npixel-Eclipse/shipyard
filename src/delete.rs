@@ -31,7 +31,7 @@ pub trait Delete {
 impl Delete for () {
     #[inline]
     fn delete(&mut self, _: EntityId) -> bool {
-        false
+        true
     }
 }
 
