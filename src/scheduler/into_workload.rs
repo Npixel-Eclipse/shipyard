@@ -304,8 +304,12 @@ into_workload![
 ];
 #[cfg(feature = "extended_tuple")]
 into_workload![
-    (ViewA, A, Ra, 0); (ViewB, B, Rb, 1) (ViewC, C, Rc, 2) (ViewD, D, Rd, 3) (ViewE, E, Re, 4) (ViewF, F, Rf, 5) (ViewG, G, Rg, 6) (ViewH, H, Rh, 7) (ViewI, I, Ri, 8) (ViewJ, J, Rj, 9)
-    (ViewK, K, Rk, 10) (ViewL, L, Rl, 11) (ViewM, M, Rm, 12) (ViewN, N, Rn, 13) (ViewO, O, Ro, 14) (ViewP, P, Rp, 15) (ViewQ, Q, Rq, 16) (ViewR, R, Rr, 17) (ViewS, S, Rs, 18) (ViewT, T, Rt, 19)
-    (ViewU, U, Ru, 20) (ViewV, V, Rv, 21) (ViewW, W, Rw, 22) (ViewX, X, Rx, 23) (ViewY, Y, Ry, 24) (ViewZ, Z, Rz, 25) (ViewAA, AA, Raa, 26) (ViewBB, BB, Rbb, 27) (ViewCC, CC, Rcc, 28) (ViewDD, DD, Rdd, 29)
-    (ViewEE, EE, Ree, 30) (ViewFF, FF, Rff, 31)
+    (ViewA, A, Ra, 0); (ViewB, B, Rb, 1) (ViewC, C, Rc, 2) (ViewD, D, Rd, 3) (ViewE, E, Re, 4)
+    (ViewF, F, Rf, 5) (ViewG, G, Rg, 6) (ViewH, H, Rh, 7) (ViewI, I, Ri, 8) (ViewJ, J, Rj, 9)
+    (ViewK, K, Rk, 10) (ViewL, L, Rl, 11) (ViewM, M, Rm, 12) (ViewN, N, Rn, 13) (ViewO, O, Ro, 14)
+    (ViewP, P, Rp, 15) (ViewQ, Q, Rq, 16) (ViewR, R, Rr, 17) (ViewS, S, Rs, 18) (ViewT, T, Rt, 19)
+    (ViewU, U, Ru, 20) (ViewV, V, Rv, 21) (ViewW, W, Rw, 22) (ViewX, X, Rx, 23) (ViewY, Y, Ry, 24)
+    (ViewZ, Z, Rz, 25) (ViewAA, AA, Raa, 26) (ViewBB, BB, Rbb, 27) (ViewCC, CC, Rcc, 28) (ViewDD, DD, Rdd, 29)
+    (ViewEE, EE, Ree, 30) (ViewFF, FF, Rff, 31) (ViewGG, GG, Rgg, 32) (ViewHH, HH, Rhh, 33) (ViewII, II, Rii, 34)
+    (ViewJJ, JJ, Rjj, 35) (ViewKK, KK, Rkk, 36) (ViewLL, LL, Rll, 37) (ViewMM, MM, Rmm, 38) (ViewNN, NN, Rnn, 39)
 ];
