@@ -23,10 +23,12 @@ use alloc::vec::Vec;
 use core::any::type_name;
 #[cfg(not(feature = "std"))]
 use core::any::Any;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 #[cfg(feature = "std")]
 use std::error::Error;
 use std::println;
+use rayon::iter::IntoParallelIterator;
+use rayon::iter::ParallelIterator;
 
 /// Used to create a [`Workload`].
 ///
@@ -1255,23 +1257,30 @@ fn dependencies(
     memoize: &mut ShipHashMap<usize, DedupedLabels>,
     new_requirements: &mut bool,
 ) -> Result<(), error::ImpossibleRequirements> {
-    let mut new = memoize.get(&index).unwrap().clone();
+    let initial_deps = memoize.get(&index).unwrap();
+    let mut new_deps = initial_deps.clone();
 
-    for system in memoize.get(&index).unwrap() {
-        for other_index in 0..collected_tags.len() {
-            if other_index != index && collected_tags[other_index].contains(system) {
-                let other = memoize.get(&other_index).unwrap().clone();
-
-                new.extend(other.iter());
+    let systems_to_check: HashSet<_> = initial_deps.iter().collect();
+    let indices_to_merge: HashSet<usize> = (0..collected_tags.len())
+        .into_par_iter()
+        .filter(|&other_index| {
+            if other_index == index {
+                return false;
             }
-        }
+            collected_tags[other_index].iter().any(|tag| systems_to_check.contains(tag))
+        })
+        .collect();
+
+    for other_index in indices_to_merge {
+        let other_deps = memoize.get(&other_index).unwrap();
+        new_deps.extend(other_deps.iter());
     }
 
-    if memoize.get(&index).unwrap().len() < new.len() {
+    if initial_deps.len() < new_deps.len() {
         *new_requirements = true;
     }
 
-    *memoize.get_mut(&index).unwrap() = new;
+    *memoize.get_mut(&index).unwrap() = new_deps;
 
     Ok(())
 }
