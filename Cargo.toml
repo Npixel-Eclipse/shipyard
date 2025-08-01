@@ -14,6 +14,7 @@ version = "0.8.0"
 members = ["bunny_demo", "shipyard_proc", "square_eater", "visualizer"]
 
 [dependencies]
+dashmap = { version = "6.1.0", optional = true }
 hashbrown = { version = "0.14.0", default-features = false, features = [
     "inline-more",
     "allocator-api2",
@@ -30,7 +31,7 @@ tracing = { version = "0.1.0", default-features = false, optional = true }
 [features]
 default = ["parallel", "proc", "std"]
 extended_tuple = []
-parallel = ["rayon", "shipyard_proc/parallel"]
+parallel = ["rayon", "dashmap", "shipyard_proc/parallel"]
 proc = ["shipyard_proc"]
 serde1 = ["serde", "hashbrown/serde"]
 std = ["hashbrown/ahash"]
