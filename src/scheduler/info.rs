@@ -188,27 +188,43 @@ impl WorkloadsInfo {
 }
 
 /// List of before/after requirements for a system or workload.
-/// The list dedups items.
-#[derive(Clone, Debug, Default)]
-pub struct DedupedLabels(Vec<Box<dyn Label>>);
+/// The list dedups items using a HashSet for O(1) lookups.
+#[derive(Clone, Debug)]
+pub struct DedupedLabels {
+    items: Vec<Box<dyn Label>>,
+    lookup: crate::ShipHashSet<String>, // Use string representation for fast lookup
+}
+
+impl Default for DedupedLabels {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl DedupedLabels {
     pub(crate) fn new() -> DedupedLabels {
-        DedupedLabels(Vec::new())
+        DedupedLabels {
+            items: Vec::new(),
+            lookup: crate::ShipHashSet::default(),
+        }
     }
 
     pub(crate) fn with_capacity(capacity: usize) -> DedupedLabels {
-        DedupedLabels(Vec::with_capacity(capacity))
+        DedupedLabels {
+            items: Vec::with_capacity(capacity),
+            lookup: crate::ShipHashSet::with_capacity(capacity),
+        }
     }
 
     /// Returns `true` if the `Label` was not already present.
     pub(crate) fn add<T>(&mut self, label: impl AsLabel<T>) -> bool {
         let label = label.as_label();
+        let label_str = format!("{:?}", label);
 
-        // Can't use binary search here as Label can't be ordered
-        if !self.0.contains(&label) {
-            self.0.push(label);
-
+        // O(1) lookup using HashSet
+        if !self.lookup.contains(&label_str) {
+            self.lookup.insert(label_str);
+            self.items.push(label);
             true
         } else {
             false
@@ -216,7 +232,7 @@ impl DedupedLabels {
     }
 
     pub(crate) fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        self.items.is_empty()
     }
 
     pub(crate) fn iter(&self) -> RequirementsIter<'_> {
@@ -224,23 +240,39 @@ impl DedupedLabels {
     }
 
     pub(crate) fn len(&self) -> usize {
-        self.0.len()
+        self.items.len()
     }
 
     pub(crate) fn clear(&mut self) {
-        self.0.clear();
+        self.items.clear();
+        self.lookup.clear();
     }
 
     pub(crate) fn to_vec(&self) -> Vec<Box<dyn Label>> {
-        self.0.clone()
+        self.items.clone()
     }
 
-    pub(crate) fn retain<F: FnMut(&Box<dyn Label>) -> bool>(&mut self, f: F) {
-        self.0.retain(f);
+    pub(crate) fn retain<F: FnMut(&Box<dyn Label>) -> bool>(&mut self, mut f: F) {
+        let mut i = 0;
+        while i < self.items.len() {
+            if f(&self.items[i]) {
+                i += 1;
+            } else {
+                let removed = self.items.remove(i);
+                let removed_str = format!("{:?}", removed);
+                self.lookup.remove(&removed_str);
+            }
+        }
     }
 
     pub(crate) fn to_string_vec(&self) -> Vec<String> {
-        self.0.iter().map(|label| format!("{:?}", label)).collect()
+        self.items.iter().map(|label| format!("{:?}", label)).collect()
+    }
+
+    /// Returns `true` if the `Label` is present in the collection.
+    pub(crate) fn contains<T>(&self, label: &impl AsLabel<T>) -> bool {
+        let label_str = format!("{:?}", label.as_label());
+        self.lookup.contains(&label_str)
     }
 }
 
@@ -250,7 +282,7 @@ impl<'a> IntoIterator for &'a DedupedLabels {
     type IntoIter = RequirementsIter<'a>;
 
     fn into_iter(self) -> Self::IntoIter {
-        RequirementsIter(self.0.iter())
+        RequirementsIter(self.items.iter())
     }
 }
 

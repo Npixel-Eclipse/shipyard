@@ -17,18 +17,21 @@ use crate::world::World;
 use crate::{error, ShipHashMap};
 use alloc::boxed::Box;
 use alloc::format;
+use alloc::string::String;
 // macro not module
 use alloc::vec;
 use alloc::vec::Vec;
 use core::any::type_name;
 #[cfg(not(feature = "std"))]
 use core::any::Any;
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 #[cfg(feature = "std")]
 use std::error::Error;
 use std::println;
-use rayon::iter::IntoParallelIterator;
-use rayon::iter::ParallelIterator;
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
+#[cfg(feature = "parallel")]
+use dashmap::DashMap;
 
 /// Used to create a [`Workload`].
 ///
@@ -998,65 +1001,267 @@ fn create_workload(
         });
     }
 
+    // Parallel construction of tag_to_systems mapping using DashMap
+    #[cfg(feature = "parallel")]
+    let tag_to_systems: ShipHashMap<String, Vec<usize>> = {
+        let tag_map = DashMap::new();
+
+        // Collect all tag-index pairs first to minimize DashMap operations
+        let tag_index_pairs: Vec<_> = collected_tags
+            .par_iter()
+            .enumerate()
+            .flat_map(|(index, tags)| {
+                tags.par_iter().map(move |tag| (format!("{:?}", tag), index))
+            })
+            .collect();
+
+        // Group by tag and insert into DashMap
+        tag_index_pairs.into_par_iter().for_each(|(tag_str, index)| {
+            tag_map.entry(tag_str).or_insert_with(Vec::new).push(index);
+        });
+
+        // Convert DashMap to ShipHashMap
+        let mut result = ShipHashMap::with_hasher(BuildHasherDefault::default());
+        for entry in tag_map.into_iter() {
+            result.insert(entry.0, entry.1);
+        }
+        result
+    };
+
+    #[cfg(not(feature = "parallel"))]
+    let tag_to_systems: ShipHashMap<String, Vec<usize>> = {
+        let mut map = ShipHashMap::with_hasher(BuildHasherDefault::default());
+        for (index, tags) in collected_tags.iter().enumerate() {
+            for tag in tags {
+                let tag_str = format!("{:?}", tag);
+                map.entry(tag_str).or_default().push(index);
+            }
+        }
+        map
+    };
+
     let mut new_requirements = true;
+    let mut iteration_count = 0;
+    let mut previous_total_deps = 0;
+
     while new_requirements {
         new_requirements = false;
+        iteration_count += 1;
 
-        for index in 0..collected_systems.len() {
-            dependencies(
-                index,
-                &collected_tags,
-                &mut memoize_before,
-                &mut new_requirements,
-            )
-            .map_err(error::AddWorkload::ImpossibleRequirements)?;
+        // Track total dependencies for convergence detection
+        let current_total_deps: usize = memoize_before.values().map(|deps| deps.len()).sum::<usize>()
+            + memoize_after.values().map(|deps| deps.len()).sum::<usize>();
 
-            dependencies(
-                index,
-                &collected_tags,
-                &mut memoize_after,
-                &mut new_requirements,
-            )
-            .map_err(error::AddWorkload::ImpossibleRequirements)?;
+        // Early termination if no changes in dependency count
+        if current_total_deps == previous_total_deps && iteration_count > 1 {
+            break;
+        }
+        previous_total_deps = current_total_deps;
 
-            let tags = &collected_tags[index];
+        // Parallel processing of before dependencies
+        #[cfg(feature = "parallel")]
+        {
+            let results: Result<Vec<_>, _> = (0..collected_systems.len())
+                .into_par_iter()
+                .map(|index| {
+                    let initial_deps = memoize_before.get(&index).unwrap();
+                    let mut new_deps = initial_deps.clone();
+                    let mut local_new_req = false;
 
-            for (
-                other_index,
-                (
-                    _,
-                    WorkloadSystem {
-                        type_id: other_type_id,
-                        display_name,
-                        ..
-                    },
-                ),
-            ) in collected_systems.iter().enumerate()
-            {
-                if memoize_after
-                    .get(&other_index)
-                    .unwrap()
-                    .iter()
-                    .any(|requirement| tags.contains(requirement))
-                    && memoize_before.get_mut(&index).unwrap().add(SystemLabel {
-                        type_id: *other_type_id,
-                        name: display_name.clone(),
-                    })
-                {
+                    // Use tag mapping for O(1) lookups instead of O(n) iteration
+                    for dep_label in initial_deps.iter() {
+                        let dep_str = format!("{:?}", dep_label);
+                        if let Some(system_indices) = tag_to_systems.get(&dep_str) {
+                            for &other_index in system_indices {
+                                if other_index != index {
+                                    if let Some(other_deps) = memoize_before.get(&other_index) {
+                                        let old_len = new_deps.len();
+                                        new_deps.extend(other_deps.iter());
+                                        if new_deps.len() > old_len {
+                                            local_new_req = true;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    Ok((index, new_deps, local_new_req))
+                })
+                .collect();
+
+            for (index, new_deps, local_new_req) in results.map_err(error::AddWorkload::ImpossibleRequirements)? {
+                if local_new_req {
+                    *memoize_before.get_mut(&index).unwrap() = new_deps;
                     new_requirements = true;
                 }
+            }
+        }
 
-                if memoize_before
-                    .get(&other_index)
-                    .unwrap()
-                    .iter()
-                    .any(|requirement| tags.contains(requirement))
-                    && memoize_after.get_mut(&index).unwrap().add(SystemLabel {
+        #[cfg(not(feature = "parallel"))]
+        {
+            for index in 0..collected_systems.len() {
+                dependencies_optimized(
+                    index,
+                    &tag_to_systems,
+                    &mut memoize_before,
+                    &mut new_requirements,
+                )
+                    .map_err(error::AddWorkload::ImpossibleRequirements)?;
+            }
+        }
+
+        // Parallel processing of after dependencies
+        #[cfg(feature = "parallel")]
+        {
+            let results: Result<Vec<_>, _> = (0..collected_systems.len())
+                .into_par_iter()
+                .map(|index| {
+                    let initial_deps = memoize_after.get(&index).unwrap();
+                    let mut new_deps = initial_deps.clone();
+                    let mut local_new_req = false;
+
+                    // Use tag mapping for O(1) lookups instead of O(n) iteration
+                    for dep_label in initial_deps.iter() {
+                        let dep_str = format!("{:?}", dep_label);
+                        if let Some(system_indices) = tag_to_systems.get(&dep_str) {
+                            for &other_index in system_indices {
+                                if other_index != index {
+                                    if let Some(other_deps) = memoize_after.get(&other_index) {
+                                        let old_len = new_deps.len();
+                                        new_deps.extend(other_deps.iter());
+                                        if new_deps.len() > old_len {
+                                            local_new_req = true;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    Ok((index, new_deps, local_new_req))
+                })
+                .collect();
+
+            for (index, new_deps, local_new_req) in results.map_err(error::AddWorkload::ImpossibleRequirements)? {
+                if local_new_req {
+                    *memoize_after.get_mut(&index).unwrap() = new_deps;
+                    new_requirements = true;
+                }
+            }
+        }
+
+        #[cfg(not(feature = "parallel"))]
+        {
+            for index in 0..collected_systems.len() {
+                dependencies_optimized(
+                    index,
+                    &tag_to_systems,
+                    &mut memoize_after,
+                    &mut new_requirements,
+                )
+                    .map_err(error::AddWorkload::ImpossibleRequirements)?;
+            }
+        }
+
+        // Parallel cross-system dependency checking
+        #[cfg(feature = "parallel")]
+        {
+            let updates: Vec<_> = (0..collected_systems.len())
+                .into_par_iter()
+                .map(|index| {
+                    let tags = &collected_tags[index];
+                    let mut before_updates = Vec::new();
+                    let mut after_updates = Vec::new();
+
+                    for (other_index, (_, WorkloadSystem { type_id: other_type_id, display_name, .. }))
+                    in collected_systems.iter().enumerate()
+                    {
+                        let system_label = SystemLabel {
+                            type_id: *other_type_id,
+                            name: display_name.clone(),
+                        };
+
+                        // Check if other system's after requirements match current system's tags
+                        if memoize_after.get(&other_index).unwrap().iter()
+                            .any(|requirement| tags.contains(requirement))
+                        {
+                            if !memoize_before.get(&index).unwrap().contains(&system_label) {
+                                before_updates.push(system_label.clone());
+                            }
+                        }
+
+                        // Check if other system's before requirements match current system's tags
+                        if memoize_before.get(&other_index).unwrap().iter()
+                            .any(|requirement| tags.contains(requirement))
+                        {
+                            if !memoize_after.get(&index).unwrap().contains(&system_label) {
+                                after_updates.push(system_label);
+                            }
+                        }
+                    }
+
+                    (index, before_updates, after_updates)
+                })
+                .collect();
+
+            // Apply updates sequentially to avoid race conditions
+            for (index, before_updates, after_updates) in updates {
+                for update in before_updates {
+                    if memoize_before.get_mut(&index).unwrap().add(update) {
+                        new_requirements = true;
+                    }
+                }
+                for update in after_updates {
+                    if memoize_after.get_mut(&index).unwrap().add(update) {
+                        new_requirements = true;
+                    }
+                }
+            }
+        }
+
+        #[cfg(not(feature = "parallel"))]
+        {
+            for index in 0..collected_systems.len() {
+                let tags = &collected_tags[index];
+
+                for (
+                    other_index,
+                    (
+                        _,
+                        WorkloadSystem {
+                            type_id: other_type_id,
+                            display_name,
+                            ..
+                        },
+                    ),
+                ) in collected_systems.iter().enumerate()
+                {
+                    if memoize_after
+                        .get(&other_index)
+                        .unwrap()
+                        .iter()
+                        .any(|requirement| tags.contains(requirement))
+                        && memoize_before.get_mut(&index).unwrap().add(SystemLabel {
                         type_id: *other_type_id,
                         name: display_name.clone(),
                     })
-                {
-                    new_requirements = true;
+                    {
+                        new_requirements = true;
+                    }
+
+                    if memoize_before
+                        .get(&other_index)
+                        .unwrap()
+                        .iter()
+                        .any(|requirement| tags.contains(requirement))
+                        && memoize_after.get_mut(&index).unwrap().add(SystemLabel {
+                        type_id: *other_type_id,
+                        name: display_name.clone(),
+                    })
+                    {
+                        new_requirements = true;
+                    }
                 }
             }
         }
@@ -1250,30 +1455,27 @@ fn create_workload(
     Ok(workload_info)
 }
 
-#[allow(clippy::needless_range_loop)]
-fn dependencies(
+// Optimized version using tag mapping for faster lookups
+fn dependencies_optimized(
     index: usize,
-    collected_tags: &[Vec<Box<dyn Label>>],
+    tag_to_systems: &ShipHashMap<String, Vec<usize>>,
     memoize: &mut ShipHashMap<usize, DedupedLabels>,
     new_requirements: &mut bool,
 ) -> Result<(), error::ImpossibleRequirements> {
     let initial_deps = memoize.get(&index).unwrap();
     let mut new_deps = initial_deps.clone();
 
-    let systems_to_check: HashSet<_> = initial_deps.iter().collect();
-    let indices_to_merge: HashSet<usize> = (0..collected_tags.len())
-        .into_par_iter()
-        .filter(|&other_index| {
-            if other_index == index {
-                return false;
+    // Use tag mapping for O(1) lookups instead of O(n) iteration
+    for dep_label in initial_deps.iter() {
+        let dep_str = format!("{:?}", dep_label);
+        if let Some(system_indices) = tag_to_systems.get(&dep_str) {
+            for &other_index in system_indices {
+                if other_index != index {
+                    let other_deps = memoize.get(&other_index).unwrap();
+                    new_deps.extend(other_deps.iter());
+                }
             }
-            collected_tags[other_index].iter().any(|tag| systems_to_check.contains(tag))
-        })
-        .collect();
-
-    for other_index in indices_to_merge {
-        let other_deps = memoize.get(&other_index).unwrap();
-        new_deps.extend(other_deps.iter());
+        }
     }
 
     if initial_deps.len() < new_deps.len() {
