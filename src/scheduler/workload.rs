@@ -1021,7 +1021,7 @@ fn create_workload(
         });
 
         // Convert DashMap to ShipHashMap
-        let mut result = ShipHashMap::with_hasher(BuildHasherDefault::default());
+        let mut result = ShipHashMap::new();
         for entry in tag_map.into_iter() {
             result.insert(entry.0, entry.1);
         }
@@ -1030,7 +1030,7 @@ fn create_workload(
 
     #[cfg(not(feature = "parallel"))]
     let tag_to_systems: ShipHashMap<String, Vec<usize>> = {
-        let mut map = ShipHashMap::with_hasher(BuildHasherDefault::default());
+        let mut map = ShipHashMap::new();
         for (index, tags) in collected_tags.iter().enumerate() {
             for tag in tags {
                 let tag_str = format!("{:?}", tag);
