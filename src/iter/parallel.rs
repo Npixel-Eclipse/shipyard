@@ -13,7 +13,7 @@ impl<S: ShiperatorCaptain + ShiperatorSailor + Send + Clone>
         let remaining = self.end - self.start;
 
         let max_len = self.end - self.start + follow_up_len;
-        if max_len <= 1 {
+        if max_len <= 128 {
             return (self, None);
         }
 
