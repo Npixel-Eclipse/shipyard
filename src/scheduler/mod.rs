@@ -27,6 +27,7 @@ use crate::world::World;
 use crate::{error, ShipHashMap};
 use alloc::boxed::Box;
 use alloc::vec::Vec;
+use indexmap::IndexMap;
 
 /// List of indexes into both systems and system_names
 #[derive(Default)]
@@ -77,7 +78,7 @@ pub(crate) struct Scheduler {
     lookup_table: ShipHashMap<TypeId, usize>,
     /// workload name to list of "batches"
     pub(crate) workloads: ShipHashMap<Box<dyn Label>, Batches>,
-    pub(crate) workloads_info: ShipHashMap<Box<dyn Label>, WorkloadInfo>,
+    pub(crate) workloads_info: IndexMap<Box<dyn Label>, WorkloadInfo>,
     pub(crate) default: Box<dyn Label>,
 }
 
@@ -89,7 +90,7 @@ impl Default for Scheduler {
             system_generators: Vec::new(),
             lookup_table: ShipHashMap::new(),
             workloads: ShipHashMap::new(),
-            workloads_info: ShipHashMap::new(),
+            workloads_info: IndexMap::new(),
             default: Box::new(""),
         }
     }
