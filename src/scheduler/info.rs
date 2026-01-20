@@ -176,14 +176,17 @@ impl core::hash::Hash for TypeInfo {
 }
 
 /// Contains a list of workloads, their systems and which storages these systems borrow.
+///
+/// Uses [`IndexMap`] to preserve insertion order, ensuring consistent ordering
+/// when iterating over workloads.
 #[derive(Default, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde1", derive(serde::Serialize, serde::Deserialize))]
-pub struct WorkloadsInfo(pub ShipHashMap<String, WorkloadInfo>);
+pub struct WorkloadsInfo(pub indexmap::IndexMap<String, WorkloadInfo>);
 
 impl WorkloadsInfo {
     /// Creates an empty [`WorkloadsInfo`].
     pub fn new() -> WorkloadsInfo {
-        WorkloadsInfo(ShipHashMap::new())
+        WorkloadsInfo(indexmap::IndexMap::new())
     }
 }
 

@@ -8,7 +8,7 @@ license = "MIT OR Apache-2.0"
 name = "shipyard"
 readme = "README.md"
 repository = "https://github.com/leudz/shipyard"
-version = "0.9.0"
+version = "0.9.1"
 
 [workspace]
 members = ["shipyard_proc", "square_eater", "visualizer"]
@@ -20,6 +20,7 @@ hashbrown = { version = "0.15.5", default-features = false, features = [
     "inline-more",
     "allocator-api2",
 ] }
+indexmap = { version = "2.0", default-features = false }
 lock_api = "0.4.0"
 rayon = { version = "1.11.0", optional = true }
 serde = { version = "1.0.0", optional = true, default-features = false, features = [
@@ -33,8 +34,8 @@ default = ["parallel", "proc", "std"]
 extended_tuple = []
 parallel = ["rayon", "dashmap", "shipyard_proc/parallel"]
 proc = ["shipyard_proc"]
-serde1 = ["serde", "hashbrown/serde"]
-std = ["hashbrown/default-hasher"]
+serde1 = ["serde", "hashbrown/serde", "indexmap/serde"]
+std = ["hashbrown/default-hasher", "indexmap/std"]
 thread_local = []
 
 [dev-dependencies]
