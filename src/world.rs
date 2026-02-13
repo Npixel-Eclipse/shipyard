@@ -999,6 +999,26 @@ impl World {
     pub fn delete_entity(&mut self, entity: EntityId) -> bool {
         self.all_storages.get_mut().delete_entity(entity)
     }
+    /// Deletes multiple entities and all their components.
+    /// Returns the number of entities that were alive and deleted.
+    #[inline]
+    pub fn bulk_delete_entity(&mut self, entities: impl IntoIterator<Item = EntityId>) -> usize {
+        self.all_storages.get_mut().bulk_delete_entity(entities)
+    }
+
+    /// Deletes multiple entities and all their components in parallel.
+    /// Returns the number of entities that were alive and deleted.
+    #[inline]
+    #[cfg(all(feature = "parallel", not(feature = "thread_local")))]
+    pub fn par_bulk_delete_entity(
+        &mut self,
+        entities: impl IntoIterator<Item = EntityId>,
+    ) -> usize {
+        self.all_storages
+            .get_mut()
+            .par_bulk_delete_entity(entities)
+    }
+
     /// Deletes all components of an entity without deleting the entity.
     ///
     /// ### Example

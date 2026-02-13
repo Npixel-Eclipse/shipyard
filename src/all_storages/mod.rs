@@ -37,6 +37,7 @@ use crate::views::EntitiesViewMut;
 use crate::{error, ShipHashMap};
 use alloc::boxed::Box;
 use alloc::sync::Arc;
+use alloc::vec::Vec;
 use core::any::type_name;
 use core::sync::atomic::AtomicU64;
 use hashbrown::hash_map::Entry;
@@ -271,6 +272,45 @@ impl AllStorages {
             false
         }
     }
+    /// Deletes multiple entities and all their components.
+    /// Returns the number of entities that were alive and deleted.
+    ///
+    /// Uses [](AllStorages::bulk_strip) internally for batch component removal.
+    pub fn bulk_delete_entity(&mut self, entities: impl IntoIterator<Item = EntityId>) -> usize {
+        let mut ents = self.entities_mut().expect("entities_mut");
+
+        let alive: Vec<_> = entities
+            .into_iter()
+            .filter(|e| ents.delete_unchecked(*e))
+            .collect();
+
+        drop(ents);
+
+        let count = alive.len();
+        self.bulk_strip(alive);
+        count
+    }
+
+    /// Deletes multiple entities and all their components in parallel.
+    /// Returns the number of entities that were alive and deleted.
+    ///
+    /// Uses [](AllStorages::par_strip) internally for parallel batch component removal.
+    #[cfg(all(feature = "parallel", not(feature = "thread_local")))]
+    pub fn par_bulk_delete_entity(&mut self, entities: impl IntoIterator<Item = EntityId>) -> usize {
+        let mut ents = self.entities_mut().expect("entities_mut");
+
+        let alive: Vec<_> = entities
+            .into_iter()
+            .filter(|e| ents.delete_unchecked(*e))
+            .collect();
+
+        drop(ents);
+
+        let count = alive.len();
+        self.par_strip(alive);
+        count
+    }
+
     /// Deletes all components from an entity without deleting it.
     ///
     /// ### Example
