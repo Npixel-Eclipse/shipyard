@@ -35,6 +35,7 @@ use crate::tracking::{TrackingTimestamp, TupleTrack};
 use crate::unique::UniqueStorage;
 use crate::views::EntitiesViewMut;
 use crate::{error, ShipHashMap};
+use alloc::vec::Vec;
 use alloc::boxed::Box;
 use alloc::sync::Arc;
 use core::any::type_name;
@@ -409,6 +410,33 @@ impl AllStorages {
 
         let iter = entities.into_iter();
         inner(self, &iter, current);
+    }
+
+    /// Deletes multiple entities and all their components. Returns the number of entities deleted.
+    pub fn bulk_delete_entity(&mut self, entities: impl IntoIterator<Item = EntityId>) -> usize {
+        let mut ents = self.entities_mut().expect("entities_mut");
+        let alive: Vec<_> = entities
+            .into_iter()
+            .filter(|e| ents.delete_unchecked(*e))
+            .collect();
+        drop(ents);
+        let count = alive.len();
+        self.bulk_strip(alive);
+        count
+    }
+
+    /// Deletes multiple entities and all their components in parallel. Returns the number of entities deleted.
+    #[cfg(all(feature = "parallel", not(feature = "thread_local")))]
+    pub fn par_bulk_delete_entity(&mut self, entities: impl IntoIterator<Item = EntityId>) -> usize {
+        let mut ents = self.entities_mut().expect("entities_mut");
+        let alive: Vec<_> = entities
+            .into_iter()
+            .filter(|e| ents.delete_unchecked(*e))
+            .collect();
+        drop(ents);
+        let count = alive.len();
+        self.par_strip(alive);
+        count
     }
 
     /// Deletes all components of an entity except the ones passed in `S`.  
