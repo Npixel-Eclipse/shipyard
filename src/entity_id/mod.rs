@@ -1,7 +1,9 @@
 #[cfg(feature = "serde1")]
 mod serde;
 
+use core::fmt;
 use core::num::NonZeroU64;
+use core::str::FromStr;
 
 /// Entity handle.
 //
@@ -13,6 +15,9 @@ use core::num::NonZeroU64;
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(transparent)]
 pub struct EntityId(pub(super) NonZeroU64);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ParseEntityIdError;
 
 /// Allows [`EntityId`] to be stored in collections requiring [`Default`], like `TinyVec`.
 impl Default for EntityId {
@@ -156,13 +161,49 @@ impl EntityId {
     }
 }
 
-impl core::fmt::Debug for EntityId {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+impl fmt::Display for EntityId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if *self == EntityId::dead() {
+            f.write_str("dead")
+        } else {
+            write!(f, "{}.{}", self.index(), self.gen())
+        }
+    }
+}
+
+impl fmt::Debug for EntityId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if *self == EntityId::dead() {
             f.write_str("EId(dead)")
         } else {
             write!(f, "EId({}.{})", self.index(), self.gen())
         }
+    }
+}
+
+impl fmt::Display for ParseEntityIdError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("invalid entity id")
+    }
+}
+
+#[cfg(feature = "std")]
+impl std::error::Error for ParseEntityIdError {}
+
+impl FromStr for EntityId {
+    type Err = ParseEntityIdError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let s = s.trim();
+        if s == "dead" {
+            return Ok(EntityId::dead());
+        }
+
+        let (index, gen) = s.split_once('.').ok_or(ParseEntityIdError)?;
+        let index = index.parse::<u64>().map_err(|_| ParseEntityIdError)?;
+        let gen = gen.parse::<u16>().map_err(|_| ParseEntityIdError)?;
+
+        Ok(EntityId::new_from_index_and_gen(index, gen))
     }
 }
 
@@ -192,4 +233,33 @@ fn entity_id() {
     entity_id.set_index(554);
     assert_eq!(entity_id.index(), 554);
     assert_eq!(entity_id.gen(), 3);
+}
+
+#[test]
+fn entity_id_display() {
+    let entity_id = EntityId::new_from_index_and_gen(34420, 0);
+    assert_eq!(std::format!("{entity_id}"), "34420.0");
+    assert_eq!(std::format!("{}", EntityId::dead()), "dead");
+}
+
+#[test]
+fn entity_id_from_str() {
+    assert_eq!(
+        "34420.0".parse::<EntityId>(),
+        Ok(EntityId::new_from_index_and_gen(34420, 0))
+    );
+    assert_eq!("dead".parse::<EntityId>(), Ok(EntityId::dead()));
+}
+
+#[test]
+fn entity_id_round_trips_with_display() {
+    let entity_id = EntityId::new_from_index_and_gen(554, 3);
+    assert_eq!(std::format!("{entity_id}").parse::<EntityId>(), Ok(entity_id));
+}
+
+#[test]
+fn entity_id_from_str_rejects_invalid_input() {
+    assert_eq!("".parse::<EntityId>(), Err(ParseEntityIdError));
+    assert_eq!("34420".parse::<EntityId>(), Err(ParseEntityIdError));
+    assert_eq!("EId(34420.0)".parse::<EntityId>(), Err(ParseEntityIdError));
 }
