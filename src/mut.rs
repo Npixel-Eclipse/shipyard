@@ -10,9 +10,8 @@ pub struct Mut<'a, T: ?Sized> {
 /// Tracks component modification through explicit read/write methods.
 ///
 /// Unlike [`Mut`], this type does not implement `DerefMut`.
-/// Use [`AsRef::as_ref`] for reads, [`AsMut::as_mut`] or [`SafeMut::modify`]
-/// for tracked writes, and [`SafeMut::modify_without_tracking`] for intentional
-/// untracked writes.
+/// Use [`AsRef::as_ref`] for reads, [`SafeMut::modify`] for tracked writes, and
+/// [`SafeMut::modify_without_tracking`] for intentional untracked writes.
 pub struct SafeMut<'a, T: ?Sized> {
     inner: Mut<'a, T>,
 }
@@ -106,13 +105,6 @@ impl<T: ?Sized> AsMut<T> for Mut<'_, T> {
         }
 
         self.data
-    }
-}
-
-impl<T: ?Sized> AsMut<T> for SafeMut<'_, T> {
-    #[inline]
-    fn as_mut(&mut self) -> &mut T {
-        self.inner.as_mut()
     }
 }
 
