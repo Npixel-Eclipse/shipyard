@@ -3,7 +3,7 @@ use crate::entity_id::EntityId;
 use crate::not::Not;
 use crate::optional::Optional;
 use crate::or::{OneOfTwo, OrWindow};
-use crate::r#mut::Mut;
+use crate::r#mut::SafeMut;
 use crate::sparse_set::{FullRawWindow, FullRawWindowMut};
 use crate::track;
 use crate::tracking::{Inserted, InsertedOrModified, Modified};
@@ -36,7 +36,7 @@ macro_rules! impl_shiperator_output_mut {
     ($($track: path)+) => {
         $(
             impl<'tmp, T: Component> ShiperatorOutput for FullRawWindowMut<'tmp, T, $track> {
-                type Out = Mut<'tmp, T>;
+                type Out = SafeMut<'tmp, T>;
             }
         )+
     }

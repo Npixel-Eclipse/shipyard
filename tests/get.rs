@@ -1,4 +1,3 @@
-use shipyard::advanced::Mut;
 use shipyard::*;
 
 #[test]
@@ -24,11 +23,11 @@ fn type_check() {
 
     let entity = entities.add_entity((&mut vm_life, &mut vm_energy), (Life(0.), Energy(0.)));
 
-    let life: Mut<Life> = (&mut vm_life).get(entity).unwrap();
-    let energy: Mut<Energy> = (&mut vm_energy).get(entity).unwrap();
+    let life: SafeMut<Life> = (&mut vm_life).get(entity).unwrap();
+    let energy: SafeMut<Energy> = (&mut vm_energy).get(entity).unwrap();
 
-    assert_eq!(*life, Life(0.));
-    assert_eq!(*energy, Energy(0.));
+    assert_eq!(*life.as_ref(), Life(0.));
+    assert_eq!(*energy.as_ref(), Energy(0.));
 }
 
 #[test]

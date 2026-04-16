@@ -35,12 +35,11 @@ fn filter() {
 
     let m_vec = (&mut u32s)
         .par_iter()
-        .filter(|x| x.0 % 2 != 0)
+        .filter(|x| x.as_ref().0 % 2 != 0)
         .map(|mut x| {
-            x.0 += 1;
-            x
+            x.modify(|x| x.0 += 1);
+            *x.as_ref()
         })
-        .map(|x| *x)
         .collect::<Vec<_>>();
     assert_eq!(m_vec, vec![U32(2), U32(4), U32(6)]);
     let mod_vec = u32s.modified().par_iter().collect::<Vec<_>>();

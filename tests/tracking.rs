@@ -182,7 +182,7 @@ fn clear_all_modified() {
 
     world.run(|mut unit: ViewMut<UnitInsertAndModification>| {
         for mut u in (&mut unit).iter() {
-            *u = UnitInsertAndModification;
+            u.modify(|u| *u = UnitInsertAndModification);
         }
     });
 

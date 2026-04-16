@@ -67,12 +67,14 @@ fn basic() {
             let mut iter = (&mut u32s).iter();
             assert_eq!(iter.size_hint(), (4, Some(4)));
             let mut next = iter.next().unwrap();
-            next.0 += 1;
-            next.0 -= 1;
-            assert_eq!(*next, U32(0));
-            assert_eq!(*iter.next().unwrap(), U32(1));
-            assert_eq!(*iter.next().unwrap(), U32(2));
-            assert_eq!(*iter.next().unwrap(), U32(4));
+            next.modify(|next| {
+                next.0 += 1;
+                next.0 -= 1;
+            });
+            assert_eq!(*next.as_ref(), U32(0));
+            assert_eq!(*iter.next().unwrap().as_ref(), U32(1));
+            assert_eq!(*iter.next().unwrap().as_ref(), U32(2));
+            assert_eq!(*iter.next().unwrap().as_ref(), U32(4));
             assert!(iter.next().is_none());
 
             assert_eq!(u32s.inserted().iter().count(), 1);
@@ -115,15 +117,17 @@ fn basic() {
             let mut iter = (&mut u32s, &mut i16s).iter();
             assert_eq!(iter.size_hint(), (0, Some(4)));
             let mut next = iter.next().unwrap();
-            (next.0).0 += 1;
-            (next.0).0 -= 1;
-            assert_eq!((*next.0, *next.1), (U32(0), I16(10)));
+            next.0.modify(|next| {
+                next.0 += 1;
+                next.0 -= 1;
+            });
+            assert_eq!((*next.0.as_ref(), *next.1), (U32(0), I16(10)));
             assert_eq!(
-                iter.next().map(|(x, y)| (*x, *y)).unwrap(),
+                iter.next().map(|(x, y)| (*x.as_ref(), *y)).unwrap(),
                 (U32(2), I16(12))
             );
             assert_eq!(
-                iter.next().map(|(x, y)| (*x, *y)).unwrap(),
+                iter.next().map(|(x, y)| (*x.as_ref(), *y)).unwrap(),
                 (U32(4), I16(14))
             );
             assert!(iter.next().is_none());
@@ -152,15 +156,17 @@ fn basic() {
             let mut iter = (&mut i16s, &mut u32s).iter();
             assert_eq!(iter.size_hint(), (0, Some(4)));
             let mut next = iter.next().unwrap();
-            (next.1).0 += 1;
-            (next.1).0 -= 1;
-            assert_eq!((*next.0, *next.1), (I16(10), U32(0)));
+            next.1.modify(|next| {
+                next.0 += 1;
+                next.0 -= 1;
+            });
+            assert_eq!((*next.0, *next.1.as_ref()), (I16(10), U32(0)));
             assert_eq!(
-                iter.next().map(|(x, y)| (*x, *y)).unwrap(),
+                iter.next().map(|(x, y)| (*x, *y.as_ref())).unwrap(),
                 (I16(12), U32(2))
             );
             assert_eq!(
-                iter.next().map(|(x, y)| (*x, *y)).unwrap(),
+                iter.next().map(|(x, y)| (*x, *y.as_ref())).unwrap(),
                 (I16(14), U32(4))
             );
             assert!(iter.next().is_none());

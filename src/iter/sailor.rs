@@ -6,7 +6,7 @@ use crate::component::Component;
 use crate::entity_id::EntityId;
 use crate::iter::ShiperatorOutput;
 use crate::optional::Optional;
-use crate::r#mut::Mut;
+use crate::r#mut::{Mut, SafeMut};
 use crate::sparse_set::{FullRawWindow, FullRawWindowMut};
 use crate::track;
 
@@ -87,11 +87,11 @@ macro_rules! impl_shiperator_sailor_mut {
 
                 #[inline]
                 unsafe fn get_sailor_data(&self, index: Self::Index) -> Self::Out {
-                    Mut {
+                    SafeMut::new(Mut {
                         flag: Some(&mut *self.modification_data.add(index)),
                         current: self.current,
                         data: &mut *self.data.add(index),
-                    }
+                    })
                 }
 
                 #[inline]

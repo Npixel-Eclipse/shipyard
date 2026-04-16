@@ -14,9 +14,9 @@ fn no_pack() {
     let eid1 = world.add_entity(U32(1));
 
     world.retain_mut::<U32>(|_, mut i| {
-        i.0 *= 2;
+        i.modify(|i| i.0 *= 2);
 
-        i.0 != 0
+        i.as_ref().0 != 0
     });
 
     assert!(world.get::<&U32>(eid0).is_err());
@@ -32,9 +32,9 @@ fn track() {
     let eid1 = world.add_entity(U32(1));
 
     world.retain_mut::<U32>(|_, mut i| {
-        i.0 *= 2;
+        i.modify(|i| i.0 *= 2);
 
-        i.0 != 0
+        i.as_ref().0 != 0
     });
 
     assert!(world.get::<&U32>(eid0).is_err());

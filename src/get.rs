@@ -1,7 +1,7 @@
 use crate::component::Component;
 use crate::entity_id::EntityId;
 use crate::error;
-use crate::r#mut::Mut;
+use crate::r#mut::{Mut, SafeMut};
 use crate::sparse_set::SparseSet;
 use crate::tracking::Tracking;
 use crate::views::{View, ViewMut};
@@ -76,7 +76,7 @@ impl<'a, 'b, T: Component, Track: Tracking> Get for &'b ViewMut<'a, T, Track> {
 }
 
 impl<'a, 'b, T: Component, Track: Tracking> Get for &'b mut ViewMut<'a, T, Track> {
-    type Out = Mut<'b, T>;
+    type Out = SafeMut<'b, T>;
 
     #[inline]
     fn get(self, entity: EntityId) -> Result<Self::Out, error::MissingComponent> {
@@ -94,12 +94,12 @@ impl<'a, 'b, T: Component, Track: Tracking> Get for &'b mut ViewMut<'a, T, Track
             ..
         } = self.sparse_set;
 
-        Ok(Mut {
+        Ok(SafeMut::new(Mut {
             flag: is_tracking_modification
                 .then(|| unsafe { modification_data.get_unchecked_mut(index) }),
             current: self.current,
             data: unsafe { data.get_unchecked_mut(index) },
-        })
+        }))
     }
 }
 

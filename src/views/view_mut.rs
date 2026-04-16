@@ -4,7 +4,7 @@ use crate::component::Component;
 use crate::entity_id::EntityId;
 use crate::error;
 use crate::get::Get;
-use crate::r#mut::Mut;
+use crate::r#mut::SafeMut;
 use crate::sparse_set::{SparseSet, SparseSetDrain};
 use crate::storage::StorageId;
 use crate::track;
@@ -229,8 +229,8 @@ where
         self.sparse_set.private_retain(self.current, f);
     }
 
-    /// Deletes all components for which `f(id, Mut<component>)` returns `false`.
-    pub fn retain_mut<F: FnMut(EntityId, Mut<'_, T>) -> bool>(&mut self, f: F) {
+    /// Deletes all components for which `f(id, SafeMut<component>)` returns `false`.
+    pub fn retain_mut<F: FnMut(EntityId, SafeMut<'_, T>) -> bool>(&mut self, f: F) {
         self.sparse_set.private_retain_mut(self.current, f);
     }
 }

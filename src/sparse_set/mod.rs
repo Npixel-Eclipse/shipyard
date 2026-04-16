@@ -26,7 +26,7 @@ use crate::component::Component;
 use crate::entity_id::EntityId;
 use crate::error;
 use crate::memory_usage::StorageMemoryUsage;
-use crate::r#mut::Mut;
+use crate::r#mut::{Mut, SafeMut};
 use crate::storage::{SBoxBuilder, Storage, StorageId};
 use crate::tracking::{Tracking, TrackingTimestamp};
 use alloc::boxed::Box;
@@ -733,7 +733,7 @@ impl<T: Component> SparseSet<T> {
         }
     }
 
-    pub(crate) fn private_retain_mut<F: FnMut(EntityId, Mut<'_, T>) -> bool>(
+    pub(crate) fn private_retain_mut<F: FnMut(EntityId, SafeMut<'_, T>) -> bool>(
         &mut self,
         current: TrackingTimestamp,
         mut f: F,
@@ -743,11 +743,11 @@ impl<T: Component> SparseSet<T> {
             let i = i - removed;
 
             let eid = unsafe { *self.dense.get_unchecked(i) };
-            let component = Mut {
+            let component = SafeMut::new(Mut {
                 flag: self.modification_data.get_mut(i),
                 current,
                 data: unsafe { self.data.get_unchecked_mut(i) },
-            };
+            });
 
             if !f(eid, component) {
                 self.dyn_delete(eid, current);

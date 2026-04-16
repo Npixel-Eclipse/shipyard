@@ -17,7 +17,7 @@ use crate::get_unique::GetUnique;
 use crate::iter::{ShiperatorCaptain, ShiperatorSailor};
 use crate::iter_component::{into_iter, IntoIterRef, IterComponent};
 use crate::memory_usage::WorldMemoryUsage;
-use crate::r#mut::Mut;
+use crate::r#mut::SafeMut;
 use crate::reserve::BulkEntityIter;
 use crate::scheduler::info::WorkloadsInfo;
 use crate::scheduler::{AsLabel, Batches, Label, Scheduler};
@@ -1253,7 +1253,7 @@ impl World {
         self.all_storages.get_mut().retain(f);
     }
 
-    /// Deletes all components for which `f(id, Mut<component>)` returns `false`.
+    /// Deletes all components for which `f(id, SafeMut<component>)` returns `false`.
     ///
     /// # Panics
     ///
@@ -1261,7 +1261,7 @@ impl World {
     #[track_caller]
     pub fn retain_mut<T: Component + Send + Sync>(
         &mut self,
-        f: impl FnMut(EntityId, Mut<'_, T>) -> bool,
+        f: impl FnMut(EntityId, SafeMut<'_, T>) -> bool,
     ) {
         self.all_storages.get_mut().retain_mut(f);
     }

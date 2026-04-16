@@ -31,7 +31,7 @@ fn no_pack() {
             name: type_name::<USIZE>(),
         })
     );
-    assert_eq!(*(&mut u32s).get(entity1).unwrap(), U32(1));
+    assert_eq!(*(&mut u32s).get(entity1).unwrap().as_ref(), U32(1));
     assert_eq!(usizes.get(entity2), Ok(&USIZE(2)));
     assert_eq!(u32s.get(entity2), Ok(&U32(3)));
 }

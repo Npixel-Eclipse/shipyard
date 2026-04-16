@@ -95,6 +95,7 @@ pub use entity_id::EntityId;
 pub use get::Get;
 #[doc(inline)]
 pub use iter::IntoIter;
+pub use r#mut::SafeMut;
 pub use remove::Remove;
 #[doc(inline)]
 pub use scheduler::{IntoWorkload, Workload};
