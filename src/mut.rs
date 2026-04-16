@@ -63,6 +63,15 @@ impl<T: ?Sized> core::ops::Deref for Mut<'_, T> {
     }
 }
 
+impl<T: ?Sized> core::ops::Deref for SafeMut<'_, T> {
+    type Target = T;
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        self.inner.data
+    }
+}
+
 impl<T: ?Sized> core::ops::DerefMut for Mut<'_, T> {
     #[inline]
     fn deref_mut(&mut self) -> &mut Self::Target {
