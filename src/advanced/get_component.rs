@@ -6,10 +6,11 @@ use crate::borrow::{NonSend, NonSendSync, NonSync};
 use crate::component::Component;
 use crate::entity_id::EntityId;
 use crate::error;
+use crate::r#mut::{Mut, SafeMut};
 use crate::sparse_set::SparseSet;
 use crate::tracking::TrackingTimestamp;
 use core::any::type_name;
-use core::ops::{Deref, DerefMut};
+use core::ops::Deref;
 
 /// Shared reference to a component.
 pub struct Ref<'a, T> {
@@ -49,65 +50,51 @@ impl<'a, T> AsRef<T> for Ref<'a, T> {
 }
 
 /// Exclusive reference to a component.
-pub struct RefMut<'a, T> {
-    inner: T,
-    flag: Option<&'a mut TrackingTimestamp>,
-    current: TrackingTimestamp,
+pub struct RefMut<'a, T: ?Sized> {
+    inner: SafeMut<'a, T>,
     all_borrow: Option<SharedBorrow<'a>>,
     borrow: ExclusiveBorrow<'a>,
 }
 
-impl<'a, T> RefMut<'a, T> {
+impl<'a, T: ?Sized> RefMut<'a, T> {
     /// Makes a new [`RefMut`], the component will not be flagged if its modified inside `f`.
     ///
     /// This is an associated function that needs to be used as `RefMut::map(...)`. A method would interfere with methods of the same name used through Deref.
     #[inline]
-    pub fn map<U, F: FnOnce(T) -> U>(orig: Self, f: F) -> RefMut<'a, U> {
+    pub fn map<U: ?Sized, F: FnOnce(&mut T) -> &mut U>(orig: Self, f: F) -> RefMut<'a, U> {
         RefMut {
-            inner: f(orig.inner),
-            flag: orig.flag,
-            current: orig.current,
+            inner: SafeMut::map(orig.inner, f),
             all_borrow: orig.all_borrow,
             borrow: orig.borrow,
         }
     }
+
+    /// Runs `f` with mutable access and marks the component as modified.
+    #[inline]
+    pub fn modify<R>(&mut self, f: impl FnOnce(&mut T) -> R) -> R {
+        self.inner.modify(f)
+    }
+
+    /// Runs `f` with mutable access without marking the component as modified.
+    #[inline]
+    pub fn modify_without_tracking<R>(&mut self, f: impl FnOnce(&mut T) -> R) -> R {
+        self.inner.modify_without_tracking(f)
+    }
 }
 
-impl<'a, T> Deref for RefMut<'a, T> {
+impl<T: ?Sized> Deref for RefMut<'_, T> {
     type Target = T;
 
     #[inline]
     fn deref(&self) -> &Self::Target {
-        &self.inner
+        self.inner.as_ref()
     }
 }
 
-impl<'a, T> AsRef<T> for RefMut<'a, T> {
+impl<T: ?Sized> AsRef<T> for RefMut<'_, T> {
     #[inline]
     fn as_ref(&self) -> &T {
-        &self.inner
-    }
-}
-
-impl<'a, T> DerefMut for RefMut<'a, T> {
-    #[inline]
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        if let Some(flag) = &mut self.flag {
-            **flag = self.current;
-        }
-
-        &mut self.inner
-    }
-}
-
-impl<'a, T> AsMut<T> for RefMut<'a, T> {
-    #[inline]
-    fn as_mut(&mut self) -> &mut T {
-        if let Some(flag) = &mut self.flag {
-            **flag = self.current;
-        }
-
-        &mut self.inner
+        self.inner.as_ref()
     }
 }
 
@@ -240,7 +227,7 @@ impl<T: Component> GetComponent for NonSendSync<&'_ T> {
 }
 
 impl<T: Component + Send + Sync> GetComponent for &'_ mut T {
-    type Out<'a> = RefMut<'a, &'a mut T>;
+    type Out<'a> = RefMut<'a, T>;
 
     #[inline]
     fn get<'a>(
@@ -268,10 +255,12 @@ impl<T: Component + Send + Sync> GetComponent for &'_ mut T {
         } = sparse_set;
 
         Ok(RefMut {
-            inner: unsafe { data.get_unchecked_mut(index) },
-            flag: is_tracking_modification
-                .then(|| unsafe { modification_data.get_unchecked_mut(index) }),
-            current,
+            inner: SafeMut::new(Mut {
+                flag: is_tracking_modification
+                    .then(|| unsafe { modification_data.get_unchecked_mut(index) }),
+                current,
+                data: unsafe { data.get_unchecked_mut(index) },
+            }),
             all_borrow,
             borrow,
         })
@@ -280,7 +269,7 @@ impl<T: Component + Send + Sync> GetComponent for &'_ mut T {
 
 #[cfg(feature = "thread_local")]
 impl<T: Component + Sync> GetComponent for NonSend<&'_ mut T> {
-    type Out<'a> = RefMut<'a, &'a mut T>;
+    type Out<'a> = RefMut<'a, T>;
 
     #[inline]
     fn get<'a>(
@@ -309,10 +298,12 @@ impl<T: Component + Sync> GetComponent for NonSend<&'_ mut T> {
         }) = sparse_set;
 
         Ok(RefMut {
-            inner: unsafe { data.get_unchecked_mut(index) },
-            flag: is_tracking_modification
-                .then(|| unsafe { modification_data.get_unchecked_mut(index) }),
-            current,
+            inner: SafeMut::new(Mut {
+                flag: is_tracking_modification
+                    .then(|| unsafe { modification_data.get_unchecked_mut(index) }),
+                current,
+                data: unsafe { data.get_unchecked_mut(index) },
+            }),
             all_borrow,
             borrow,
         })
@@ -321,7 +312,7 @@ impl<T: Component + Sync> GetComponent for NonSend<&'_ mut T> {
 
 #[cfg(feature = "thread_local")]
 impl<T: Component + Send> GetComponent for NonSync<&'_ mut T> {
-    type Out<'a> = RefMut<'a, &'a mut T>;
+    type Out<'a> = RefMut<'a, T>;
 
     #[inline]
     fn get<'a>(
@@ -350,10 +341,12 @@ impl<T: Component + Send> GetComponent for NonSync<&'_ mut T> {
         }) = sparse_set;
 
         Ok(RefMut {
-            inner: unsafe { data.get_unchecked_mut(index) },
-            flag: is_tracking_modification
-                .then(|| unsafe { modification_data.get_unchecked_mut(index) }),
-            current,
+            inner: SafeMut::new(Mut {
+                flag: is_tracking_modification
+                    .then(|| unsafe { modification_data.get_unchecked_mut(index) }),
+                current,
+                data: unsafe { data.get_unchecked_mut(index) },
+            }),
             all_borrow,
             borrow,
         })
@@ -362,7 +355,7 @@ impl<T: Component + Send> GetComponent for NonSync<&'_ mut T> {
 
 #[cfg(feature = "thread_local")]
 impl<T: Component> GetComponent for NonSendSync<&'_ mut T> {
-    type Out<'a> = RefMut<'a, &'a mut T>;
+    type Out<'a> = RefMut<'a, T>;
 
     #[inline]
     fn get<'a>(
@@ -391,10 +384,12 @@ impl<T: Component> GetComponent for NonSendSync<&'_ mut T> {
         }) = sparse_set;
 
         Ok(RefMut {
-            inner: unsafe { data.get_unchecked_mut(index) },
-            flag: is_tracking_modification
-                .then(|| unsafe { modification_data.get_unchecked_mut(index) }),
-            current,
+            inner: SafeMut::new(Mut {
+                flag: is_tracking_modification
+                    .then(|| unsafe { modification_data.get_unchecked_mut(index) }),
+                current,
+                data: unsafe { data.get_unchecked_mut(index) },
+            }),
             all_borrow,
             borrow,
         })

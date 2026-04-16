@@ -34,6 +34,16 @@ impl<'a, T: ?Sized> SafeMut<'a, T> {
         Self { inner }
     }
 
+    /// Makes a new [`SafeMut`], the component will not be flagged if its modified inside `f`.
+    ///
+    /// This is an associated function that needs to be used as `SafeMut::map(...)`.
+    /// A method would interfere with methods of the same name used through Deref.
+    pub fn map<U: ?Sized, F: FnOnce(&mut T) -> &mut U>(orig: Self, f: F) -> SafeMut<'a, U> {
+        SafeMut {
+            inner: Mut::map(orig.inner, f),
+        }
+    }
+
     /// Runs `f` with mutable access and marks the component as modified.
     pub fn modify<R>(&mut self, f: impl FnOnce(&mut T) -> R) -> R {
         f(self.inner.as_mut())

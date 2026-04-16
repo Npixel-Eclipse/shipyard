@@ -484,7 +484,7 @@ struct Position([f32; 2]);
 
 fn sys1((entity, [x, y]): (EntityId, [f32; 2]), mut positions: ViewMut<Position>) {
     if let Ok(mut pos) = (&mut positions).get(entity) {
-        pos.0 = [x, y];
+        pos.modify(|pos| pos.0 = [x, y]);
     }
 }
 
@@ -1381,7 +1381,7 @@ let entity = world.add_entity((USIZE(0), U32(1)));
 let (i, j) = world.get::<(&USIZE, &mut U32)>(entity).unwrap();
 
 assert!(*i == &USIZE(0));
-assert!(*j == &U32(1));
+assert!(j.as_ref() == &U32(1));
 ```"]
     #[cfg_attr(
         feature = "thread_local",

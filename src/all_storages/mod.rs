@@ -1353,7 +1353,7 @@ let entity = all_storages.add_entity((USIZE(0), U32(1)));
 let (i, j) = all_storages.get::<(&USIZE, &mut U32)>(entity).unwrap();
 
 assert!(*i == &USIZE(0));
-assert!(*j == &U32(1));
+assert!(j.as_ref() == &U32(1));
 ```"]
     #[cfg_attr(
         feature = "thread_local",
