@@ -28,17 +28,50 @@ use crate::error;
 use crate::memory_usage::StorageMemoryUsage;
 use crate::r#mut::{Mut, SafeMut};
 use crate::storage::{SBoxBuilder, Storage, StorageId};
-use crate::tracking::{Tracking, TrackingTimestamp};
+use crate::r#mut::ModFlag;
+use crate::tracking::{AtomicTimestamp, Tracking, TrackingTimestamp};
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::any::type_name;
 use core::mem::size_of;
+use core::sync::atomic::Ordering as AtomicOrdering;
 use core::{
     cmp::{Ord, Ordering},
     fmt,
 };
 
 pub(crate) const BUCKET_SIZE: usize = 256 / size_of::<EntityId>();
+pub(crate) const TRACKING_CHUNK_SHIFT: usize = 6;
+pub(crate) const TRACKING_CHUNK_SIZE: usize = 1 << TRACKING_CHUNK_SHIFT;
+
+#[inline]
+pub(crate) fn tracking_chunk_count(len: usize) -> usize {
+    len.div_ceil(TRACKING_CHUNK_SIZE)
+}
+
+#[inline]
+pub(crate) fn flag_insertion_chunk(
+    chunks: &mut [TrackingTimestamp],
+    index: usize,
+    timestamp: TrackingTimestamp,
+) {
+    if let Some(chunk) = chunks.get_mut(index >> TRACKING_CHUNK_SHIFT) {
+        if chunk.is_older_than(timestamp) {
+            *chunk = timestamp;
+        }
+    }
+}
+
+#[inline]
+pub(crate) fn flag_modification_chunk(
+    chunks: &[AtomicTimestamp],
+    index: usize,
+    timestamp: TrackingTimestamp,
+) {
+    if let Some(chunk) = chunks.get(index >> TRACKING_CHUNK_SHIFT) {
+        chunk.fetch_max(timestamp.get(), AtomicOrdering::Relaxed);
+    }
+}
 
 /// Default component storage.
 // A sparse array is a data structure with 2 vectors: one sparse, the other dense.
@@ -57,6 +90,8 @@ pub struct SparseSet<T: Component> {
     pub(crate) last_modified: TrackingTimestamp,
     pub(crate) insertion_data: Vec<TrackingTimestamp>,
     pub(crate) modification_data: Vec<TrackingTimestamp>,
+    pub(crate) insertion_chunks: Vec<TrackingTimestamp>,
+    pub(crate) modification_chunks: Vec<AtomicTimestamp>,
     pub(crate) deletion_data: Vec<(EntityId, TrackingTimestamp, T)>,
     pub(crate) removal_data: Vec<(EntityId, TrackingTimestamp)>,
     pub(crate) is_tracking_insertion: bool,
@@ -89,6 +124,8 @@ impl<T: Component> SparseSet<T> {
             last_modified: TrackingTimestamp::new(0),
             insertion_data: Vec::new(),
             modification_data: Vec::new(),
+            insertion_chunks: Vec::new(),
+            modification_chunks: Vec::new(),
             deletion_data: Vec::new(),
             removal_data: Vec::new(),
             is_tracking_insertion: T::Tracking::track_insertion(),
@@ -262,6 +299,22 @@ impl<T: Component> SparseSet<T> {
             self.dense.push(entity);
             self.data.push(value);
 
+            let index = self.dense.len() - 1;
+            if self.is_tracking_insertion {
+                let chunk_count = tracking_chunk_count(self.dense.len());
+                if self.insertion_chunks.len() < chunk_count {
+                    self.insertion_chunks.resize(chunk_count, current);
+                }
+                flag_insertion_chunk(&mut self.insertion_chunks, index, current);
+            }
+            if self.is_tracking_modification {
+                let chunk_count = tracking_chunk_count(self.dense.len());
+                if self.modification_chunks.len() < chunk_count {
+                    self.modification_chunks
+                        .resize_with(chunk_count, || AtomicTimestamp::new(current.get()));
+                }
+            }
+
             old_component = InsertionResult::Inserted;
         } else if entity.gen() == sparse_entity.gen() {
             if let Some(on_insertion) = &mut self.on_insertion {
@@ -284,6 +337,11 @@ impl<T: Component> SparseSet<T> {
                         .modification_data
                         .get_unchecked_mut(sparse_entity.uindex()) = current;
                 }
+                flag_modification_chunk(
+                    &self.modification_chunks,
+                    sparse_entity.uindex(),
+                    current,
+                );
             }
 
             dense_entity.copy_index_gen(entity);
@@ -308,6 +366,11 @@ impl<T: Component> SparseSet<T> {
                         .insertion_data
                         .get_unchecked_mut(sparse_entity.uindex()) = current;
                 }
+                flag_insertion_chunk(
+                    &mut self.insertion_chunks,
+                    sparse_entity.uindex(),
+                    current,
+                );
             }
 
             dense_entity.copy_index_gen(entity);
@@ -371,6 +434,23 @@ impl<T: Component> SparseSet<T> {
                     self.sparse
                         .get_mut_unchecked(last)
                         .copy_index(sparse_entity);
+                }
+
+                if self.is_tracking_insertion() {
+                    let moved = self.insertion_data[sparse_entity.uindex()];
+                    flag_insertion_chunk(
+                        &mut self.insertion_chunks,
+                        sparse_entity.uindex(),
+                        moved,
+                    );
+                }
+                if self.is_tracking_modification() {
+                    let moved = self.modification_data[sparse_entity.uindex()];
+                    flag_modification_chunk(
+                        &self.modification_chunks,
+                        sparse_entity.uindex(),
+                        moved,
+                    );
                 }
             }
 
@@ -449,6 +529,8 @@ impl<T: Component> SparseSet<T> {
 
         self.insertion_data
             .extend(core::iter::repeat(TrackingTimestamp::new(0)).take(self.dense.len()));
+        self.insertion_chunks
+            .resize(tracking_chunk_count(self.dense.len()), TrackingTimestamp::origin());
 
         self
     }
@@ -463,6 +545,10 @@ impl<T: Component> SparseSet<T> {
 
         self.modification_data
             .extend(core::iter::repeat(TrackingTimestamp::new(0)).take(self.dense.len()));
+        self.modification_chunks
+            .resize_with(tracking_chunk_count(self.dense.len()), || {
+                AtomicTimestamp::new(0)
+            });
 
         self
     }
@@ -605,6 +691,7 @@ impl<T: Component> SparseSet<T> {
         if a_index != b_index {
             if self.is_tracking_modification {
                 self.modification_data[a_index] = current;
+                flag_modification_chunk(&self.modification_chunks, a_index, current);
             }
 
             let a = unsafe { &mut *self.data.as_mut_ptr().add(a_index) };
@@ -648,6 +735,8 @@ impl<T: Component> SparseSet<T> {
             if self.is_tracking_modification {
                 self.modification_data[a_index] = current;
                 self.modification_data[b_index] = current;
+                flag_modification_chunk(&self.modification_chunks, a_index, current);
+                flag_modification_chunk(&self.modification_chunks, b_index, current);
             }
 
             let a = unsafe { &mut *self.data.as_mut_ptr().add(a_index) };
@@ -669,6 +758,8 @@ impl<T: Component> SparseSet<T> {
 
         self.insertion_data.clear();
         self.modification_data.clear();
+        self.insertion_chunks.clear();
+        self.modification_chunks.clear();
 
         let is_tracking_deletion = self.is_tracking_deletion();
 
@@ -699,6 +790,8 @@ impl<T: Component> SparseSet<T> {
 
         self.insertion_data.clear();
         self.modification_data.clear();
+        self.insertion_chunks.clear();
+        self.modification_chunks.clear();
 
         let dense_ptr = self.dense.as_ptr();
         let dense_len = self.dense.len();
@@ -744,7 +837,12 @@ impl<T: Component> SparseSet<T> {
 
             let eid = unsafe { *self.dense.get_unchecked(i) };
             let component = SafeMut::new(Mut {
-                flag: self.modification_data.get_mut(i),
+                flag: {
+                    let chunk = self.modification_chunks.get(i >> TRACKING_CHUNK_SHIFT);
+                    self.modification_data
+                        .get_mut(i)
+                        .map(|slot| ModFlag { slot, chunk })
+                },
                 current,
                 data: unsafe { self.data.get_unchecked_mut(i) },
             });

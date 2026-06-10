@@ -29,6 +29,17 @@ impl<'tmp, T: Component> ShiperatorSailor for Inserted<FullRawWindow<'tmp, T>> {
     }
 
     #[inline]
+    fn captain_indices_of(&self, _: EntityId, index: usize) -> Option<Self::Index> {
+        if unsafe { *self.0.insertion_data.add(index) }
+            .is_within(self.0.last_insertion, self.0.current)
+        {
+            Some(index)
+        } else {
+            None
+        }
+    }
+
+    #[inline]
     fn index_from_usize(index: usize) -> Self::Index {
         index
     }
@@ -51,6 +62,16 @@ macro_rules! impl_shiperator_sailor_inserted {
                         return None;
                     };
 
+                    if unsafe { *self.0.insertion_data.add(index) }.is_within(self.0.last_insertion, self.0.current)
+                    {
+                        Some(index)
+                    } else {
+                        None
+                    }
+                }
+
+                #[inline]
+                fn captain_indices_of(&self, _: EntityId, index: usize) -> Option<Self::Index> {
                     if unsafe { *self.0.insertion_data.add(index) }.is_within(self.0.last_insertion, self.0.current)
                     {
                         Some(index)
@@ -95,6 +116,17 @@ impl<'tmp, T: Component> ShiperatorSailor for Modified<FullRawWindow<'tmp, T>> {
     }
 
     #[inline]
+    fn captain_indices_of(&self, _: EntityId, index: usize) -> Option<Self::Index> {
+        if unsafe { *self.0.modification_data.add(index) }
+            .is_within(self.0.last_modification, self.0.current)
+        {
+            Some(index)
+        } else {
+            None
+        }
+    }
+
+    #[inline]
     fn index_from_usize(index: usize) -> Self::Index {
         index
     }
@@ -117,6 +149,16 @@ macro_rules! impl_shiperator_sailor_modified {
                         return None;
                     };
 
+                    if unsafe { *self.0.modification_data.add(index) }.is_within(self.0.last_modification, self.0.current)
+                    {
+                        Some(index)
+                    } else {
+                        None
+                    }
+                }
+
+                #[inline]
+                fn captain_indices_of(&self, _: EntityId, index: usize) -> Option<Self::Index> {
                     if unsafe { *self.0.modification_data.add(index) }.is_within(self.0.last_modification, self.0.current)
                     {
                         Some(index)
@@ -163,6 +205,19 @@ impl<'tmp, T: Component> ShiperatorSailor for InsertedOrModified<FullRawWindow<'
     }
 
     #[inline]
+    fn captain_indices_of(&self, _: EntityId, index: usize) -> Option<Self::Index> {
+        if unsafe { *self.0.insertion_data.add(index) }
+            .is_within(self.0.last_insertion, self.0.current)
+            || unsafe { *self.0.modification_data.add(index) }
+                .is_within(self.0.last_modification, self.0.current)
+        {
+            Some(index)
+        } else {
+            None
+        }
+    }
+
+    #[inline]
     fn index_from_usize(index: usize) -> Self::Index {
         index
     }
@@ -185,6 +240,18 @@ macro_rules! impl_shiperator_sailor_inserted_or_modified {
                         return None;
                     };
 
+                    if unsafe { *self.0.insertion_data.add(index) }.is_within(self.0.last_insertion, self.0.current)
+                        || unsafe { *self.0.modification_data.add(index) }
+                            .is_within(self.0.last_modification, self.0.current)
+                    {
+                        Some(index)
+                    } else {
+                        None
+                    }
+                }
+
+                #[inline]
+                fn captain_indices_of(&self, _: EntityId, index: usize) -> Option<Self::Index> {
                     if unsafe { *self.0.insertion_data.add(index) }.is_within(self.0.last_insertion, self.0.current)
                         || unsafe { *self.0.modification_data.add(index) }
                             .is_within(self.0.last_modification, self.0.current)

@@ -6,7 +6,7 @@ use crate::component::Component;
 use crate::entity_id::EntityId;
 use crate::iter::ShiperatorOutput;
 use crate::optional::Optional;
-use crate::r#mut::{Mut, SafeMut};
+use crate::r#mut::{ModFlag, Mut, SafeMut};
 use crate::sparse_set::{FullRawWindow, FullRawWindowMut};
 use crate::track;
 
@@ -31,6 +31,13 @@ pub trait ShiperatorCaptain: ShiperatorOutput {
     /// By default `into_shiperator` returns Shiperators that thinks they are captains.\
     /// This function is called on the ones that end up not being picked.
     fn unpick(&mut self);
+    /// Returns the next index at or after `index` that may yield an item.
+    ///
+    /// Tracking Shiperators use it to skip chunks without any flagged component.
+    #[inline]
+    fn next_possible(&self, index: usize) -> usize {
+        index
+    }
 }
 
 impl<'tmp, T: Component> ShiperatorCaptain for FullRawWindow<'tmp, T> {
@@ -94,7 +101,10 @@ macro_rules! impl_shiperator_captain_mut {
                 #[inline]
                 unsafe fn get_captain_data(&self, index: usize) -> Self::Out {
                     SafeMut::new(Mut {
-                        flag: Some(&mut *self.modification_data.add(index)),
+                        flag: Some(ModFlag {
+                            slot: &mut *self.modification_data.add(index),
+                            chunk: self.modification_chunk(index),
+                        }),
                         current: self.current,
                         data: &mut *self.data.add(index),
                     })

@@ -78,6 +78,17 @@ macro_rules! impl_shiperator_output {
                     self.shiperator.$index.unpick();
                 )+
             }
+
+            #[inline]
+            fn next_possible(&self, index: usize) -> usize {
+                $(
+                    if self.mask & (1 << $index) != 0 {
+                        return self.shiperator.$index.next_possible(index);
+                    }
+                )+
+
+                index
+            }
         }
 
         impl<$($type: ShiperatorSailor),+> ShiperatorSailor for Mixed<($($type,)+)> {
@@ -119,6 +130,25 @@ macro_rules! impl_shiperator_output {
                         },
                     )+))
                 }
+            }
+
+            #[inline]
+            fn captain_indices_of(&self, eid: EntityId, index: usize) -> Option<Self::Index> {
+                Some(($(
+                    if self.mask & (1 << $index) != 0 {
+                        if let Some(index) = self.shiperator.$index.captain_indices_of(eid, index) {
+                            index
+                        } else {
+                            return None
+                        }
+                    } else {
+                        if let Some(index) = self.shiperator.$index.indices_of(eid, index) {
+                            index
+                        } else {
+                            return None
+                        }
+                    },
+                )+))
             }
 
             #[inline]

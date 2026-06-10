@@ -6,8 +6,8 @@ use crate::borrow::{NonSend, NonSendSync, NonSync};
 use crate::component::Component;
 use crate::entity_id::EntityId;
 use crate::error;
-use crate::r#mut::{Mut, SafeMut};
-use crate::sparse_set::SparseSet;
+use crate::r#mut::{ModFlag, Mut, SafeMut};
+use crate::sparse_set::{SparseSet, TRACKING_CHUNK_SHIFT};
 use crate::tracking::TrackingTimestamp;
 use core::any::type_name;
 use core::ops::Deref;
@@ -250,14 +250,17 @@ impl<T: Component + Send + Sync> GetComponent for &'_ mut T {
         let SparseSet {
             data,
             modification_data,
+            modification_chunks,
             is_tracking_modification,
             ..
         } = sparse_set;
 
         Ok(RefMut {
             inner: SafeMut::new(Mut {
-                flag: is_tracking_modification
-                    .then(|| unsafe { modification_data.get_unchecked_mut(index) }),
+                flag: is_tracking_modification.then(|| ModFlag {
+                    slot: unsafe { modification_data.get_unchecked_mut(index) },
+                    chunk: modification_chunks.get(index >> TRACKING_CHUNK_SHIFT),
+                }),
                 current,
                 data: unsafe { data.get_unchecked_mut(index) },
             }),
@@ -293,14 +296,17 @@ impl<T: Component + Sync> GetComponent for NonSend<&'_ mut T> {
         let NonSend(SparseSet {
             data,
             modification_data,
+            modification_chunks,
             is_tracking_modification,
             ..
         }) = sparse_set;
 
         Ok(RefMut {
             inner: SafeMut::new(Mut {
-                flag: is_tracking_modification
-                    .then(|| unsafe { modification_data.get_unchecked_mut(index) }),
+                flag: is_tracking_modification.then(|| ModFlag {
+                    slot: unsafe { modification_data.get_unchecked_mut(index) },
+                    chunk: modification_chunks.get(index >> TRACKING_CHUNK_SHIFT),
+                }),
                 current,
                 data: unsafe { data.get_unchecked_mut(index) },
             }),
@@ -336,14 +342,17 @@ impl<T: Component + Send> GetComponent for NonSync<&'_ mut T> {
         let NonSync(SparseSet {
             data,
             modification_data,
+            modification_chunks,
             is_tracking_modification,
             ..
         }) = sparse_set;
 
         Ok(RefMut {
             inner: SafeMut::new(Mut {
-                flag: is_tracking_modification
-                    .then(|| unsafe { modification_data.get_unchecked_mut(index) }),
+                flag: is_tracking_modification.then(|| ModFlag {
+                    slot: unsafe { modification_data.get_unchecked_mut(index) },
+                    chunk: modification_chunks.get(index >> TRACKING_CHUNK_SHIFT),
+                }),
                 current,
                 data: unsafe { data.get_unchecked_mut(index) },
             }),
@@ -379,14 +388,17 @@ impl<T: Component> GetComponent for NonSendSync<&'_ mut T> {
         let NonSendSync(SparseSet {
             data,
             modification_data,
+            modification_chunks,
             is_tracking_modification,
             ..
         }) = sparse_set;
 
         Ok(RefMut {
             inner: SafeMut::new(Mut {
-                flag: is_tracking_modification
-                    .then(|| unsafe { modification_data.get_unchecked_mut(index) }),
+                flag: is_tracking_modification.then(|| ModFlag {
+                    slot: unsafe { modification_data.get_unchecked_mut(index) },
+                    chunk: modification_chunks.get(index >> TRACKING_CHUNK_SHIFT),
+                }),
                 current,
                 data: unsafe { data.get_unchecked_mut(index) },
             }),

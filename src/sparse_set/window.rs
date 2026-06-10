@@ -1,12 +1,14 @@
 use crate::atomic_refcell::{ExclusiveBorrow, SharedBorrow};
 use crate::component::Component;
 use crate::entity_id::EntityId;
-use crate::tracking::{Tracking, TrackingTimestamp};
+use crate::sparse_set::TRACKING_CHUNK_SHIFT;
+use crate::tracking::{AtomicTimestamp, Tracking, TrackingTimestamp};
 use crate::views::{View, ViewMut};
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::marker::PhantomData;
 use core::ptr::{self, NonNull};
+use core::sync::atomic::Ordering;
 
 pub struct FullRawWindow<'a, T> {
     sparse: *const *const EntityId,
@@ -16,10 +18,52 @@ pub struct FullRawWindow<'a, T> {
     pub(crate) data: *const T,
     pub(crate) insertion_data: *const TrackingTimestamp,
     pub(crate) modification_data: *const TrackingTimestamp,
+    pub(crate) insertion_chunks: *const TrackingTimestamp,
+    pub(crate) insertion_chunks_len: usize,
+    pub(crate) modification_chunks: *const AtomicTimestamp,
+    pub(crate) modification_chunks_len: usize,
     pub(crate) last_insertion: TrackingTimestamp,
     pub(crate) last_modification: TrackingTimestamp,
     pub(crate) current: TrackingTimestamp,
     _phantom: PhantomData<&'a T>,
+}
+
+#[allow(clippy::too_many_arguments)]
+#[inline]
+fn next_tracked_index(
+    dense_len: usize,
+    insertion_chunks: *const TrackingTimestamp,
+    insertion_chunks_len: usize,
+    modification_chunks: *const AtomicTimestamp,
+    modification_chunks_len: usize,
+    last_insertion: TrackingTimestamp,
+    last_modification: TrackingTimestamp,
+    mut index: usize,
+    check_insertion: bool,
+    check_modification: bool,
+) -> usize {
+    while index < dense_len {
+        let chunk = index >> TRACKING_CHUNK_SHIFT;
+
+        if check_insertion
+            && (chunk >= insertion_chunks_len
+                || last_insertion.is_older_than(unsafe { *insertion_chunks.add(chunk) }))
+        {
+            return index;
+        }
+
+        if check_modification
+            && (chunk >= modification_chunks_len
+                || last_modification.get()
+                    < unsafe { &*modification_chunks.add(chunk) }.load(Ordering::Relaxed))
+        {
+            return index;
+        }
+
+        index = (chunk + 1) << TRACKING_CHUNK_SHIFT;
+    }
+
+    index
 }
 
 unsafe impl<T: Send + Component> Send for FullRawWindow<'_, T> {}
@@ -39,6 +83,10 @@ impl<'w, T: Component> FullRawWindow<'w, T> {
             data: view.data.as_ptr(),
             insertion_data: view.insertion_data.as_ptr(),
             modification_data: view.modification_data.as_ptr(),
+            insertion_chunks: view.insertion_chunks.as_ptr(),
+            insertion_chunks_len: view.insertion_chunks.len(),
+            modification_chunks: view.modification_chunks.as_ptr(),
+            modification_chunks_len: view.modification_chunks.len(),
             last_insertion: view.last_insertion,
             last_modification: view.last_modification,
             current: view.current,
@@ -73,6 +121,10 @@ impl<'w, T: Component> FullRawWindow<'w, T> {
                 data: sparse_set.data.as_ptr(),
                 insertion_data: sparse_set.insertion_data.as_ptr(),
                 modification_data: sparse_set.modification_data.as_ptr(),
+                insertion_chunks: sparse_set.insertion_chunks.as_ptr(),
+                insertion_chunks_len: sparse_set.insertion_chunks.len(),
+                modification_chunks: sparse_set.modification_chunks.as_ptr(),
+                modification_chunks_len: sparse_set.modification_chunks.len(),
                 last_insertion,
                 last_modification,
                 current,
@@ -97,6 +149,10 @@ impl<'w, T: Component> FullRawWindow<'w, T> {
             data: view.data.as_ptr(),
             insertion_data: view.insertion_data.as_ptr(),
             modification_data: view.modification_data.as_ptr(),
+            insertion_chunks: view.insertion_chunks.as_ptr(),
+            insertion_chunks_len: view.insertion_chunks.len(),
+            modification_chunks: view.modification_chunks.as_ptr(),
+            modification_chunks_len: view.modification_chunks.len(),
             last_insertion: view.last_insertion,
             last_modification: view.last_modification,
             current: view.current,
@@ -139,6 +195,28 @@ impl<'w, T: Component> FullRawWindow<'w, T> {
     pub(crate) fn entity_iter(&self) -> RawEntityIdAccess {
         RawEntityIdAccess::new(self.dense, Vec::new())
     }
+
+    #[inline]
+    pub(crate) fn next_tracked(
+        &self,
+        index: usize,
+        check_insertion: bool,
+        check_modification: bool,
+    ) -> usize {
+        next_tracked_index(
+            self.dense_len,
+            self.insertion_chunks,
+            self.insertion_chunks_len,
+            self.modification_chunks,
+            self.modification_chunks_len,
+            self.last_insertion,
+            self.last_modification,
+            index,
+            check_insertion,
+            check_modification,
+        )
+    }
+
 }
 
 impl<T: Component> Clone for FullRawWindow<'_, T> {
@@ -152,6 +230,10 @@ impl<T: Component> Clone for FullRawWindow<'_, T> {
             data: self.data,
             insertion_data: self.insertion_data,
             modification_data: self.modification_data,
+            insertion_chunks: self.insertion_chunks,
+            insertion_chunks_len: self.insertion_chunks_len,
+            modification_chunks: self.modification_chunks,
+            modification_chunks_len: self.modification_chunks_len,
             last_insertion: self.last_insertion,
             last_modification: self.last_modification,
             current: self.current,
@@ -168,6 +250,10 @@ pub struct FullRawWindowMut<'a, T, Track> {
     pub(crate) data: *mut T,
     pub(crate) insertion_data: *const TrackingTimestamp,
     pub(crate) modification_data: *mut TrackingTimestamp,
+    pub(crate) insertion_chunks: *const TrackingTimestamp,
+    pub(crate) insertion_chunks_len: usize,
+    pub(crate) modification_chunks: *const AtomicTimestamp,
+    pub(crate) modification_chunks_len: usize,
     pub(crate) last_insertion: TrackingTimestamp,
     pub(crate) last_modification: TrackingTimestamp,
     pub(crate) current: TrackingTimestamp,
@@ -192,6 +278,10 @@ impl<'w, T: Component, Track> FullRawWindowMut<'w, T, Track> {
             data: view.data.as_mut_ptr(),
             insertion_data: view.insertion_data.as_ptr(),
             modification_data: view.modification_data.as_mut_ptr(),
+            insertion_chunks: view.insertion_chunks.as_ptr(),
+            insertion_chunks_len: view.insertion_chunks.len(),
+            modification_chunks: view.modification_chunks.as_ptr(),
+            modification_chunks_len: view.modification_chunks.len(),
             last_insertion: view.last_insertion,
             last_modification: view.last_modification,
             current: view.current,
@@ -228,6 +318,10 @@ impl<'w, T: Component, Track> FullRawWindowMut<'w, T, Track> {
                 data: sparse_set.data.as_mut_ptr(),
                 insertion_data: sparse_set.insertion_data.as_ptr(),
                 modification_data: sparse_set.modification_data.as_mut_ptr(),
+                insertion_chunks: sparse_set.insertion_chunks.as_ptr(),
+                insertion_chunks_len: sparse_set.insertion_chunks.len(),
+                modification_chunks: sparse_set.modification_chunks.as_ptr(),
+                modification_chunks_len: sparse_set.modification_chunks.len(),
                 last_insertion,
                 last_modification,
                 current,
@@ -274,6 +368,38 @@ impl<'w, T: Component, Track> FullRawWindowMut<'w, T, Track> {
     pub(crate) fn entity_iter(&self) -> RawEntityIdAccess {
         RawEntityIdAccess::new(self.dense, Vec::new())
     }
+
+    #[inline]
+    pub(crate) fn next_tracked(
+        &self,
+        index: usize,
+        check_insertion: bool,
+        check_modification: bool,
+    ) -> usize {
+        next_tracked_index(
+            self.dense_len,
+            self.insertion_chunks,
+            self.insertion_chunks_len,
+            self.modification_chunks,
+            self.modification_chunks_len,
+            self.last_insertion,
+            self.last_modification,
+            index,
+            check_insertion,
+            check_modification,
+        )
+    }
+
+    #[inline]
+    pub(crate) unsafe fn modification_chunk(&self, index: usize) -> Option<&'w AtomicTimestamp> {
+        let chunk = index >> TRACKING_CHUNK_SHIFT;
+
+        if chunk < self.modification_chunks_len {
+            Some(&*self.modification_chunks.add(chunk))
+        } else {
+            None
+        }
+    }
 }
 
 impl<T: Component, Track> Clone for FullRawWindowMut<'_, T, Track> {
@@ -287,6 +413,10 @@ impl<T: Component, Track> Clone for FullRawWindowMut<'_, T, Track> {
             data: self.data,
             insertion_data: self.insertion_data,
             modification_data: self.modification_data,
+            insertion_chunks: self.insertion_chunks,
+            insertion_chunks_len: self.insertion_chunks_len,
+            modification_chunks: self.modification_chunks,
+            modification_chunks_len: self.modification_chunks_len,
             last_insertion: self.last_insertion,
             last_modification: self.last_modification,
             current: self.current,

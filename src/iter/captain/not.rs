@@ -1,5 +1,5 @@
 use crate::component::Component;
-use crate::iter::ShiperatorCaptain;
+use crate::iter::{ShiperatorCaptain, ShiperatorOutput};
 use crate::not::Not;
 use crate::sparse_set::{FullRawWindow, FullRawWindowMut};
 use crate::tracking::{Inserted, InsertedOrModified, Modified};
@@ -57,7 +57,10 @@ impl<'tmp, T: Component, Track> ShiperatorCaptain for Not<FullRawWindowMut<'tmp,
 
 macro_rules! impl_shiperator_captain_not_tracking {
     ($($type: ident)+) => {$(
-        impl<'tmp, T: ShiperatorCaptain> ShiperatorCaptain for Not<$type<T>> {
+        impl<'tmp, T: ShiperatorOutput> ShiperatorCaptain for Not<$type<T>>
+        where
+            $type<T>: ShiperatorCaptain,
+        {
             #[inline]
             unsafe fn get_captain_data(&self, _index: usize) -> Self::Out {
                 unreachable!()

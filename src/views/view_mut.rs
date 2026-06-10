@@ -5,7 +5,7 @@ use crate::entity_id::EntityId;
 use crate::error;
 use crate::get::Get;
 use crate::r#mut::SafeMut;
-use crate::sparse_set::{SparseSet, SparseSetDrain};
+use crate::sparse_set::{flag_modification_chunk, SparseSet, SparseSetDrain};
 use crate::storage::StorageId;
 use crate::track;
 use crate::tracking::{
@@ -536,6 +536,7 @@ impl<'a, T: Component, Track> core::ops::IndexMut<EntityId> for ViewMut<'a, T, T
         let SparseSet {
             data,
             modification_data,
+            modification_chunks,
             is_tracking_modification,
             ..
         } = self.sparse_set;
@@ -544,6 +545,7 @@ impl<'a, T: Component, Track> core::ops::IndexMut<EntityId> for ViewMut<'a, T, T
             unsafe {
                 *modification_data.get_unchecked_mut(index) = self.current;
             };
+            flag_modification_chunk(modification_chunks, index, self.current);
         }
 
         unsafe { data.get_unchecked_mut(index) }

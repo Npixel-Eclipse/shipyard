@@ -6,7 +6,7 @@ use crate::component::Component;
 use crate::entity_id::EntityId;
 use crate::iter::ShiperatorOutput;
 use crate::optional::Optional;
-use crate::r#mut::{Mut, SafeMut};
+use crate::r#mut::{ModFlag, Mut, SafeMut};
 use crate::sparse_set::{FullRawWindow, FullRawWindowMut};
 use crate::track;
 
@@ -25,6 +25,13 @@ pub trait ShiperatorSailor: ShiperatorOutput {
     unsafe fn get_sailor_data(&self, index: Self::Index) -> Self::Out;
     /// Returns the index of the component with id `entity_id`.
     fn indices_of(&self, entity_id: EntityId, index: usize) -> Option<Self::Index>;
+    /// Same as `indices_of` but `index` is guaranteed to be `entity_id`'s dense index in this storage.
+    ///
+    /// Only called when this Shiperator is the captain driving the iteration.
+    #[inline]
+    fn captain_indices_of(&self, entity_id: EntityId, index: usize) -> Option<Self::Index> {
+        self.indices_of(entity_id, index)
+    }
     /// When a `Mixed` iterator flags a storage as captain, it can skip `indices_of` and directly use `index`
     /// for this one Shiperator.\
     /// But at the type level there is no way to express this since the captain is picked at runtime.
@@ -44,6 +51,11 @@ impl<'tmp, T: Component> ShiperatorSailor for FullRawWindow<'tmp, T> {
     #[inline]
     fn indices_of(&self, eid: EntityId, _: usize) -> Option<Self::Index> {
         self.index_of(eid)
+    }
+
+    #[inline]
+    fn captain_indices_of(&self, _: EntityId, index: usize) -> Option<Self::Index> {
+        Some(index)
     }
 
     #[inline]
@@ -69,6 +81,11 @@ macro_rules! impl_shiperator_sailor_no_mut {
                 }
 
                 #[inline]
+                fn captain_indices_of(&self, _: EntityId, index: usize) -> Option<Self::Index> {
+                    Some(index)
+                }
+
+                #[inline]
                 fn index_from_usize(index: usize) -> Self::Index {
                     index
                 }
@@ -88,7 +105,10 @@ macro_rules! impl_shiperator_sailor_mut {
                 #[inline]
                 unsafe fn get_sailor_data(&self, index: Self::Index) -> Self::Out {
                     SafeMut::new(Mut {
-                        flag: Some(&mut *self.modification_data.add(index)),
+                        flag: Some(ModFlag {
+                            slot: &mut *self.modification_data.add(index),
+                            chunk: self.modification_chunk(index),
+                        }),
                         current: self.current,
                         data: &mut *self.data.add(index),
                     })
@@ -97,6 +117,11 @@ macro_rules! impl_shiperator_sailor_mut {
                 #[inline]
                 fn indices_of(&self, eid: EntityId, _: usize, ) -> Option<Self::Index> {
                     self.index_of(eid)
+                }
+
+                #[inline]
+                fn captain_indices_of(&self, _: EntityId, index: usize) -> Option<Self::Index> {
+                    Some(index)
                 }
 
                 #[inline]

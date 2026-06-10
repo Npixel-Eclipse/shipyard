@@ -64,12 +64,18 @@ impl<S: ShiperatorCaptain + ShiperatorSailor> Iterator for WithId<Shiperator<S>>
                 }
             } else {
                 while self.0.start < self.0.end {
-                    let current = self.0.start;
-                    self.0.start += 1;
+                    let current = self.0.shiperator.next_possible(self.0.start);
+
+                    if current >= self.0.end {
+                        self.0.start = self.0.end;
+                        break;
+                    }
+
+                    self.0.start = current + 1;
 
                     let entity_id = unsafe { self.0.entities.get(current) };
 
-                    if let Some(indices) = self.0.shiperator.indices_of(entity_id, current) {
+                    if let Some(indices) = self.0.shiperator.captain_indices_of(entity_id, current) {
                         let data = unsafe { self.0.shiperator.get_sailor_data(indices) };
 
                         init = f(init, (entity_id, data));

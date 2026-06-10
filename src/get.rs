@@ -1,8 +1,8 @@
 use crate::component::Component;
 use crate::entity_id::EntityId;
 use crate::error;
-use crate::r#mut::{Mut, SafeMut};
-use crate::sparse_set::SparseSet;
+use crate::r#mut::{ModFlag, Mut, SafeMut};
+use crate::sparse_set::{SparseSet, TRACKING_CHUNK_SHIFT};
 use crate::tracking::Tracking;
 use crate::views::{View, ViewMut};
 use core::any::type_name;
@@ -90,13 +90,16 @@ impl<'a, 'b, T: Component, Track: Tracking> Get for &'b mut ViewMut<'a, T, Track
         let SparseSet {
             data,
             modification_data,
+            modification_chunks,
             is_tracking_modification,
             ..
         } = self.sparse_set;
 
         Ok(SafeMut::new(Mut {
-            flag: is_tracking_modification
-                .then(|| unsafe { modification_data.get_unchecked_mut(index) }),
+            flag: is_tracking_modification.then(|| ModFlag {
+                slot: unsafe { modification_data.get_unchecked_mut(index) },
+                chunk: modification_chunks.get(index >> TRACKING_CHUNK_SHIFT),
+            }),
             current: self.current,
             data: unsafe { data.get_unchecked_mut(index) },
         }))

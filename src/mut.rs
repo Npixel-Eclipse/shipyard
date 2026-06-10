@@ -1,8 +1,27 @@
-use crate::tracking::TrackingTimestamp;
+use crate::tracking::{AtomicTimestamp, TrackingTimestamp};
+use core::sync::atomic::Ordering;
+
+pub(crate) struct ModFlag<'a> {
+    pub(crate) slot: &'a mut TrackingTimestamp,
+    pub(crate) chunk: Option<&'a AtomicTimestamp>,
+}
+
+impl ModFlag<'_> {
+    #[inline]
+    pub(crate) fn set(&mut self, current: TrackingTimestamp) {
+        if *self.slot != current {
+            *self.slot = current;
+
+            if let Some(chunk) = self.chunk {
+                chunk.fetch_max(current.get(), Ordering::Relaxed);
+            }
+        }
+    }
+}
 
 /// Tracks component modification.
 pub struct Mut<'a, T: ?Sized> {
-    pub(crate) flag: Option<&'a mut TrackingTimestamp>,
+    pub(crate) flag: Option<ModFlag<'a>>,
     pub(crate) current: TrackingTimestamp,
     pub(crate) data: &'a mut T,
 }
@@ -86,7 +105,7 @@ impl<T: ?Sized> core::ops::DerefMut for Mut<'_, T> {
     #[inline]
     fn deref_mut(&mut self) -> &mut Self::Target {
         if let Some(flag) = &mut self.flag {
-            **flag = self.current;
+            flag.set(self.current);
         }
 
         self.data
@@ -111,7 +130,7 @@ impl<T: ?Sized> AsMut<T> for Mut<'_, T> {
     #[inline]
     fn as_mut(&mut self) -> &mut T {
         if let Some(flag) = &mut self.flag {
-            **flag = self.current;
+            flag.set(self.current);
         }
 
         self.data

@@ -1,5 +1,7 @@
 use crate::iter::{Shiperator, ShiperatorCaptain, ShiperatorSailor};
 
+const MIN_SPLIT_LEN: usize = 16;
+
 #[allow(missing_docs)]
 pub struct ParShiperator<S>(pub(crate) Shiperator<S>);
 
@@ -13,7 +15,7 @@ impl<S: ShiperatorCaptain + ShiperatorSailor + Send + Clone>
         let remaining = self.end - self.start;
 
         let max_len = self.end - self.start + follow_up_len;
-        if max_len <= 1 {
+        if max_len <= self.min_split_len.max(1) {
             return (self, None);
         }
 
@@ -28,6 +30,7 @@ impl<S: ShiperatorCaptain + ShiperatorSailor + Send + Clone>
                 is_exact_sized: self.is_exact_sized,
                 start: self.start,
                 end: new_end,
+                min_split_len: self.min_split_len,
             },
             Some(Shiperator {
                 shiperator: self.shiperator,
@@ -35,6 +38,7 @@ impl<S: ShiperatorCaptain + ShiperatorSailor + Send + Clone>
                 is_exact_sized: self.is_exact_sized,
                 start: new_end,
                 end: self.end,
+                min_split_len: self.min_split_len,
             }),
         )
     }
@@ -59,7 +63,13 @@ where
     where
         C: rayon::iter::plumbing::UnindexedConsumer<Self::Item>,
     {
-        rayon::iter::plumbing::bridge_unindexed(self.0, consumer)
+        let mut producer = self.0;
+        let total_len = producer.end - producer.start + producer.entities.follow_up_len();
+        let threads = rayon::current_num_threads().max(1);
+
+        producer.min_split_len = (total_len / (threads * 4)).max(MIN_SPLIT_LEN);
+
+        rayon::iter::plumbing::bridge_unindexed(producer, consumer)
     }
 
     #[inline]

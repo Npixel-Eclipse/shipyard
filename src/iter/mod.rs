@@ -35,6 +35,7 @@ pub struct Shiperator<S> {
     pub(crate) is_exact_sized: bool,
     pub(crate) start: usize,
     pub(crate) end: usize,
+    pub(crate) min_split_len: usize,
 }
 
 impl<S: ShiperatorCaptain + ShiperatorSailor> Iterator for Shiperator<S> {
@@ -54,15 +55,24 @@ impl<S: ShiperatorCaptain + ShiperatorSailor> Iterator for Shiperator<S> {
                 }
             };
 
-            let current = self.start;
-            self.start += 1;
-
             if self.is_exact_sized {
+                let current = self.start;
+                self.start += 1;
+
                 return unsafe { Some(self.shiperator.get_captain_data(current)) };
             } else {
+                let current = self.shiperator.next_possible(self.start);
+
+                if current >= self.end {
+                    self.start = self.end;
+                    continue;
+                }
+
+                self.start = current + 1;
+
                 let entity_id = unsafe { self.entities.get(current) };
 
-                if let Some(indices) = self.shiperator.indices_of(entity_id, current) {
+                if let Some(indices) = self.shiperator.captain_indices_of(entity_id, current) {
                     return unsafe { Some(self.shiperator.get_sailor_data(indices)) };
                 }
             }
@@ -107,11 +117,17 @@ impl<S: ShiperatorCaptain + ShiperatorSailor> Iterator for Shiperator<S> {
                 }
             } else {
                 while self.start < self.end {
-                    let current = self.start;
-                    self.start += 1;
+                    let current = self.shiperator.next_possible(self.start);
+
+                    if current >= self.end {
+                        self.start = self.end;
+                        break;
+                    }
+
+                    self.start = current + 1;
                     let entity_id = unsafe { self.entities.get(current) };
 
-                    if let Some(indices) = self.shiperator.indices_of(entity_id, current) {
+                    if let Some(indices) = self.shiperator.captain_indices_of(entity_id, current) {
                         init = f(init, unsafe { self.shiperator.get_sailor_data(indices) });
                     }
                 }

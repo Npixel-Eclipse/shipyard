@@ -180,8 +180,10 @@ pub(crate) fn map_deletion_data<T>(
     (entity_id, timestamp)
 }
 
+pub(crate) type AtomicTimestamp = core::sync::atomic::AtomicU64;
+
 /// Timestamp used to clear tracking information.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TrackingTimestamp(u64);
 
 impl TrackingTimestamp {

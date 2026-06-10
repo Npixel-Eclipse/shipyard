@@ -86,6 +86,7 @@ where
             entities,
             start: 0,
             end: len,
+            min_split_len: 1,
         }
     }
 
@@ -382,10 +383,6 @@ macro_rules! impl_into_shiperator_tuple {
                     $(
                         if mask & (1 << $index) == 0 {
                             shiperators.$index.0.unpick();
-                        } else {
-                            if !shiperators.$index.0.is_exact_sized() {
-                                mask = 0;
-                            }
                         }
                     )+
 
@@ -418,10 +415,6 @@ macro_rules! impl_into_shiperator_tuple {
                 $(
                     if mask & (1 << $index) == 0 {
                         shiperators.$index.0.unpick();
-                    } else {
-                        if !shiperators.$index.0.is_exact_sized() {
-                            mask = 0;
-                        }
                     }
                 )+
 

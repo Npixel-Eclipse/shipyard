@@ -46,6 +46,7 @@ impl<'a, 'b, T: IterComponent> IntoIterRef<'a, T> {
             is_exact_sized: self.is_exact_sized,
             start: 0,
             end: self.end,
+            min_split_len: 1,
         }
     }
 }
