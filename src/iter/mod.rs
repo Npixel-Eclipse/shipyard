@@ -35,6 +35,7 @@ pub struct Shiperator<S> {
     pub(crate) is_exact_sized: bool,
     pub(crate) start: usize,
     pub(crate) end: usize,
+    #[cfg_attr(not(feature = "parallel"), allow(dead_code))]
     pub(crate) min_split_len: usize,
 }
 
