@@ -2,7 +2,7 @@ use crate::component::Component;
 use crate::entity_id::EntityId;
 use crate::memory_usage::{MemoryUsageDetail, StorageMemoryUsage};
 use crate::sparse_set::SparseSet;
-use crate::tracking::TrackingTimestamp;
+use crate::tracking::{AtomicTimestamp, TrackingTimestamp};
 use core::any::type_name;
 use core::fmt;
 use core::mem::size_of;
@@ -23,6 +23,8 @@ impl<T: Component> SparseSet<T> {
             + (self.data.capacity() * size_of::<T>())
             + (self.insertion_data.capacity() * size_of::<TrackingTimestamp>())
             + (self.modification_data.capacity() * size_of::<TrackingTimestamp>())
+            + (self.insertion_chunks.capacity() * size_of::<TrackingTimestamp>())
+            + (self.modification_chunks.capacity() * size_of::<AtomicTimestamp>())
             + (self.deletion_data.capacity() * size_of::<(EntityId, TrackingTimestamp, T)>())
             + (self.removal_data.capacity() * size_of::<(EntityId, TrackingTimestamp)>())
             + size_of::<Self>()
@@ -34,6 +36,8 @@ impl<T: Component> SparseSet<T> {
             + (self.data.len() * size_of::<T>())
             + (self.insertion_data.len() * size_of::<TrackingTimestamp>())
             + (self.modification_data.len() * size_of::<TrackingTimestamp>())
+            + (self.insertion_chunks.len() * size_of::<TrackingTimestamp>())
+            + (self.modification_chunks.len() * size_of::<AtomicTimestamp>())
             + (self.deletion_data.len() * size_of::<(EntityId, TrackingTimestamp, T)>())
             + (self.removal_data.len() * size_of::<(EntityId, TrackingTimestamp)>())
             + size_of::<Self>()
@@ -98,9 +102,11 @@ impl<T: Component> MemoryUsageDetail for SparseSet<T> {
                 sparse: self.sparse.reserved_memory(),
                 dense: self.dense.capacity() * size_of::<EntityId>(),
                 data: self.data.capacity() * size_of::<T>(),
-                insertion_data: self.insertion_data.capacity() * size_of::<TrackingTimestamp>(),
-                modification_data: self.modification_data.capacity()
+                insertion_data: (self.insertion_data.capacity() + self.insertion_chunks.capacity())
                     * size_of::<TrackingTimestamp>(),
+                modification_data: self.modification_data.capacity()
+                    * size_of::<TrackingTimestamp>()
+                    + self.modification_chunks.capacity() * size_of::<AtomicTimestamp>(),
                 deletion_data: self.deletion_data.capacity()
                     * size_of::<(EntityId, TrackingTimestamp, T)>(),
                 removal_data: self.removal_data.capacity()
@@ -111,8 +117,10 @@ impl<T: Component> MemoryUsageDetail for SparseSet<T> {
                 sparse: self.sparse.used_memory(),
                 dense: self.dense.len() * size_of::<EntityId>(),
                 data: self.data.len() * size_of::<T>(),
-                insertion_data: self.insertion_data.len() * size_of::<TrackingTimestamp>(),
-                modification_data: self.modification_data.len() * size_of::<TrackingTimestamp>(),
+                insertion_data: (self.insertion_data.len() + self.insertion_chunks.len())
+                    * size_of::<TrackingTimestamp>(),
+                modification_data: self.modification_data.len() * size_of::<TrackingTimestamp>()
+                    + self.modification_chunks.len() * size_of::<AtomicTimestamp>(),
                 deletion_data: self.deletion_data.len()
                     * size_of::<(EntityId, TrackingTimestamp, T)>(),
                 removal_data: self.removal_data.len() * size_of::<(EntityId, TrackingTimestamp)>(),
@@ -177,6 +185,8 @@ mod tests {
         let expected_data_memory = 1 * size_of::<I32>();
         let expected_insertion_tracking_memory = 1 * size_of::<TrackingTimestamp>();
         let expected_modification_tracking_memory = 1 * size_of::<TrackingTimestamp>();
+        let expected_insertion_chunk_memory = 1 * size_of::<TrackingTimestamp>();
+        let expected_modification_chunk_memory = 1 * size_of::<AtomicTimestamp>();
         let expected_deletion_tracking_memory = 1 * size_of::<(EntityId, TrackingTimestamp, I32)>();
         let expected_removal_tracking_memory = 1 * size_of::<(EntityId, TrackingTimestamp)>();
         let expected_self_memory = size_of::<SparseSet<I32>>();
@@ -185,6 +195,8 @@ mod tests {
             + expected_data_memory
             + expected_insertion_tracking_memory
             + expected_modification_tracking_memory
+            + expected_insertion_chunk_memory
+            + expected_modification_chunk_memory
             + expected_deletion_tracking_memory
             + expected_removal_tracking_memory
             + expected_self_memory;
@@ -235,10 +247,12 @@ mod tests {
         let expected_sparse_allocated = sparse_set.sparse.reserved_memory();
         let expected_dense_allocated = sparse_set.dense.capacity() * size_of::<EntityId>();
         let expected_data_allocated = sparse_set.data.capacity() * size_of::<I32>();
-        let expected_insertion_allocated =
-            sparse_set.insertion_data.capacity() * size_of::<TrackingTimestamp>();
-        let expected_modification_allocated =
-            sparse_set.modification_data.capacity() * size_of::<TrackingTimestamp>();
+        let expected_insertion_allocated = (sparse_set.insertion_data.capacity()
+            + sparse_set.insertion_chunks.capacity())
+            * size_of::<TrackingTimestamp>();
+        let expected_modification_allocated = sparse_set.modification_data.capacity()
+            * size_of::<TrackingTimestamp>()
+            + sparse_set.modification_chunks.capacity() * size_of::<AtomicTimestamp>();
         let expected_deletion_allocated =
             sparse_set.deletion_data.capacity() * size_of::<(EntityId, TrackingTimestamp, I32)>();
         let expected_removal_allocated =
@@ -247,10 +261,12 @@ mod tests {
         let expected_sparse_used = sparse_set.sparse.used_memory();
         let expected_dense_used = sparse_set.dense.len() * size_of::<EntityId>();
         let expected_data_used = sparse_set.data.len() * size_of::<I32>();
-        let expected_insertion_used =
-            sparse_set.insertion_data.len() * size_of::<TrackingTimestamp>();
-        let expected_modification_used =
-            sparse_set.modification_data.len() * size_of::<TrackingTimestamp>();
+        let expected_insertion_used = (sparse_set.insertion_data.len()
+            + sparse_set.insertion_chunks.len())
+            * size_of::<TrackingTimestamp>();
+        let expected_modification_used = sparse_set.modification_data.len()
+            * size_of::<TrackingTimestamp>()
+            + sparse_set.modification_chunks.len() * size_of::<AtomicTimestamp>();
         let expected_deletion_used =
             sparse_set.deletion_data.len() * size_of::<(EntityId, TrackingTimestamp, I32)>();
         let expected_removal_used =
