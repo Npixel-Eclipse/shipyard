@@ -3,11 +3,44 @@ use crate::component::Component;
 use crate::entities::Entities;
 use crate::entity_id::EntityId;
 use crate::reserve::BulkEntityIter;
-use crate::sparse_set::SparseSet;
-use crate::tracking::TrackingTimestamp;
+use crate::sparse_set::{flag_insertion_chunk, tracking_chunk_count, SparseSet};
+use crate::tracking::{AtomicTimestamp, TrackingTimestamp};
 #[cfg(doc)]
 use crate::world::World;
 use core::iter::IntoIterator;
+
+fn extend_tracking<T: Component>(
+    sparse_set: &mut SparseSet<T>,
+    old_len: usize,
+    new_len: usize,
+    insertion_timestamp: TrackingTimestamp,
+) {
+    let added = new_len - old_len;
+
+    if sparse_set.is_tracking_insertion() {
+        sparse_set
+            .insertion_data
+            .extend(core::iter::repeat(insertion_timestamp).take(added));
+        sparse_set
+            .insertion_chunks
+            .resize(tracking_chunk_count(new_len), TrackingTimestamp::origin());
+
+        for index in old_len..new_len {
+            flag_insertion_chunk(&mut sparse_set.insertion_chunks, index, insertion_timestamp);
+        }
+    }
+
+    if sparse_set.is_tracking_modification() {
+        sparse_set
+            .modification_data
+            .extend(core::iter::repeat(TrackingTimestamp::origin()).take(added));
+        sparse_set
+            .modification_chunks
+            .resize_with(tracking_chunk_count(new_len), || {
+                AtomicTimestamp::new(TrackingTimestamp::origin().get())
+            });
+    }
+}
 
 /// Trait used as bound for [`World::bulk_add_entity`] and [`AllStorages::bulk_add_entity`].
 pub trait BulkAddEntity {
@@ -82,17 +115,8 @@ impl<T: Send + Sync + Component> BulkInsert for T {
         // add new EntityId to the storage for the components we added above
         sparse_set.dense.extend_from_slice(new_entities);
 
-        // add tracking info if needed
-        if sparse_set.is_tracking_insertion() {
-            sparse_set
-                .insertion_data
-                .extend(new_entities.iter().map(|_| current));
-        }
-        if sparse_set.is_tracking_modification() {
-            sparse_set
-                .modification_data
-                .extend(new_entities.iter().map(|_| TrackingTimestamp::origin()));
-        }
+        let new_len = sparse_set.dense.len();
+        extend_tracking(&mut sparse_set, old_len, new_len, current);
 
         let SparseSet { sparse, dense, .. } = &mut *sparse_set;
 
@@ -130,6 +154,7 @@ macro_rules! impl_bulk_insert {
             #[allow(non_snake_case)]
             fn bulk_insert<Source: IntoIterator<Item = Self>>(all_storages: &mut AllStorages, iter: Source) -> BulkEntityIter<'_> {
                 let iter = iter.into_iter();
+                let current = all_storages.get_current();
                 let size_hint = iter.size_hint().0;
                 let mut entities = all_storages.entities_mut().unwrap();
                 let mut $sparse_set1 = all_storages.custom_storage_or_insert_mut(SparseSet::<$type1>::new).unwrap();
@@ -158,18 +183,16 @@ macro_rules! impl_bulk_insert {
                     $sparse_set.dense.extend_from_slice(new_entities);
                 )*
 
-                if $sparse_set1.is_tracking_insertion() {
-                    $sparse_set1.insertion_data.extend(new_entities.iter().map(|_| TrackingTimestamp::new(0)));
-                }
-                if $sparse_set1.is_tracking_modification() {
-                    $sparse_set1.modification_data.extend(new_entities.iter().map(|_| TrackingTimestamp::new(0)));
+                {
+                    let old_len = $sparse_set1.dense.len() - new_entities_count;
+                    let new_len = $sparse_set1.dense.len();
+                    extend_tracking(&mut $sparse_set1, old_len, new_len, current);
                 }
                 $(
-                    if $sparse_set.is_tracking_insertion() {
-                        $sparse_set.insertion_data.extend(new_entities.iter().map(|_| TrackingTimestamp::new(0)));
-                    }
-                    if $sparse_set.is_tracking_modification() {
-                        $sparse_set.modification_data.extend(new_entities.iter().map(|_| TrackingTimestamp::new(0)));
+                    {
+                        let old_len = $sparse_set.dense.len() - new_entities_count;
+                        let new_len = $sparse_set.dense.len();
+                        extend_tracking(&mut $sparse_set, old_len, new_len, current);
                     }
                 )*
 

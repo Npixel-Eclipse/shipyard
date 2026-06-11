@@ -97,6 +97,26 @@ fn inserted_across_chunk_boundaries() {
     });
 }
 
+#[test]
+fn bulk_insert_updates_existing_insertion_chunk() {
+    let (mut world, _ids) = setup();
+
+    let new_ids = world
+        .bulk_add_entity((0..1).map(|_| Counter(1000)))
+        .collect::<Vec<_>>();
+
+    world.run(|counters: ViewMut<Counter, track::All>| {
+        let inserted: Vec<EntityId> = counters
+            .inserted()
+            .iter()
+            .with_id()
+            .map(|(id, _)| id)
+            .collect();
+
+        assert_eq!(inserted, new_ids);
+    });
+}
+
 #[cfg(feature = "parallel")]
 #[test]
 fn par_iter_covers_all_entities() {
