@@ -62,3 +62,56 @@ fn key_equality() {
         assert_eq!(entity, e1);
     });
 }
+
+#[cfg(feature = "parallel")]
+#[test]
+fn parallel_with_id_keeps_entity_alignment() {
+    use rayon::prelude::*;
+
+    let mut world = World::new();
+    let ids = (0..300)
+        .map(|i| {
+            if i % 2 == 0 {
+                world.add_entity((USIZE(i), U32(i as u32)))
+            } else {
+                world.add_entity(USIZE(i))
+            }
+        })
+        .collect::<Vec<_>>();
+
+    world.run(|usizes: View<USIZE>| {
+        let mut actual = (&usizes)
+            .par_iter()
+            .with_id()
+            .map(|(id, value)| (id, value.0))
+            .collect::<Vec<_>>();
+        actual.sort_unstable_by_key(|(_, value)| *value);
+
+        assert_eq!(actual, ids.iter().copied().zip(0..300).collect::<Vec<_>>());
+    });
+
+    world.run(|(usizes, u32s): (View<USIZE>, View<U32>)| {
+        let mut actual = (&usizes, &u32s)
+            .par_iter()
+            .with_id()
+            .map(|(id, (usize, u32))| (id, usize.0, u32.0))
+            .collect::<Vec<_>>();
+        actual.sort_unstable_by_key(|(_, value, _)| *value);
+
+        let expected = ids
+            .iter()
+            .copied()
+            .zip(0..300)
+            .filter(|(_, value)| value % 2 == 0)
+            .map(|(id, value)| (id, value, value as u32))
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected);
+    });
+
+    world.run(|mut usizes: ViewMut<USIZE>| {
+        (&mut usizes).par_iter().with_id().for_each(|(id, value)| {
+            assert_eq!(id, ids[value.0]);
+            value.0 += 1;
+        });
+    });
+}

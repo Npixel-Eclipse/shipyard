@@ -134,3 +134,36 @@ fn par_iter_covers_all_entities() {
         assert_eq!(modified_total, 0);
     });
 }
+
+#[cfg(feature = "parallel")]
+#[test]
+fn par_iter_with_id_covers_modified_entities() {
+    use core::sync::atomic::{AtomicUsize, Ordering};
+    use rayon::prelude::*;
+
+    let (world, ids) = setup();
+
+    world.run(|mut counters: ViewMut<Counter, track::All>| {
+        for &index in &[5usize, 70, 200, 299] {
+            let mut counter = (&mut counters)
+                .get(ids[index])
+                .expect("entity should have a Counter");
+            counter.modify(|_| {});
+        }
+    });
+
+    world.run(|counters: ViewMut<Counter, track::All>| {
+        let hits = AtomicUsize::new(0);
+
+        counters
+            .modified()
+            .par_iter()
+            .with_id()
+            .for_each(|(id, counter)| {
+                assert_eq!(id, ids[counter.0]);
+                hits.fetch_add(1, Ordering::Relaxed);
+            });
+
+        assert_eq!(hits.load(Ordering::Relaxed), 4);
+    });
+}

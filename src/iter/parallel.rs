@@ -1,9 +1,24 @@
-use crate::iter::{Shiperator, ShiperatorCaptain, ShiperatorSailor};
+use crate::entity_id::EntityId;
+use crate::iter::{Shiperator, ShiperatorCaptain, ShiperatorSailor, WithId};
 
 const MIN_SPLIT_LEN: usize = 16;
 
 #[allow(missing_docs)]
 pub struct ParShiperator<S>(pub(crate) Shiperator<S>);
+
+impl<S> ParShiperator<S> {
+    /// Returns the [`EntityId`] alongside the component(s).
+    pub fn with_id(self) -> WithId<Self> {
+        WithId(self)
+    }
+}
+
+fn configure_split<S>(producer: &mut Shiperator<S>) {
+    let total_len = producer.end - producer.start + producer.entities.follow_up_len();
+    let threads = rayon::current_num_threads().max(1);
+
+    producer.min_split_len = (total_len / (threads * 4)).max(MIN_SPLIT_LEN);
+}
 
 impl<S: ShiperatorCaptain + ShiperatorSailor + Send + Clone>
     rayon::iter::plumbing::UnindexedProducer for Shiperator<S>
@@ -64,10 +79,7 @@ where
         C: rayon::iter::plumbing::UnindexedConsumer<Self::Item>,
     {
         let mut producer = self.0;
-        let total_len = producer.end - producer.start + producer.entities.follow_up_len();
-        let threads = rayon::current_num_threads().max(1);
-
-        producer.min_split_len = (total_len / (threads * 4)).max(MIN_SPLIT_LEN);
+        configure_split(&mut producer);
 
         rayon::iter::plumbing::bridge_unindexed(producer, consumer)
     }
@@ -79,5 +91,24 @@ where
         } else {
             None
         }
+    }
+}
+
+impl<S: ShiperatorCaptain + ShiperatorSailor + Send + Clone> rayon::iter::ParallelIterator
+    for WithId<ParShiperator<S>>
+where
+    S::Out: Send,
+{
+    type Item = (EntityId, S::Out);
+
+    #[inline]
+    fn drive_unindexed<C>(self, consumer: C) -> C::Result
+    where
+        C: rayon::iter::plumbing::UnindexedConsumer<Self::Item>,
+    {
+        let WithId(ParShiperator(mut producer)) = self;
+        configure_split(&mut producer);
+
+        rayon::iter::plumbing::bridge_unindexed(WithId(producer), consumer)
     }
 }
