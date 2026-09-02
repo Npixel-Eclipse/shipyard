@@ -145,9 +145,7 @@ impl EntityId {
     }
     #[inline]
     pub(crate) fn copy_index_gen(&mut self, other: EntityId) {
-        unsafe {
-            self.0 = NonZeroU64::new_unchecked(self.0.get() | other.0.get());
-        }
+        self.0 = other.0;
     }
     /// Returns `EntityId`'s inner representation.
     #[inline]

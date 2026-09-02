@@ -115,3 +115,37 @@ fn parallel_with_id_keeps_entity_alignment() {
         });
     });
 }
+
+#[test]
+fn key_gen_after_slot_reuse() {
+    let mut world = World::new();
+
+    // Free the id without deleting its components, the storages keep the old generation.
+    let e0 = world.add_entity((USIZE(0), U32(0)));
+    world.run(|mut entities: EntitiesViewMut| {
+        assert!(entities.delete_unchecked(e0));
+    });
+
+    // Reuse the same slot twice, `gen 1` then `gen 2`.
+    let e1 = world.add_entity((USIZE(1), U32(1)));
+    world.run(|mut entities: EntitiesViewMut| {
+        assert!(entities.delete_unchecked(e1));
+    });
+    let e2 = world.add_entity((USIZE(2), U32(2)));
+
+    assert_eq!(e2.index(), e0.index());
+    assert_eq!(e2.gen(), 2);
+
+    world.run(|(usizes, u32s): (View<USIZE>, View<U32>)| {
+        // `dense` has to hold `e2` and not `gen 1 | gen 2 == gen 3`.
+        let keys: Vec<EntityId> = (&usizes)
+            .iter()
+            .with_id()
+            .map(|(entity, _)| entity)
+            .collect();
+        assert_eq!(keys, vec![e2]);
+
+        // A corrupted key makes the lookup in the other storage fail and skips the entity.
+        assert_eq!((&usizes, &u32s).iter().with_id().count(), 1);
+    });
+}
