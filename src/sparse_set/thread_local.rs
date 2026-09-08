@@ -3,9 +3,9 @@ use crate::borrow::{NonSend, NonSendSync, NonSync};
 use crate::component::Component;
 use crate::entity_id::EntityId;
 use crate::memory_usage::StorageMemoryUsage;
-use crate::sparse_set::{sparse_array::SparseArray, SparseSet, BUCKET_SIZE};
+use crate::sparse_set::{sparse_array::SparseArray, tracking_chunk_count, SparseSet, BUCKET_SIZE};
 use crate::storage::{SBoxBuilder, Storage, StorageId};
-use crate::tracking::TrackingTimestamp;
+use crate::tracking::{AtomicTimestamp, TrackingTimestamp};
 
 impl<T: Component + Sync> Storage for NonSend<SparseSet<T>> {
     #[inline]
@@ -72,11 +72,19 @@ impl<T: Component + Sync> Storage for NonSend<SparseSet<T>> {
                 sparse_set
                     .insertion_data
                     .resize(self.dense.len(), other_current);
+                sparse_set
+                    .insertion_chunks
+                    .resize(tracking_chunk_count(self.dense.len()), other_current);
             }
             if sparse_set.is_tracking_modification {
                 sparse_set
                     .modification_data
                     .resize(self.dense.len(), TrackingTimestamp::origin());
+                sparse_set
+                    .modification_chunks
+                    .resize_with(tracking_chunk_count(self.dense.len()), || {
+                        AtomicTimestamp::new(TrackingTimestamp::origin().get())
+                    });
             }
 
             SBoxBuilder::new(NonSend(sparse_set))
@@ -167,11 +175,19 @@ impl<T: Component + Send> Storage for NonSync<SparseSet<T>> {
                 sparse_set
                     .insertion_data
                     .resize(self.dense.len(), other_current);
+                sparse_set
+                    .insertion_chunks
+                    .resize(tracking_chunk_count(self.dense.len()), other_current);
             }
             if sparse_set.is_tracking_modification {
                 sparse_set
                     .modification_data
                     .resize(self.dense.len(), TrackingTimestamp::origin());
+                sparse_set
+                    .modification_chunks
+                    .resize_with(tracking_chunk_count(self.dense.len()), || {
+                        AtomicTimestamp::new(TrackingTimestamp::origin().get())
+                    });
             }
 
             SBoxBuilder::new(NonSync(sparse_set))
@@ -264,11 +280,19 @@ impl<T: Component> Storage for NonSendSync<SparseSet<T>> {
                 sparse_set
                     .insertion_data
                     .resize(self.dense.len(), other_current);
+                sparse_set
+                    .insertion_chunks
+                    .resize(tracking_chunk_count(self.dense.len()), other_current);
             }
             if sparse_set.is_tracking_modification {
                 sparse_set
                     .modification_data
                     .resize(self.dense.len(), TrackingTimestamp::origin());
+                sparse_set
+                    .modification_chunks
+                    .resize_with(tracking_chunk_count(self.dense.len()), || {
+                        AtomicTimestamp::new(TrackingTimestamp::origin().get())
+                    });
             }
 
             SBoxBuilder::new(NonSendSync(sparse_set))
