@@ -77,8 +77,16 @@ where
     #[inline]
     fn iter(self) -> Shiperator<Self::Shiperator> {
         let mut storage_ids = ShipHashSet::new();
-        let (shiperator, len, entities) = self.into_shiperator(&mut storage_ids);
+        let (shiperator, mut len, mut entities) = self.into_shiperator(&mut storage_ids);
         let is_infallible = shiperator.is_exact_sized();
+
+        // Keep construction, driver selection, and nonempty iteration order intact.
+        // Discard every follow-up slice only when a required AND member is empty.
+        // A tiny driver must not trigger a scan over a much larger tracking store.
+        if shiperator.is_definitely_empty((len / 8).max(1)) {
+            len = 0;
+            entities = RawEntityIdAccess::dangling();
+        }
 
         Shiperator {
             shiperator,

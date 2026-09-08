@@ -71,6 +71,11 @@ macro_rules! impl_shiperator_output {
             }
 
             #[inline]
+            fn is_definitely_empty(&self, max_chunks: usize) -> bool {
+                false $(|| self.shiperator.$index.is_definitely_empty(max_chunks))+
+            }
+
+            #[inline]
             fn unpick(&mut self) {
                 self.mask = 0;
 

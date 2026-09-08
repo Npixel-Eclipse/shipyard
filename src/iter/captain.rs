@@ -28,6 +28,13 @@ pub trait ShiperatorCaptain: ShiperatorOutput {
     fn sail_time(&self) -> usize;
     /// `true` when this Shiperator cannot return `None`.
     fn is_exact_sized(&self) -> bool;
+    /// Conservatively proves that this required iterator cannot yield an item.
+    /// At most `max_chunks` tracking metadata chunks may be inspected per member.
+    /// The default keeps existing traversal for custom and non-AND wrappers.
+    #[inline]
+    fn is_definitely_empty(&self, _max_chunks: usize) -> bool {
+        false
+    }
     /// By default `into_shiperator` returns Shiperators that thinks they are captains.\
     /// This function is called on the ones that end up not being picked.
     fn unpick(&mut self);

@@ -1,6 +1,6 @@
 use crate::component::Component;
 use crate::iter::ShiperatorCaptain;
-use crate::sparse_set::{FullRawWindow, FullRawWindowMut};
+use crate::sparse_set::{FullRawWindow, FullRawWindowMut, TRACKING_CHUNK_SIZE};
 use crate::track;
 use crate::tracking::{Inserted, InsertedOrModified, Modified};
 
@@ -38,6 +38,14 @@ macro_rules! impl_shiperator_captain_tracking {
                 self.0
                     .next_tracked(index, $check_insertion, $check_modification)
             }
+
+            #[inline]
+            fn is_definitely_empty(&self, max_chunks: usize) -> bool {
+                if self.0.len().div_ceil(TRACKING_CHUNK_SIZE) > max_chunks {
+                    return false;
+                }
+                self.0.next_tracked(0, $check_insertion, $check_modification) >= self.0.len()
+            }
         }
 
         $(
@@ -70,6 +78,14 @@ macro_rules! impl_shiperator_captain_tracking {
                 fn next_possible(&self, index: usize) -> usize {
                     self.0
                         .next_tracked(index, $check_insertion, $check_modification)
+                }
+
+                #[inline]
+                fn is_definitely_empty(&self, max_chunks: usize) -> bool {
+                    if self.0.len().div_ceil(TRACKING_CHUNK_SIZE) > max_chunks {
+                        return false;
+                    }
+                    self.0.next_tracked(0, $check_insertion, $check_modification) >= self.0.len()
                 }
             }
         )+
