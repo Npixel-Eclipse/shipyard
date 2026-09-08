@@ -47,6 +47,8 @@ impl<S: ShiperatorCaptain + ShiperatorSailor> Iterator for WithId<Shiperator<S>>
                 if let Some(new_end) = self.0.entities.next_slice() {
                     self.0.start = 0;
                     self.0.end = new_end;
+
+                    self.0.shiperator.next_slice();
                 } else {
                     return init;
                 }
