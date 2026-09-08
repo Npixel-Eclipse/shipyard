@@ -99,13 +99,7 @@ where
 
 impl<S: ShiperatorCaptain + ShiperatorSailor> DoubleEndedIterator for WithId<Shiperator<S>> {
     fn next_back(&mut self) -> Option<Self::Item> {
-        if let Some(item) = self.0.next_back() {
-            let entity_id = unsafe { self.0.entities.get(self.0.end) };
-
-            Some((entity_id, item))
-        } else {
-            None
-        }
+        self.0.next_back_with_id()
     }
 
     fn rfold<B, F>(mut self, mut init: B, mut f: F) -> B
@@ -113,43 +107,10 @@ impl<S: ShiperatorCaptain + ShiperatorSailor> DoubleEndedIterator for WithId<Shi
         Self: Sized,
         F: FnMut(B, Self::Item) -> B,
     {
-        loop {
-            if self.0.start == self.0.end {
-                if let Some(new_end) = self.0.entities.next_slice() {
-                    self.0.start = 0;
-                    self.0.end = new_end;
-
-                    self.0.shiperator.next_slice();
-                } else {
-                    return init;
-                }
-            };
-
-            if self.0.is_exact_sized {
-                while self.0.start < self.0.end {
-                    self.0.end -= 1;
-
-                    let entity_id = unsafe { self.0.entities.get(self.0.end) };
-                    let data = unsafe { self.0.shiperator.get_captain_data(self.0.end) };
-
-                    init = f(init, (entity_id, data));
-                }
-            } else {
-                while self.0.start < self.0.end {
-                    self.0.end -= 1;
-
-                    let entity_id = unsafe { self.0.entities.get(self.0.end) };
-
-                    if let Some(indices) =
-                        self.0.shiperator.captain_indices_of(entity_id, self.0.end)
-                    {
-                        let data = unsafe { self.0.shiperator.get_sailor_data(indices) };
-
-                        init = f(init, (entity_id, data));
-                    }
-                }
-            }
+        while let Some(item) = self.0.next_back_with_id() {
+            init = f(init, item);
         }
+        init
     }
 }
 

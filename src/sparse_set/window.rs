@@ -222,8 +222,9 @@ impl<'w, T: Component> FullRawWindow<'w, T> {
         &self,
         check_insertion: bool,
         check_modification: bool,
+        max_chunks: usize,
     ) -> TrackingPlan {
-        TrackingPlan::build(self.dense_len, |chunk| {
+        TrackingPlan::build_with_budget(self.dense_len, max_chunks, |chunk| {
             tracking_chunk_matches(
                 chunk,
                 self.insertion_chunks,
@@ -415,8 +416,9 @@ impl<'w, T: Component, Track> FullRawWindowMut<'w, T, Track> {
         &self,
         check_insertion: bool,
         check_modification: bool,
+        max_chunks: usize,
     ) -> TrackingPlan {
-        TrackingPlan::build(self.dense_len, |chunk| {
+        TrackingPlan::build_with_budget(self.dense_len, max_chunks, |chunk| {
             tracking_chunk_matches(
                 chunk,
                 self.insertion_chunks,

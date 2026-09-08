@@ -163,6 +163,490 @@ fn empty_tracking_does_not_prune_negation_optional_or_union() {
     });
 }
 
+#[test]
+fn or_propagates_empty_proofs_and_skips_each_sources_clean_chunks() {
+    use shipyard::iter::{IntoShiperator, ShiperatorCaptain};
+    let (world, ids) = setup(4097);
+    world.run(|values: View<Value>, markers: View<Marker>| {
+        assert_eq!(
+            (values.inserted() | values.modified()).iter().size_hint(),
+            (0, Some(0))
+        );
+        assert_eq!(
+            (&ids[..], values.inserted() | values.modified(), &markers)
+                .iter()
+                .size_hint(),
+            (0, Some(0))
+        );
+    });
+    modify(&world, &ids, &[4096]);
+    world.run(|values: View<Value>| {
+        let (mut captain, _, _) =
+            (values.inserted() | values.modified()).into_shiperator(&mut Default::default());
+        assert!(!captain.has_no_candidates());
+        assert!(captain.next_possible(0) >= ids.len());
+        captain.next_slice();
+        assert_eq!(captain.next_possible(0), 4096);
+        assert_eq!(captain.previous_possible(4096), 0);
+        assert_eq!(captain.previous_possible(4097), 4097);
+    });
+}
+
+#[derive(Component)]
+#[track(All)]
+struct Other(usize);
+
+#[derive(Component)]
+#[track(All)]
+struct Third;
+
+fn setup_or() -> (World, Vec<EntityId>, Vec<EntityId>) {
+    let mut world = World::new();
+    let ids: Vec<_> = (0..4097)
+        .map(|i| world.add_entity((Value(i), Third)))
+        .collect();
+    for (i, &id) in ids.iter().enumerate().rev() {
+        world.add_component(id, (Other(i), Marker));
+    }
+    world.clear_all_inserted_and_modified();
+    world.run(|_: ViewMut<Value>, _: ViewMut<Other>, _: ViewMut<Third>| {});
+    modify(&world, &ids, &[3, 64, 4096]);
+    world.run(|mut other: ViewMut<Other>, mut third: ViewMut<Third>| {
+        for i in [64, 70, 4000] {
+            (&mut other).get(ids[i]).unwrap().modify(|_| {});
+        }
+        for i in [3, 100, 4096] {
+            (&mut third).get(ids[i]).unwrap().modify(|_| {});
+        }
+    });
+    let expected = [3, 64, 4096, 4000, 70, 100].map(|i| ids[i]).to_vec();
+    (world, ids, expected)
+}
+
+#[test]
+fn nested_or_keeps_union_precedence_ids_reverse_and_partial_consumption() {
+    let (world, ids, expected) = setup_or();
+    world.run(
+        |values: View<Value>, other: View<Other>, third: View<Third>, markers: View<Marker>| {
+            let query = || values.inserted() | (values.modified(), &markers);
+            // Mixed used as an OR branch must check its tracking predicate during
+            // entity membership probes as well as when it drives iteration.
+            assert_eq!(
+                query()
+                    .iter()
+                    .with_id()
+                    .map(|(id, _)| id)
+                    .collect::<Vec<_>>(),
+                [ids[3], ids[64], ids[4096]]
+            );
+            let query = || values.modified() | (other.modified() | third.modified());
+            assert_eq!(
+                query()
+                    .iter()
+                    .with_id()
+                    .map(|(id, _)| id)
+                    .collect::<Vec<_>>(),
+                expected
+            );
+            assert_eq!(
+                query()
+                    .iter()
+                    .with_id()
+                    .rev()
+                    .map(|(id, _)| id)
+                    .collect::<Vec<_>>(),
+                expected.iter().rev().copied().collect::<Vec<_>>()
+            );
+            assert_eq!(
+                ((values.modified() | other.modified()) | third.modified())
+                    .iter()
+                    .with_id()
+                    .map(|(id, _)| id)
+                    .collect::<Vec<_>>(),
+                expected
+            );
+            assert_eq!(
+                query()
+                    .iter()
+                    .with_id()
+                    .fold(Vec::new(), |mut out, (id, _)| {
+                        out.push(id);
+                        out
+                    }),
+                expected
+            );
+            assert_eq!(
+                query()
+                    .iter()
+                    .with_id()
+                    .rfold(Vec::new(), |mut out, (id, _)| {
+                        out.push(id);
+                        out
+                    }),
+                expected.iter().rev().copied().collect::<Vec<_>>()
+            );
+            let mut iter = query().iter().with_id();
+            let mut remaining = std::collections::VecDeque::from(expected.clone());
+            while !remaining.is_empty() {
+                assert_eq!(iter.next().map(|(id, _)| id), remaining.pop_front());
+                assert_eq!(iter.next_back().map(|(id, _)| id), remaining.pop_back());
+            }
+            assert!(iter.next().is_none());
+            assert!(iter.next_back().is_none());
+            let forced: Vec<_> = ids.iter().rev().copied().collect();
+            let actual: Vec<_> = (&forced[..], query()).iter().map(|(id, _)| id).collect();
+            assert_eq!(
+                actual,
+                forced
+                    .iter()
+                    .copied()
+                    .filter(|id| expected.contains(id))
+                    .collect::<Vec<_>>()
+            );
+            let mixed_union = values.modified() | (other.inserted() | (other.modified(), &markers));
+            assert_eq!(
+                mixed_union
+                    .iter()
+                    .with_id()
+                    .map(|(id, _)| id)
+                    .collect::<Vec<_>>(),
+                expected[..5]
+            );
+        },
+    );
+}
+
+#[cfg(feature = "parallel")]
+#[test]
+fn parallel_or_preserves_sources_deduplication_and_mutable_tracking() {
+    use rayon::prelude::*;
+    use shipyard::iter::OneOfTwo;
+    for workers in [1, 4, 16] {
+        let (world, ids, mut expected) = setup_or();
+        expected.sort_unstable();
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(workers)
+            .build()
+            .unwrap()
+            .install(|| {
+                world.run(
+                    |values: View<Value>,
+                     other: View<Other>,
+                     third: View<Third>,
+                     markers: View<Marker>| {
+                        let query = || values.modified() | (other.modified() | third.modified());
+                        let mut actual: Vec<_> = (query(), &markers)
+                            .par_iter()
+                            .with_id()
+                            .map(|(id, _)| id)
+                            .collect();
+                        actual.sort_unstable();
+                        assert_eq!(actual, expected);
+                        let mut actual: Vec<_> = ((values.modified() | other.modified())
+                            | third.modified())
+                        .par_iter()
+                        .with_id()
+                        .map(|(id, _)| id)
+                        .collect();
+                        actual.sort_unstable();
+                        assert_eq!(actual, expected);
+                        assert_eq!((values.inserted() | other.inserted()).par_iter().count(), 0);
+                    },
+                );
+                world.run(|mut values: ViewMut<Value>, mut other: ViewMut<Other>| {
+                    use rayon::iter::plumbing::UnindexedProducer;
+                    // Keep cross-source probes from racing with mutable timestamps.
+                    let (producer, right) = (values.modified_mut() | other.modified_mut())
+                        .iter()
+                        .split();
+                    assert!(right.is_none());
+                    drop(producer);
+                    (values.modified_mut() | other.modified_mut())
+                        .par_iter()
+                        .with_id()
+                        .for_each(|(id, value)| match value {
+                            OneOfTwo::One(mut value) => {
+                                assert_eq!(id, ids[value.0]);
+                                value.modify(|v| v.0 += 10000);
+                            }
+                            OneOfTwo::Two(mut value) => {
+                                assert_eq!(id, ids[value.0]);
+                                value.modify(|v| v.0 += 10000);
+                            }
+                        });
+                    for i in [3, 64, 4096] {
+                        assert_eq!(values.get(ids[i]).unwrap().0, i + 10000);
+                    }
+                    for i in [70, 4000] {
+                        assert_eq!(other.get(ids[i]).unwrap().0, i + 10000);
+                    }
+                    assert_eq!(other.get(ids[64]).unwrap().0, 64);
+                });
+            });
+    }
+}
+
+#[test]
+fn or_union_matrix_preserves_empty_overlap_optional_not_and_iteration_order() {
+    use shipyard::iter::Optional;
+    let patterns = [
+        vec![],
+        vec![0],
+        vec![64, 128],
+        vec![0, 64, 128],
+        (0..129).collect(),
+    ];
+    for left_changed in &patterns {
+        for right_changed in &patterns {
+            let mut world = World::new();
+            let ids: Vec<_> = (0..129).map(|i| world.add_entity(Value(i))).collect();
+            for i in (0..129).rev() {
+                world.add_component(ids[i], Other(i));
+            }
+            world.clear_all_inserted_and_modified();
+            world.run(|_: ViewMut<Value>, _: ViewMut<Other>| {});
+            modify(&world, &ids, left_changed);
+            world.run(|mut other: ViewMut<Other>| {
+                for &i in right_changed {
+                    (&mut other).get(ids[i]).unwrap().modify(|_| {});
+                }
+            });
+            let expected: Vec<_> = left_changed
+                .iter()
+                .copied()
+                .chain(
+                    right_changed
+                        .iter()
+                        .rev()
+                        .copied()
+                        .filter(|i| !left_changed.contains(i)),
+                )
+                .map(|i| ids[i])
+                .collect();
+            world.run(
+                |values: View<Value>, other: View<Other>, third: View<Third>| {
+                    let query = || values.inserted_or_modified() | other.modified();
+                    assert_eq!(
+                        query()
+                            .iter()
+                            .with_id()
+                            .map(|(id, _)| id)
+                            .collect::<Vec<_>>(),
+                        expected
+                    );
+                    assert_eq!(
+                        query()
+                            .iter()
+                            .with_id()
+                            .rev()
+                            .map(|(id, _)| id)
+                            .collect::<Vec<_>>(),
+                        expected.iter().rev().copied().collect::<Vec<_>>()
+                    );
+                    assert_eq!((query(), Optional(&third)).iter().count(), expected.len());
+                    let mut actual: Vec<_> = (query(), !values.modified())
+                        .iter()
+                        .with_id()
+                        .map(|(id, _)| id)
+                        .collect();
+                    actual.sort_unstable();
+                    let mut right_only: Vec<_> = right_changed
+                        .iter()
+                        .filter(|i| !left_changed.contains(i))
+                        .map(|&i| ids[i])
+                        .collect();
+                    right_only.sort_unstable();
+                    assert_eq!(actual, right_only);
+                    let mut iter = query().iter().with_id();
+                    let mut remaining = std::collections::VecDeque::from(expected.clone());
+                    while !remaining.is_empty() {
+                        assert_eq!(iter.next_back().map(|(id, _)| id), remaining.pop_back());
+                        assert_eq!(iter.next().map(|(id, _)| id), remaining.pop_front());
+                    }
+                    assert!(iter.next().is_none());
+                    assert!(iter.next_back().is_none());
+                    #[cfg(feature = "parallel")]
+                    {
+                        use rayon::prelude::*;
+                        let mut parallel: Vec<_> =
+                            query().par_iter().with_id().map(|(id, _)| id).collect();
+                        parallel.sort_unstable();
+                        let mut sorted = expected.clone();
+                        sorted.sort_unstable();
+                        assert_eq!(parallel, sorted);
+                    }
+                },
+            );
+        }
+    }
+}
+
+#[test]
+fn planning_budget_boundary_keeps_small_joins_bounded_and_large_sparse_joins_planned() {
+    for driver_len in [0, 64, 128, 1563, 1564, 3000] {
+        let mut world = World::new();
+        let ids: Vec<_> = world.bulk_add_entity((0..50_000).map(Value)).collect();
+        for &id in ids.iter().rev().take(driver_len) {
+            world.add_component(id, Marker);
+        }
+        world.clear_all_inserted_and_modified();
+        world.run(|_: ViewMut<Value>| {});
+        let planned = driver_len >= 1564; // 782 chunks fit driver_len / 2.
+        world.run(|values: View<Value>, markers: View<Marker>| {
+            assert_eq!(
+                (values.modified(), &markers).iter().size_hint(),
+                (0, Some(if planned { 0 } else { driver_len }))
+            );
+            assert_eq!((values.modified(), &markers).iter().count(), 0);
+        });
+        modify(&world, &ids, &[49_996, 49_999]);
+        world.run(|values: View<Value>, markers: View<Marker>| {
+            let actual: Vec<_> = (values.modified(), &markers)
+                .iter()
+                .with_id()
+                .map(|(id, (value, _))| {
+                    assert_eq!(id, ids[value.0]);
+                    value.0
+                })
+                .collect();
+            let expected = if driver_len == 0 {
+                vec![]
+            } else if planned {
+                vec![49_996, 49_999]
+            } else {
+                vec![49_999, 49_996]
+            };
+            assert_eq!(actual, expected);
+            assert_eq!(
+                (values.modified(), &markers)
+                    .iter()
+                    .rev()
+                    .map(|(v, _)| v.0)
+                    .collect::<Vec<_>>(),
+                expected.iter().rev().copied().collect::<Vec<_>>()
+            );
+            #[cfg(feature = "parallel")]
+            {
+                use rayon::prelude::*;
+                let mut actual: Vec<_> = (values.modified(), &markers)
+                    .par_iter()
+                    .map(|(v, _)| v.0)
+                    .collect();
+                let mut expected = expected;
+                actual.sort_unstable();
+                expected.sort_unstable();
+                assert_eq!(actual, expected);
+            }
+        });
+    }
+}
+
+#[test]
+fn planning_budget_propagates_through_nested_queries_and_respects_forced_sources() {
+    use shipyard::iter::Optional;
+    let mut world = World::new();
+    let ids: Vec<_> = world.bulk_add_entity((0..50_000).map(Value)).collect();
+    for (i, &id) in ids.iter().enumerate().rev() {
+        world.add_component(id, Other(i));
+    }
+    for &id in ids.iter().rev().take(64) {
+        world.add_component(id, Marker);
+    }
+    world.clear_all_inserted_and_modified();
+    world.run(|_: ViewMut<Value>, _: ViewMut<Other>| {});
+    world.run(
+        |values: View<Value>, other: View<Other>, markers: View<Marker>, third: View<Third>| {
+            // Child tuples and ORs must not replace the parent's 32-chunk budget
+            // with their own much larger local budget.
+            assert_eq!(
+                (&markers, (values.modified(), &other)).iter().size_hint(),
+                (0, Some(64))
+            );
+            assert_eq!(
+                (&markers, (values.modified(),)).iter().size_hint(),
+                (0, Some(64))
+            );
+            assert_eq!(
+                (
+                    &markers,
+                    values.inserted() | (other.inserted() | values.modified())
+                )
+                    .iter()
+                    .size_hint(),
+                (0, Some(64))
+            );
+            // A mandatory entity slice overrides the shorter Marker storage. Its
+            // 1500-chunk budget allows the large tracking input's empty proof.
+            let requested = &ids[47_000..];
+            assert_eq!(
+                (requested, &markers, values.modified()).iter().size_hint(),
+                (0, Some(0))
+            );
+            // Optional/Not component presence cannot become a zero-length driver.
+            assert_eq!(
+                (requested, values.modified(), Optional(&third), !&third)
+                    .iter()
+                    .size_hint(),
+                (0, Some(0))
+            );
+            assert_eq!(
+                (requested, values.inserted() | other.modified())
+                    .iter()
+                    .size_hint(),
+                (0, Some(0))
+            );
+        },
+    );
+    modify(&world, &ids, &[49_999, 49_998]);
+    world.run(
+        |mut values: ViewMut<Value>, other: View<Other>, markers: View<Marker>| {
+            // Skipping a mutable tracking plan must retain exact per-entity checks.
+            let actual: Vec<_> = (values.modified_mut(), &markers)
+                .iter()
+                .with_id()
+                .map(|(id, (mut value, _))| {
+                    value.modify(|v| v.0 += 1);
+                    id
+                })
+                .collect();
+            assert_eq!(actual, [ids[49_999], ids[49_998]]);
+            let actual: Vec<_> = (
+                &markers,
+                values.inserted() | (other.inserted() | values.modified()),
+            )
+                .iter()
+                .with_id()
+                .map(|(id, _)| id)
+                .collect();
+            assert_eq!(actual, [ids[49_999], ids[49_998]]);
+        },
+    );
+}
+
+#[test]
+fn planning_budget_uses_all_or_sources_and_recognizes_not_tracking_drivers() {
+    let mut world = World::new();
+    let ids: Vec<_> = world.bulk_add_entity((0..50_000).map(Value)).collect();
+    for (i, &id) in ids.iter().take(64).enumerate() {
+        world.add_component(id, Other(i));
+    }
+    world.clear_all_inserted_and_modified();
+    world.run(|_: ViewMut<Value>, _: ViewMut<Other>| {});
+    world.run(|values: View<Value>, other: View<Other>| {
+        // Standalone OR must budget for both 64 and 50,000 slots, not only 64.
+        assert_eq!(
+            (other.inserted() | values.modified()).iter().size_hint(),
+            (0, Some(0))
+        );
+        // Unlike !&view, !view.modified() can drive a query over its storage.
+        assert_eq!(
+            (values.modified(), !other.modified()).iter().size_hint(),
+            (0, Some(64))
+        );
+        assert_eq!((values.modified(), !other.modified()).iter().count(), 0);
+    });
+}
+
 #[cfg(feature = "parallel")]
 #[test]
 fn required_empty_input_prevents_splitting_even_with_a_forced_captain() {
@@ -203,6 +687,43 @@ fn required_empty_input_prevents_splitting_even_with_a_forced_captain() {
                 assert_eq!(initialized.load(Ordering::Relaxed), 2);
             });
         });
+}
+
+#[cfg(feature = "parallel")]
+#[test]
+fn plain_mutable_or_splits_and_visits_each_entity_once() {
+    use rayon::{iter::plumbing::UnindexedProducer, prelude::*};
+    use shipyard::iter::OneOfTwo;
+    let mut world = World::new();
+    let ids: Vec<_> = (0..1025).map(|i| world.add_entity(Value(i))).collect();
+    for i in (512..1025).rev() {
+        world.add_component(ids[i], Other(i));
+    }
+    let extra = world.add_entity(Other(1025));
+    world.run(|mut values: ViewMut<Value>, mut other: ViewMut<Other>| {
+        let (left, right) = (&mut values | &mut other).iter().split();
+        assert!(right.is_some());
+        drop((left, right));
+        let mut found: Vec<_> = (&mut values | &mut other)
+            .par_iter()
+            .with_id()
+            .map(|(id, item)| {
+                match item {
+                    OneOfTwo::One(mut value) => value.modify(|v| v.0 += 2000),
+                    OneOfTwo::Two(mut value) => value.modify(|v| v.0 += 2000),
+                }
+                id
+            })
+            .collect();
+        found.sort_unstable();
+        let mut expected = ids.clone();
+        expected.push(extra);
+        expected.sort_unstable();
+        assert_eq!(found, expected);
+        assert_eq!(values.get(ids[512]).unwrap().0, 2512);
+        assert_eq!(other.get(ids[512]).unwrap().0, 512);
+        assert_eq!(other.get(extra).unwrap().0, 3025);
+    });
 }
 
 #[cfg(feature = "parallel")]

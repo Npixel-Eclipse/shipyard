@@ -8,6 +8,8 @@ macro_rules! impl_shiperator_captain_tracking {
     ($wrapper: ident, $check_insertion: expr, $check_modification: expr; $($track: path)+) => {
         impl<'tmp, T: Component> ShiperatorCaptain for $wrapper<FullRawWindow<'tmp, T>> {
             #[inline]
+            fn has_stable_membership(&self) -> bool { true }
+            #[inline]
             unsafe fn get_captain_data(&self, _index: usize) -> Self::Out {
                 unreachable!()
             }
@@ -39,6 +41,8 @@ macro_rules! impl_shiperator_captain_tracking {
 
         $(
             impl<'tmp, T: Component> ShiperatorCaptain for $wrapper<FullRawWindowMut<'tmp, T, $track>> {
+                #[inline]
+                fn has_stable_membership(&self) -> bool { !$check_modification }
                 #[inline]
                 unsafe fn get_captain_data(&self, _index: usize) -> Self::Out {
                     unreachable!()

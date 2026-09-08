@@ -2,14 +2,15 @@
 //! A candidate slot still needs its normal per-component timestamp/join checks.
 
 use super::TRACKING_CHUNK_SIZE;
-use alloc::{boxed::Box, vec::Vec};
+use alloc::{boxed::Box, sync::Arc, vec::Vec};
 
 const MIN_DENSE_FALLBACK_CHUNKS: usize = 32;
 
+#[derive(Clone)]
 pub(crate) enum TrackingPlan {
     Empty,
     Dense { len: usize },
-    Sparse(SparsePlan),
+    Sparse(Arc<SparsePlan>),
 }
 
 pub(crate) struct SparsePlan {
@@ -32,11 +33,25 @@ struct CandidateRange {
 }
 
 impl TrackingPlan {
+    #[cfg(test)]
+    pub(crate) fn build(len: usize, candidate: impl FnMut(usize) -> bool) -> Self {
+        Self::build_with_budget(len, usize::MAX, candidate)
+    }
+
     /// `candidate` must return true for missing/uncertain chunk metadata.
-    pub(crate) fn build(len: usize, mut candidate: impl FnMut(usize) -> bool) -> Self {
+    pub(crate) fn build_with_budget(
+        len: usize,
+        max_chunks: usize,
+        mut candidate: impl FnMut(usize) -> bool,
+    ) -> Self {
         let chunk_count = len.div_ceil(TRACKING_CHUNK_SIZE);
         if chunk_count == 0 {
             return Self::Empty;
+        }
+        // This guard precedes all metadata reads and bitmap/range allocations.
+        // An uninspected input stays on the exact dense traversal path.
+        if chunk_count > max_chunks {
+            return Self::Dense { len };
         }
         if chunk_count == 1 {
             return if candidate(0) {
@@ -48,27 +63,34 @@ impl TrackingPlan {
         let bits = usize::BITS as usize;
         let mut chunk_bits = Vec::new();
         let mut chunks = 0;
+        let mut runs = 0;
+        let mut previous_candidate = false;
+        let dense_threshold = if chunk_count >= MIN_DENSE_FALLBACK_CHUNKS {
+            chunk_count.div_ceil(2)
+        } else {
+            chunk_count
+        };
         for chunk in 0..chunk_count {
-            if candidate(chunk) {
+            let is_candidate = candidate(chunk);
+            if is_candidate {
+                chunks += 1;
+                // The remaining chunks cannot change this fallback decision.
+                // Dense iteration still performs every exact tracking check.
+                if chunks >= dense_threshold {
+                    return Self::Dense { len };
+                }
                 if chunk_bits.is_empty() {
                     chunk_bits.resize(chunk_count.div_ceil(bits), 0usize);
                 }
                 chunk_bits[chunk / bits] |= 1usize << (chunk % bits);
-                chunks += 1;
+                runs += usize::from(!previous_candidate);
             }
+            previous_candidate = is_candidate;
         }
         if chunks == 0 {
             return Self::Empty;
         }
-        // A broad upper bound is preferable to building many ranges for dense
-        // work. This fallback still uses the ordinary exact tracking checks.
-        if chunks == chunk_count
-            || (chunk_count >= MIN_DENSE_FALLBACK_CHUNKS && chunks >= chunk_count.div_ceil(2))
-        {
-            return Self::Dense { len };
-        }
-
-        let mut ranges = Vec::new();
+        let mut ranges = Vec::with_capacity(runs);
         let mut run_start = None;
         let mut run_end = 0;
         let mut slots = 0;
@@ -103,13 +125,13 @@ impl TrackingPlan {
             });
             slots += run_end - start;
         }
-        Self::Sparse(SparsePlan {
+        Self::Sparse(Arc::new(SparsePlan {
             ranges: ranges.into_boxed_slice(),
             chunk_bits: chunk_bits.into_boxed_slice(),
             len,
             slots,
             chunks,
-        })
+        }))
     }
 
     #[inline]
@@ -168,6 +190,34 @@ impl TrackingPlan {
         }
     }
 
+    #[inline]
+    pub(crate) fn previous(&self, end: usize) -> usize {
+        match self {
+            Self::Empty => 0,
+            Self::Dense { len } => end.min(*len),
+            Self::Sparse(plan) => {
+                let end = end.min(plan.len);
+                if end == 0 {
+                    return 0;
+                }
+                let bits = usize::BITS as usize;
+                let chunk = (end - 1) / TRACKING_CHUNK_SIZE;
+                let mut word = chunk / bits;
+                let mut candidates =
+                    plan.chunk_bits[word] & (usize::MAX >> (bits - 1 - chunk % bits));
+                while candidates == 0 {
+                    if word == 0 {
+                        return 0;
+                    }
+                    word -= 1;
+                    candidates = plan.chunk_bits[word];
+                }
+                let chunk = word * bits + bits - 1 - candidates.leading_zeros() as usize;
+                end.min((chunk + 1) * TRACKING_CHUNK_SIZE)
+            }
+        }
+    }
+
     #[cfg(any(feature = "parallel", test))]
     #[inline]
     pub(crate) fn count(&self, start: usize, end: usize) -> usize {
@@ -177,7 +227,8 @@ impl TrackingPlan {
     #[cfg(any(feature = "parallel", test))]
     #[inline]
     pub(crate) fn midpoint(&self, start: usize, end: usize) -> usize {
-        let rank = self.rank(start) + self.count(start, end) / 2;
+        let start_rank = self.rank(start);
+        let rank = start_rank + (self.rank(end) - start_rank) / 2;
         match self {
             Self::Sparse(plan) => {
                 let pos = plan
@@ -211,6 +262,16 @@ mod tests {
                 }
             }
             assert_eq!(actual, candidate);
+            let mut reverse = Vec::new();
+            let mut end = len;
+            while end != 0 {
+                end = plan.previous(end);
+                if end != 0 {
+                    end -= 1;
+                    reverse.push(end);
+                }
+            }
+            assert_eq!(reverse, candidate.iter().rev().copied().collect::<Vec<_>>());
             for start in [0, 1, 63, 64, 65, 127, 128, 192, 256] {
                 for end in [64, 127, 128, 191, 192, 256, 257] {
                     if end <= start {
@@ -243,5 +304,102 @@ mod tests {
             TrackingPlan::build(4097, |_| true),
             TrackingPlan::Dense { .. }
         ));
+    }
+
+    #[test]
+    fn dense_threshold_stops_metadata_reads_without_changing_the_policy() {
+        for chunk_count in [2usize, 31, 32, 33, 782] {
+            let threshold = if chunk_count < 32 {
+                chunk_count
+            } else {
+                chunk_count.div_ceil(2)
+            };
+            let mut reads = 0;
+            let plan = TrackingPlan::build(chunk_count * 64 - 1, |_| {
+                reads += 1;
+                true
+            });
+            assert!(matches!(plan, TrackingPlan::Dense { .. }));
+            assert_eq!(reads, threshold);
+
+            let mut reads = 0;
+            let plan = TrackingPlan::build(chunk_count * 64 - 1, |chunk| {
+                reads += 1;
+                chunk < threshold - 1
+            });
+            assert_eq!(reads, chunk_count);
+            assert!(!matches!(plan, TrackingPlan::Dense { .. }));
+        }
+    }
+
+    #[test]
+    fn bitmap_word_boundaries_keep_forward_reverse_and_split_coverage() {
+        let word_slots = usize::BITS as usize * 64;
+        let len = word_slots * 3 + 7;
+        let chunks = [
+            0,
+            usize::BITS as usize - 1,
+            usize::BITS as usize,
+            usize::BITS as usize * 3,
+        ];
+        let plan = TrackingPlan::build(len, |chunk| chunks.contains(&chunk));
+        let candidate: Vec<_> = (0..len).filter(|i| chunks.contains(&(i / 64))).collect();
+        for end in [
+            0,
+            1,
+            63,
+            64,
+            word_slots - 1,
+            word_slots,
+            word_slots + 1,
+            len - 1,
+            len,
+        ] {
+            assert_eq!(
+                plan.previous(end),
+                candidate
+                    .iter()
+                    .copied()
+                    .take_while(|&i| i < end)
+                    .last()
+                    .map_or(0, |i| i + 1)
+            );
+            assert_eq!(
+                plan.count(0, end),
+                candidate.iter().filter(|&&i| i < end).count()
+            );
+        }
+        let split = plan.midpoint(0, len);
+        assert_eq!(plan.count(0, split), candidate.len() / 2);
+    }
+
+    #[test]
+    fn planning_budget_skips_metadata_and_never_proves_uninspected_inputs_empty() {
+        let len = 50_000;
+        for max_chunks in [0, 1, 32, 512, 781] {
+            let plan = TrackingPlan::build_with_budget(len, max_chunks, |_| {
+                panic!("over-budget construction must not read any chunk");
+            });
+            assert!(matches!(plan, TrackingPlan::Dense { len: 50_000 }));
+            assert!(!plan.is_empty());
+            assert_eq!(plan.count(0, len), len);
+        }
+        let mut reads = 0;
+        let plan = TrackingPlan::build_with_budget(len, 782, |_| {
+            reads += 1;
+            false
+        });
+        assert!(plan.is_empty());
+        assert_eq!(reads, 782);
+
+        let mut reads = 0;
+        let plan = TrackingPlan::build_with_budget(len, 782, |chunk| {
+            reads += 1;
+            chunk == 781
+        });
+        assert_eq!(reads, 782);
+        assert_eq!(plan.next(0), 49_984);
+        assert_eq!(plan.count(0, len), 16);
+        assert!(TrackingPlan::build_with_budget(0, 0, |_| unreachable!()).is_empty());
     }
 }

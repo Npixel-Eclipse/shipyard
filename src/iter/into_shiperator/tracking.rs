@@ -14,13 +14,25 @@ macro_rules! impl_into_shiperator_tracking {
             type Shiperator = PlannedTracking<$type<FullRawWindow<'tmp, T>>>;
 
             #[inline]
+            fn planning_len(&self) -> Option<usize> { Some(self.0.len()) }
+
+            #[inline]
             fn into_shiperator(
                 self,
                 storage_ids: &mut ShipHashSet<StorageId>,
             ) -> (Self::Shiperator, usize, RawEntityIdAccess) {
+                self.into_shiperator_with_budget(storage_ids, usize::MAX)
+            }
+
+            #[inline]
+            fn into_shiperator_with_budget(
+                self,
+                storage_ids: &mut ShipHashSet<StorageId>,
+                max_chunks: usize,
+            ) -> (Self::Shiperator, usize, RawEntityIdAccess) {
                 let (window, len, entity_access) = self.0.into_shiperator(storage_ids);
 
-                let plan = window.tracking_plan($insertion, $modification);
+                let plan = window.tracking_plan($insertion, $modification, max_chunks);
                 (PlannedTracking::new($type(window), plan), len, entity_access)
             }
 
@@ -41,13 +53,25 @@ macro_rules! impl_into_shiperator_tracking {
             type Shiperator = PlannedTracking<$type<FullRawWindow<'tmp, T>>>;
 
             #[inline]
+            fn planning_len(&self) -> Option<usize> { Some(self.0.len()) }
+
+            #[inline]
             fn into_shiperator(
                 self,
                 storage_ids: &mut ShipHashSet<StorageId>,
             ) -> (Self::Shiperator, usize, RawEntityIdAccess) {
+                self.into_shiperator_with_budget(storage_ids, usize::MAX)
+            }
+
+            #[inline]
+            fn into_shiperator_with_budget(
+                self,
+                storage_ids: &mut ShipHashSet<StorageId>,
+                max_chunks: usize,
+            ) -> (Self::Shiperator, usize, RawEntityIdAccess) {
                 let (window, len, entity_access) = self.0.into_shiperator(storage_ids);
 
-                let plan = window.tracking_plan($insertion, $modification);
+                let plan = window.tracking_plan($insertion, $modification, max_chunks);
                 (PlannedTracking::new($type(window), plan), len, entity_access)
             }
 
@@ -68,13 +92,25 @@ macro_rules! impl_into_shiperator_tracking {
             type Shiperator = PlannedTracking<$type<FullRawWindowMut<'tmp, T, Track>>>;
 
             #[inline]
+            fn planning_len(&self) -> Option<usize> { Some(self.0.len()) }
+
+            #[inline]
             fn into_shiperator(
                 self,
                 storage_ids: &mut ShipHashSet<StorageId>,
             ) -> (Self::Shiperator, usize, RawEntityIdAccess) {
+                self.into_shiperator_with_budget(storage_ids, usize::MAX)
+            }
+
+            #[inline]
+            fn into_shiperator_with_budget(
+                self,
+                storage_ids: &mut ShipHashSet<StorageId>,
+                max_chunks: usize,
+            ) -> (Self::Shiperator, usize, RawEntityIdAccess) {
                 let (window, len, entity_access) = self.0.into_shiperator(storage_ids);
 
-                let plan = window.tracking_plan($insertion, $modification);
+                let plan = window.tracking_plan($insertion, $modification, max_chunks);
                 (PlannedTracking::new($type(window), plan), len, entity_access)
             }
 

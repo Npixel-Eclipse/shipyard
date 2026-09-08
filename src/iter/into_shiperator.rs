@@ -16,6 +16,22 @@ use crate::ShipHashSet;
 use alloc::vec::Vec;
 use core::ptr::NonNull;
 
+// A full plan also improves captain selection and parallel splitting, unlike
+// an empty-only probe. Allow up to half the provisional driver's slots in
+// metadata chunks per tracking input; do not impose a storage-size ceiling.
+const PLANNING_BUDGET_DIVISOR: usize = 2;
+
+#[inline]
+fn planning_budget(driver_len: Option<usize>) -> usize {
+    driver_len.map_or(usize::MAX, |len| {
+        if len == 0 {
+            0
+        } else {
+            (len / PLANNING_BUDGET_DIVISOR).max(1)
+        }
+    })
+}
+
 /// Creates view iterators.
 ///
 /// `std::iter::IntoIterator` can't be used directly because of conflicting implementation.\
@@ -111,6 +127,25 @@ pub trait IntoShiperator {
         self,
         storage_ids: &mut ShipHashSet<StorageId>,
     ) -> (Self::Shiperator, usize, RawEntityIdAccess);
+    /// Unfiltered driver length, available without inspecting tracking metadata.
+    /// `None` leaves custom inputs on their existing construction path.
+    #[inline]
+    fn planning_len(&self) -> Option<usize> {
+        None
+    }
+    /// Constructs an iterator with a per-input tracking metadata budget.
+    /// Exceeding the budget must keep exact traversal, never prove emptiness.
+    #[inline]
+    fn into_shiperator_with_budget(
+        self,
+        storage_ids: &mut ShipHashSet<StorageId>,
+        _max_chunks: usize,
+    ) -> (Self::Shiperator, usize, RawEntityIdAccess)
+    where
+        Self: Sized,
+    {
+        self.into_shiperator(storage_ids)
+    }
     /// Returns `true` if the Shiperator can be a captain.
     fn can_captain() -> bool;
     /// Returns `true` if the Shiperator can be a sailor.
@@ -119,6 +154,11 @@ pub trait IntoShiperator {
 
 impl<'tmp, 'v: 'tmp, T: Component, Track: Tracking> IntoShiperator for &'tmp View<'v, T, Track> {
     type Shiperator = FullRawWindow<'tmp, T>;
+
+    #[inline]
+    fn planning_len(&self) -> Option<usize> {
+        Some(self.len())
+    }
 
     #[inline]
     fn into_shiperator(
@@ -147,6 +187,11 @@ impl<'tmp, 'v: 'tmp, T: Component, Track: Tracking> IntoShiperator for &'tmp Vie
     type Shiperator = FullRawWindow<'tmp, T>;
 
     #[inline]
+    fn planning_len(&self) -> Option<usize> {
+        Some(self.len())
+    }
+
+    #[inline]
     fn into_shiperator(
         self,
         _storage_ids: &mut ShipHashSet<StorageId>,
@@ -173,6 +218,11 @@ impl<'tmp, 'v: 'tmp, T: Component, Track> IntoShiperator for &'tmp mut ViewMut<'
     type Shiperator = FullRawWindowMut<'tmp, T, Track>;
 
     #[inline]
+    fn planning_len(&self) -> Option<usize> {
+        Some(self.len())
+    }
+
+    #[inline]
     fn into_shiperator(
         self,
         _storage_ids: &mut ShipHashSet<StorageId>,
@@ -197,6 +247,11 @@ impl<'tmp, 'v: 'tmp, T: Component, Track> IntoShiperator for &'tmp mut ViewMut<'
 
 impl<'tmp> IntoShiperator for &'tmp [EntityId] {
     type Shiperator = &'tmp [EntityId];
+
+    #[inline]
+    fn planning_len(&self) -> Option<usize> {
+        Some(self.len())
+    }
 
     #[inline]
     fn into_shiperator(
@@ -291,6 +346,20 @@ impl<'tmp, 'v: 'tmp, T: Component, Track: Tracking> IntoShiperator
 impl<T: IntoShiperator> IntoShiperator for (T,) {
     type Shiperator = T::Shiperator;
 
+    #[inline]
+    fn planning_len(&self) -> Option<usize> {
+        self.0.planning_len()
+    }
+
+    #[inline]
+    fn into_shiperator_with_budget(
+        self,
+        storage_ids: &mut ShipHashSet<StorageId>,
+        max_chunks: usize,
+    ) -> (Self::Shiperator, usize, RawEntityIdAccess) {
+        self.0.into_shiperator_with_budget(storage_ids, max_chunks)
+    }
+
     fn into_shiperator(
         self,
         storage_ids: &mut ShipHashSet<StorageId>,
@@ -324,12 +393,41 @@ macro_rules! impl_into_shiperator_tuple {
             type Shiperator = Mixed<($($type::Shiperator,)+)>;
 
             #[inline]
+            fn planning_len(&self) -> Option<usize> {
+                // An entity-id slice cannot be a sailor, so its length takes
+                // precedence even when another component storage is smaller.
+                $(if !$type::can_sailor() { return self.$index.planning_len(); })+
+                let mut len: Option<usize> = None;
+                $(
+                    if $type::can_captain() {
+                        if let Some(candidate) = self.$index.planning_len() {
+                            len = Some(len.map_or(candidate, |current| current.min(candidate)));
+                        }
+                    }
+                )+
+                len
+            }
+
+            #[inline]
             #[track_caller]
             fn into_shiperator(
                 self,
                 storage_ids: &mut ShipHashSet<StorageId>,
             ) -> (Self::Shiperator, usize, RawEntityIdAccess) {
-                let mut shiperators = ($(self.$index.into_shiperator(storage_ids),)+);
+                self.into_shiperator_with_budget(storage_ids, usize::MAX)
+            }
+
+            #[inline]
+            #[track_caller]
+            fn into_shiperator_with_budget(
+                self,
+                storage_ids: &mut ShipHashSet<StorageId>,
+                max_chunks: usize,
+            ) -> (Self::Shiperator, usize, RawEntityIdAccess) {
+                // Decide the budget before any child reads tracking metadata.
+                // Nested joins may tighten an inherited budget, never expand it.
+                let max_chunks = max_chunks.min(planning_budget(self.planning_len()));
+                let mut shiperators = ($(self.$index.into_shiperator_with_budget(storage_ids, max_chunks),)+);
 
                 let can_captains = ($(
                     $type::can_captain(),

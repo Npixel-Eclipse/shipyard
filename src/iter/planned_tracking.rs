@@ -1,28 +1,17 @@
 use super::{ShiperatorCaptain, ShiperatorOutput, ShiperatorSailor};
-use crate::{
-    entity_id::EntityId,
-    sparse_set::{TrackingPlan, TRACKING_CHUNK_SIZE},
-};
-use alloc::sync::Arc;
+use crate::{entity_id::EntityId, sparse_set::TrackingPlan};
 
 /// Internal tracking wrapper carrying the current query's chunk plan.
 #[doc(hidden)]
 #[derive(Clone)]
 pub struct PlannedTracking<S> {
     inner: S,
-    plan: Option<Arc<TrackingPlan>>,
+    plan: TrackingPlan,
 }
 
 impl<S> PlannedTracking<S> {
     pub(crate) fn new(inner: S, plan: TrackingPlan) -> Self {
-        Self {
-            inner,
-            plan: if matches!(plan, TrackingPlan::Dense { .. }) {
-                None
-            } else {
-                Some(Arc::new(plan))
-            },
-        }
+        Self { inner, plan }
     }
 }
 
@@ -31,6 +20,10 @@ impl<S: ShiperatorOutput> ShiperatorOutput for PlannedTracking<S> {
 }
 
 impl<S: ShiperatorCaptain> ShiperatorCaptain for PlannedTracking<S> {
+    #[inline]
+    fn has_stable_membership(&self) -> bool {
+        self.plan.is_empty() || self.inner.has_stable_membership()
+    }
     #[inline]
     unsafe fn get_captain_data(&self, index: usize) -> Self::Out {
         self.inner.get_captain_data(index)
@@ -41,13 +34,7 @@ impl<S: ShiperatorCaptain> ShiperatorCaptain for PlannedTracking<S> {
     }
     #[inline]
     fn sail_time(&self) -> usize {
-        self.plan.as_ref().map_or_else(
-            || {
-                let len = self.inner.sail_time();
-                len.saturating_add(len.div_ceil(TRACKING_CHUNK_SIZE))
-            },
-            |plan| plan.scan_cost(),
-        )
+        self.plan.scan_cost()
     }
     #[inline]
     fn is_exact_sized(&self) -> bool {
@@ -59,33 +46,35 @@ impl<S: ShiperatorCaptain> ShiperatorCaptain for PlannedTracking<S> {
         // Sailors only need per-entity probes and the empty-input proof. Release
         // sparse ranges so producer clones don't retain unused plans/Arc refs.
         if !self.has_no_candidates() {
-            self.plan = None;
+            self.plan = TrackingPlan::Dense {
+                len: self.inner.sail_time(),
+            };
         }
     }
     #[inline]
     fn has_no_candidates(&self) -> bool {
-        self.plan.as_ref().is_some_and(|plan| plan.is_empty())
+        self.plan.is_empty()
     }
     #[inline]
     fn next_possible(&self, index: usize) -> usize {
-        let Some(plan) = &self.plan else {
+        if matches!(self.plan, TrackingPlan::Dense { .. }) {
             return self.inner.next_possible(index);
-        };
-        plan.next(index)
+        }
+        self.plan.next(index)
+    }
+    #[inline]
+    fn previous_possible(&self, end: usize) -> usize {
+        self.plan.previous(end)
     }
     #[cfg(feature = "parallel")]
     #[inline]
     fn candidate_count(&self, start: usize, end: usize) -> usize {
-        self.plan
-            .as_ref()
-            .map_or(end - start, |plan| plan.count(start, end))
+        self.plan.count(start, end)
     }
     #[cfg(feature = "parallel")]
     #[inline]
     fn candidate_midpoint(&self, start: usize, end: usize) -> usize {
-        self.plan
-            .as_ref()
-            .map_or(start + (end - start) / 2, |plan| plan.midpoint(start, end))
+        self.plan.midpoint(start, end)
     }
 }
 
@@ -97,6 +86,9 @@ impl<S: ShiperatorSailor> ShiperatorSailor for PlannedTracking<S> {
     }
     #[inline]
     fn indices_of(&self, eid: EntityId, index: usize) -> Option<Self::Index> {
+        if self.plan.is_empty() {
+            return None;
+        }
         self.inner.indices_of(eid, index)
     }
     #[inline]

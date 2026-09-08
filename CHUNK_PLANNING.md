@@ -2,6 +2,43 @@
 
 기준은 Npixel-Eclipse/shipyard의 `origin/0.11.5`, 커밋 `d3dbd51435c225629564f3eda723291747aebda1`이다. 리뷰 브랜치는 `0.11.5-chunk-planning`이며, `0.11.6` 통합은 포함하지 않는다. 아래 Battle 비교를 위해 임시 적용한 의존성·설정·배포 바이너리는 측정 후 모두 복구했다. 별도 patch5 저장소도 그대로 유지했다.
 
+아래 기존 실측과 최초 검증 기록은 `b7290af` 기준이다. 후속 작업은 다음 절에 구분하며, 기존 실측 수치를 후속 코드의 성능 결과로 해석하지 않는다.
+
+## 근사화 없는 후속 최적화
+
+- 64슬롯 청크, captain 비용식, Dense fallback 기준은 유지한다. Dense가 확정되는 순간 나머지 metadata 검사를 중단한다. 예를 들어 782청크에서 앞쪽 391청크가 후보이면 그 시점에 기존 Dense 경로로 돌아간다. 미검사 구간을 빈 구간으로 간주하지 않는다.
+- `Empty`와 `Dense`는 값으로 보관하고 `Sparse`만 `Arc`로 공유한다. 빈 계획의 heap 할당과 producer clone의 빈 계획 참조 카운트 갱신을 제거한다. 후보 연속 구간 수를 metadata 검사 중 계산해 구간 목록을 한 번에 할당하며, 분할 지점 계산의 중복 rank 조회를 제거한다.
+- OR의 빈 입력 증명은 양쪽 모두 비었을 때만 전파한다. source별 계획을 정방향·역방향 청크 건너뛰기와 후보량 계산에 연결한다. OR membership 조회는 왼쪽 조건이 성립하면 오른쪽 조회를 생략한다.
+- 중첩 OR의 모든 source를 보존한다. 다른 source에서 온 entity의 membership 조회는 현재 captain 상태와 무관하게 전체 조건을 검사한다. `Modified`, `InsertedOrModified`, mutable tracking 입력과 OR 자체의 `|` 조합을 지원하며, View 재대여 수명과 storage 수명을 분리한다.
+- 병렬 OR은 먼저 source 경계에서 나누고 각 source 내부를 후보량으로 나눈다. 빈 source는 작업 분할 전에 생략한다. 기존 `RawEntityIdAccess::split_at`의 후속 구간 내부 절단에 의존하지 않는다. 후보량은 중복 제거 전 상한이며, callback 비용의 추정이나 샘플링은 추가하지 않았다.
+- 중복 검사에서 다른 producer가 수정할 수 있는 per-component modification timestamp를 읽는 조합은 단일 producer로 실행한다. 예를 들어 `a.modified_mut() | b.modified_mut()`가 해당한다. 읽기 전용 tracking OR과 일반 mutable OR은 병렬 분할을 지원한다. 이 제한을 풀려면 별도의 안정된 membership snapshot 설계가 필요하다.
+- 역방향 OR은 마지막 source부터 소비하며, 앞뒤 혼합 순회에서도 source별 남은 구간과 `with_id`의 entity/value 대응을 유지한다. 기존 버그가 있던 역방향·중첩 OR의 동작은 수정된다. captain 변경에 따른 정방향 순서 차이라는 기존 제약은 그대로다.
+
+후속 회귀 테스트는 Dense 검사 중단 경계, bitmap word 경계, 빈 OR·희소 source·중복·Optional/Not·좌우 중첩 OR·정방향/역방향/부분 소비, 1/4/16 worker의 결과 집합과 mutable tracking 분할 제한을 검사한다. 실제 Battle 실행이나 성능 재측정은 이 후속 작업에 포함하지 않는다.
+
+OR·메모리 최적화 단계 검증(2026-09-08, 아래 예산 도입 전):
+
+- `cargo test -p shipyard --all-features`: 385개 통과.
+- `cargo test -p shipyard --no-default-features --features std,proc --lib --test tracking_chunks --test chunk_planning`: 87개 통과.
+- `cargo check -p shipyard --no-default-features`: 통과.
+- `cargo clippy -p shipyard --lib --tests`: 에러 없음. 기존 파일의 acronym, identity operation, qualification 등 경고는 유지한다.
+- 변경 Rust 파일의 `rustfmt --check`와 `git diff --check`: 통과.
+
+## 계획 생성 예산
+
+0.11.6의 검사 예산 개념을 계획 생성 앞단에 적용한다. metadata를 읽지 않는 `planning_len`으로 임시 driver 길이를 구하고, 각 positive tracking 입력에 `max(driver_len / 2, 1)`청크를 허용한다. driver 길이가 0이면 예산도 0이다. `/2`는 이 브랜치의 sparse captain 선택·병렬 분할 이득을 유지하기 위한 비용 제한 정책이며, 측정된 시간 비율이나 최적값을 뜻하지 않는다. 0.11.6의 빈 입력 검사 전용 `/8`을 그대로 사용하지 않는다.
+
+- AND는 captain이 될 수 있는 입력들의 길이 중 최소값을 사용한다. 필수 entity-id slice가 있으면 다른 storage가 더 작아도 그 slice 길이를 우선한다.
+- OR은 양쪽 source의 길이를 합산한다. 중첩 AND/OR은 상위 예산을 전달받아 필요하면 줄이며, 다시 늘리지 않는다. Optional과 `!&view`는 driver 길이 후보에서 제외한다. `!view.modified()`처럼 captain이 될 수 있는 tracking 부정 입력은 길이 후보에 포함한다.
+- `ceil(storage_len / 64)`가 예산을 넘으면 timestamp를 읽거나 bitmap·구간 목록을 할당하기 전에 `Dense`로 돌아간다. 이는 미검사 상태를 보수적으로 순회한다는 뜻이며, `Empty` 판정이나 결과 생략에 사용하지 않는다. 실제 순회에서는 기존 component별 tracking·join 검사를 수행한다.
+- 예산은 tracking 입력별 제한이다. 여러 입력의 검사량을 합산한 전역 예산은 아니다. 예산 이하에서는 기존 Dense 조기 종료와 정확한 후보 계획을 그대로 사용한다.
+- 5만 컴포넌트는 782청크다. driver 64개는 32청크 예산이므로 사전 검사를 생략하고, driver 3천 개는 1,500청크 예산이므로 전체 계획을 허용한다. 경계는 driver 1,563개/1,564개다.
+- 기존 custom `IntoShiperator`는 기본 메서드로 기존 생성 방식을 유지한다. custom wrapper가 내부 tracking 입력까지 예산을 전달하려면 `planning_len`과 `into_shiperator_with_budget`을 구현한다.
+
+샘플링이나 변경 이력 추정은 추가하지 않는다. 예산 때문에 상세 계획이 생략되면 captain 선택과 결과 순서는 달라질 수 있으나, 반환 집합과 강제 entity-id slice의 순서는 보존한다. 이 예산은 사전 계획 생성 비용을 제한하며 실제 순회 전체의 비용을 제한하지는 않는다.
+
+예산 도입 후 검증(2026-09-08): 전체 feature 테스트 389개, 직렬 구성 테스트 91개, no-std 컴파일이 통과했다. 예산 경계·metadata 미접근·중첩 예산 전달·강제 slice·OR 전체 길이·Optional/Not·mutable fallback을 추가 검증했다. Clippy는 에러 없이 기존 경고만 유지한다. 변경 파일의 rustfmt 검사와 diff 공백 검사도 통과했다. 성능 재측정은 수행하지 않았다.
+
 ## 변경
 
 기존 64슬롯 insertion/modification chunk timestamp를 현재 View의 tracking 구간으로 판정해 iterator 수명 동안의 계획을 만든다. SparseSet 갱신 시 추가하는 카운터나 전역 통계는 없다.
@@ -23,9 +60,9 @@
 - tracking 관측 기준이 바뀌면 새 iterator에서 계획을 다시 만든다. 다른 시스템이나 다음 tick에 재사용하는 전역 캐시가 아니다.
 - 후보 chunk의 슬롯 수는 상한이다. 실제 tracking 통과 수, 다른 component와의 교집합 크기, 사용자 callback의 비용은 아직 학습하지 않는다.
 - captain이 바뀌면 entity 순회 순서가 달라질 수 있다. 반환 집합과 entity/value 대응은 보존하지만 이전 captain의 순서를 보장하지 않는다. 4,096개 입력에서 변경값 3·17을 join하는 재현에서 0.11.6은 `[17, 3]`, 이 구현은 `[3, 17]`을 반환했다. 첫 대상을 소비하는 호출부의 동작 검토가 필요하다. entity-id slice가 captain을 강제하는 경로는 유지한다.
-- 0.11.6의 `max_chunks = (driver_len / 8).max(1)` 검사 예산은 아직 반영하지 않았다. 작은 driver와 큰 tracking storage를 join할 때 요약 생성 비용이 클 수 있다. 현재 요약은 captain 선택 전에 생성되므로, 추후 상한은 빈 입력 검사뿐 아니라 요약 생성 앞단에서 다뤄야 한다.
+- 0.11.6의 검사 예산 개념을 위 "계획 생성 예산" 절처럼 적용했다. 상세 계획 생성 전에 길이 정보만으로 예산을 결정한다.
 - reverse iteration에서도 tracking captain을 검사하도록 수정했다. WithId::next_back의 entity index와 WithId::fold의 OR source 전환도 회귀 테스트 범위에 맞춰 바로잡았다.
-- OR의 병렬 지원과 기존 RawEntityIdAccess follow-up 분할 문제는 이번 범위에 포함하지 않았다. workload batch fast path나 Battle 시스템 코드는 변경하지 않았다.
+- 최초 `b7290af`에는 OR 병렬 지원을 포함하지 않았다. 후속 지원 범위와 분할 방식은 위 절을 참고한다. workload batch fast path나 Battle 시스템 코드는 변경하지 않았다.
 
 ## 검증
 

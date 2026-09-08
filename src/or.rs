@@ -1,6 +1,6 @@
 use crate::{
     component::Component,
-    tracking::{Inserted, Tracking},
+    tracking::{Inserted, InsertedOrModified, Modified, Tracking},
     views::{View, ViewMut},
 };
 use core::ops::BitOr;
@@ -42,7 +42,7 @@ use core::ops::BitOr;
 #[derive(Copy, Clone)]
 pub struct Or<T>(pub(crate) T);
 
-impl<'a, T: Component, Track: Tracking, U> BitOr<U> for &'a View<'a, T, Track> {
+impl<'tmp, 'v: 'tmp, T: Component, Track: Tracking, U> BitOr<U> for &'tmp View<'v, T, Track> {
     type Output = Or<(Self, U)>;
 
     fn bitor(self, rhs: U) -> Self::Output {
@@ -50,7 +50,7 @@ impl<'a, T: Component, Track: Tracking, U> BitOr<U> for &'a View<'a, T, Track> {
     }
 }
 
-impl<'a, T: Component, Track: Tracking, U> BitOr<U> for Inserted<&'a View<'a, T, Track>> {
+impl<T, U> BitOr<U> for Or<T> {
     type Output = Or<(Self, U)>;
 
     fn bitor(self, rhs: U) -> Self::Output {
@@ -58,7 +58,7 @@ impl<'a, T: Component, Track: Tracking, U> BitOr<U> for Inserted<&'a View<'a, T,
     }
 }
 
-impl<'a, T: Component, Track: Tracking, U> BitOr<U> for &'a ViewMut<'a, T, Track> {
+impl<'tmp, 'v: 'tmp, T: Component, Track: Tracking, U> BitOr<U> for &'tmp ViewMut<'v, T, Track> {
     type Output = Or<(Self, U)>;
 
     fn bitor(self, rhs: U) -> Self::Output {
@@ -66,7 +66,9 @@ impl<'a, T: Component, Track: Tracking, U> BitOr<U> for &'a ViewMut<'a, T, Track
     }
 }
 
-impl<'a, T: Component, Track: Tracking, U> BitOr<U> for &'a mut ViewMut<'a, T, Track> {
+impl<'tmp, 'v: 'tmp, T: Component, Track: Tracking, U> BitOr<U>
+    for &'tmp mut ViewMut<'v, T, Track>
+{
     type Output = Or<(Self, U)>;
 
     fn bitor(self, rhs: U) -> Self::Output {
@@ -89,8 +91,23 @@ impl From<usize> for OneOfTwo<usize, usize> {
     }
 }
 
+#[derive(Clone)]
 pub struct OrWindow<T> {
     pub(crate) storages: T,
-    pub(crate) is_captain: bool,
-    pub(crate) is_past_first_storage: bool,
+    pub(crate) left_slices: usize,
+    pub(crate) current_slice: usize,
 }
+
+macro_rules! impl_tracking_or {
+    ($($wrapper:ident),+) => {$(
+        impl<T, U> BitOr<U> for $wrapper<T> {
+            type Output = Or<(Self, U)>;
+
+            fn bitor(self, rhs: U) -> Self::Output {
+                Or((self, rhs))
+            }
+        }
+    )+};
+}
+
+impl_tracking_or!(Inserted, Modified, InsertedOrModified);

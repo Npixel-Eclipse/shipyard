@@ -28,6 +28,7 @@ pub use sailor::ShiperatorSailor;
 pub use with_id::WithId;
 
 use crate::component::Component;
+use crate::entity_id::EntityId;
 use crate::sparse_set::{FullRawWindow, FullRawWindowMut};
 use core::iter::FusedIterator;
 
@@ -143,30 +144,7 @@ impl<S: ShiperatorCaptain + ShiperatorSailor> Iterator for Shiperator<S> {
 impl<S: ShiperatorCaptain + ShiperatorSailor> DoubleEndedIterator for Shiperator<S> {
     #[inline]
     fn next_back(&mut self) -> Option<Self::Item> {
-        loop {
-            if self.start == self.end {
-                if let Some(new_end) = self.entities.next_slice() {
-                    self.start = 0;
-                    self.end = new_end;
-
-                    self.shiperator.next_slice();
-                } else {
-                    return None;
-                }
-            };
-
-            self.end -= 1;
-
-            if self.is_exact_sized {
-                return unsafe { Some(self.shiperator.get_captain_data(self.end)) };
-            } else {
-                let entity_id = unsafe { self.entities.get(self.end) };
-
-                if let Some(indices) = self.shiperator.captain_indices_of(entity_id, self.end) {
-                    return unsafe { Some(self.shiperator.get_sailor_data(indices)) };
-                }
-            }
-        }
+        self.next_back_with_id().map(|(_, item)| item)
     }
 
     #[inline]
@@ -175,33 +153,54 @@ impl<S: ShiperatorCaptain + ShiperatorSailor> DoubleEndedIterator for Shiperator
         Self: Sized,
         F: FnMut(B, Self::Item) -> B,
     {
+        while let Some((_, item)) = self.next_back_with_id() {
+            init = f(init, item);
+        }
+        init
+    }
+}
+
+impl<S: ShiperatorCaptain + ShiperatorSailor> Shiperator<S> {
+    #[inline]
+    fn next_back_with_id(&mut self) -> Option<(EntityId, S::Out)> {
         loop {
-            if self.start == self.end {
-                if let Some(new_end) = self.entities.next_slice() {
-                    self.start = 0;
-                    self.end = new_end;
-
-                    self.shiperator.next_slice();
-                } else {
-                    return init;
+            let front_slice = self.shiperator.slice_index();
+            let (entity, index) = if !self.entities.follow_up_ptrs.is_empty() {
+                let back_slice = front_slice + self.entities.follow_up_ptrs.len();
+                self.shiperator.set_slice(back_slice);
+                let (ptr, end) = self.entities.follow_up_ptrs.first_mut().unwrap();
+                *end = self.shiperator.previous_possible(*end).min(*end);
+                if *end == 0 {
+                    self.shiperator.set_slice(front_slice);
+                    self.entities.follow_up_ptrs.remove(0);
+                    continue;
                 }
-            };
-
-            if self.is_exact_sized {
-                while self.start < self.end {
-                    self.end -= 1;
-
-                    init = f(init, unsafe { self.shiperator.get_captain_data(self.end) });
-                }
+                *end -= 1;
+                // SAFETY: this cursor belongs to the selected source and stays
+                // within its original dense slice. Front cursors are untouched.
+                (unsafe { ptr.add(*end).read() }, *end)
             } else {
-                while self.start < self.end {
-                    self.end -= 1;
-                    let entity_id = unsafe { self.entities.get(self.end) };
-
-                    if let Some(indices) = self.shiperator.captain_indices_of(entity_id, self.end) {
-                        init = f(init, unsafe { self.shiperator.get_sailor_data(indices) });
-                    }
+                self.end = self
+                    .shiperator
+                    .previous_possible(self.end)
+                    .min(self.end)
+                    .max(self.start);
+                if self.start == self.end {
+                    return None;
                 }
+                self.end -= 1;
+                (unsafe { self.entities.get(self.end) }, self.end)
+            };
+            let item = if self.is_exact_sized {
+                Some(unsafe { self.shiperator.get_captain_data(index) })
+            } else {
+                self.shiperator
+                    .captain_indices_of(entity, index)
+                    .map(|indices| unsafe { self.shiperator.get_sailor_data(indices) })
+            };
+            self.shiperator.set_slice(front_slice);
+            if let Some(item) = item {
+                return Some((entity, item));
             }
         }
     }
