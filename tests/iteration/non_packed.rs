@@ -115,6 +115,99 @@ fn basic() {
 }
 
 #[test]
+fn with_id_next_back_after_consuming_last() -> Result<(), Box<dyn std::error::Error>> {
+    let mut world = World::new();
+    world.add_entity(U32(10));
+    let middle = world.add_entity(U32(20));
+    world.add_entity(U32(30));
+
+    let u32s = world.borrow::<View<U32>>()?;
+    let mut iter = u32s.iter();
+    assert_eq!(iter.next_back(), Some(&U32(30)));
+    assert_eq!(iter.with_id().next_back(), Some((middle, &U32(20))));
+    Ok(())
+}
+
+#[test]
+fn with_id_next_back_and_mixed_directions() -> Result<(), Box<dyn std::error::Error>> {
+    let mut world = World::new();
+    let first = world.add_entity(U32(10));
+    let middle = world.add_entity(U32(20));
+    let last = world.add_entity(U32(30));
+    let u32s = world.borrow::<View<U32>>()?;
+
+    assert_eq!(u32s.iter().with_id().next_back(), Some((last, &U32(30))));
+    assert_eq!(u32s.iter().with_id().rev().next(), Some((last, &U32(30))));
+    assert_eq!(u32s.iter().ids().next_back(), Some(last));
+    assert_eq!(u32s.iter().ids().rev().next(), Some(last));
+
+    let mut iter = u32s.iter().with_id();
+    assert_eq!(iter.next(), Some((first, &U32(10))));
+    assert_eq!(iter.next_back(), Some((last, &U32(30))));
+    assert_eq!(iter.next_back(), Some((middle, &U32(20))));
+    assert_eq!(iter.next_back(), None);
+    assert_eq!(iter.next(), None);
+    Ok(())
+}
+
+#[test]
+fn with_id_next_back_empty_and_single() -> Result<(), Box<dyn std::error::Error>> {
+    let mut world = World::new();
+    {
+        let u32s = world.borrow::<View<U32>>()?;
+        let mut iter = u32s.iter().with_id();
+        assert_eq!(iter.next_back(), None);
+        assert_eq!(iter.next(), None);
+        assert_eq!(u32s.iter().ids().next_back(), None);
+    }
+
+    let only = world.add_entity(U32(10));
+    let mut u32s = world.borrow::<ViewMut<U32>>()?;
+    assert_eq!(u32s.iter().ids().next_back(), Some(only));
+    let mut iter = (&mut u32s).iter().with_id();
+    let (id, value) = iter.next_back().ok_or("missing single component")?;
+    assert_eq!((id, *value), (only, U32(10)));
+    value.0 += 1;
+    assert_eq!(iter.next_back(), None);
+    assert_eq!(iter.next(), None);
+    assert_eq!(u32s[only], U32(11));
+    Ok(())
+}
+
+#[test]
+fn with_id_next_back_join_skips_non_matching_entities() -> Result<(), Box<dyn std::error::Error>> {
+    let mut world = World::new();
+    let first = world.add_entity((U32(10), I16(110)));
+    world.add_entity(U32(20));
+    let last = world.add_entity((U32(30), I16(130)));
+    world.add_entity(U32(40));
+    world.add_entity(I16(140));
+    world.add_entity(I16(150));
+
+    let (mut u32s, mut i16s) = world.borrow::<(ViewMut<U32>, ViewMut<I16>)>()?;
+    let mut iter = (&u32s, &i16s).iter().with_id();
+    assert_eq!(iter.next_back(), Some((last, (&U32(30), &I16(130)))));
+    assert_eq!(iter.next_back(), Some((first, (&U32(10), &I16(110)))));
+    assert_eq!(iter.next_back(), None);
+    assert_eq!(iter.next(), None);
+
+    let mut iter = (&mut u32s, &mut i16s).iter().with_id();
+    let (id, (number, other)) = iter.next_back().ok_or("missing joined components")?;
+    assert_eq!((id, *number, *other), (last, U32(30), I16(130)));
+    number.0 += 1;
+    other.0 += 1;
+    assert_eq!(
+        iter.next_back()
+            .map(|(id, (number, other))| (id, *number, *other)),
+        Some((first, U32(10), I16(110)))
+    );
+    assert_eq!(iter.next_back(), None);
+    assert_eq!(iter.next(), None);
+    assert_eq!((u32s[last], i16s[last]), (U32(31), I16(131)));
+    Ok(())
+}
+
+#[test]
 fn with_id() {
     let world = World::new();
 
