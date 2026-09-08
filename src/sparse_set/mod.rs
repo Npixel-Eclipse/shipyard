@@ -936,11 +936,19 @@ impl<T: Component + Send + Sync> Storage for SparseSet<T> {
                 sparse_set
                     .insertion_data
                     .resize(self.dense.len(), other_current);
+                sparse_set
+                    .insertion_chunks
+                    .resize(tracking_chunk_count(self.dense.len()), other_current);
             }
             if sparse_set.is_tracking_modification {
                 sparse_set
                     .modification_data
                     .resize(self.dense.len(), TrackingTimestamp::origin());
+                sparse_set
+                    .modification_chunks
+                    .resize_with(tracking_chunk_count(self.dense.len()), || {
+                        AtomicTimestamp::new(TrackingTimestamp::origin().get())
+                    });
             }
 
             SBoxBuilder::new(sparse_set)
