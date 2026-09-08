@@ -66,7 +66,7 @@ impl<S: ShiperatorCaptain + ShiperatorSailor> Iterator for WithId<Shiperator<S>>
                 }
             } else {
                 while self.0.start < self.0.end {
-                    let current = self.0.shiperator.next_possible(self.0.start);
+                    let current = self.0.shiperator.next_possible_in(self.0.start, self.0.end);
 
                     if current >= self.0.end {
                         self.0.start = self.0.end;

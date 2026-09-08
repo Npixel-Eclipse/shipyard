@@ -75,6 +75,15 @@ impl<T: ShiperatorCaptain, U: ShiperatorCaptain> ShiperatorCaptain for OrWindow<
     }
 
     #[inline]
+    fn next_possible_in(&self, index: usize, end: usize) -> usize {
+        if self.current_slice < self.left_slices {
+            self.storages.0.next_possible_in(index, end)
+        } else {
+            self.storages.1.next_possible_in(index, end)
+        }
+    }
+
+    #[inline]
     fn previous_possible(&self, end: usize) -> usize {
         if self.current_slice < self.left_slices {
             self.storages.0.previous_possible(end)

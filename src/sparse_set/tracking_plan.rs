@@ -151,26 +151,36 @@ impl TrackingPlan {
 
     #[inline]
     pub(crate) fn next(&self, index: usize) -> usize {
+        self.next_in(index, usize::MAX)
+    }
+
+    #[inline]
+    pub(crate) fn next_in(&self, index: usize, end: usize) -> usize {
+        if index >= end {
+            return end;
+        }
         match self {
-            Self::Empty => usize::MAX,
+            Self::Empty => end,
             Self::Dense { .. } => index,
             Self::Sparse(plan) => {
-                if index >= plan.len {
-                    return plan.len;
+                let end = end.min(plan.len);
+                if index >= end {
+                    return end;
                 }
                 let bits = usize::BITS as usize;
                 let chunk = index / TRACKING_CHUNK_SIZE;
                 let mut word = chunk / bits;
+                let last_word = ((end - 1) / TRACKING_CHUNK_SIZE) / bits;
                 let mut candidates = plan.chunk_bits[word] & (usize::MAX << (chunk % bits));
                 while candidates == 0 {
-                    word += 1;
-                    if word == plan.chunk_bits.len() {
-                        return plan.len;
+                    if word == last_word {
+                        return end;
                     }
+                    word += 1;
                     candidates = plan.chunk_bits[word];
                 }
                 let next_chunk = word * bits + candidates.trailing_zeros() as usize;
-                index.max(next_chunk * TRACKING_CHUNK_SIZE)
+                index.max(next_chunk * TRACKING_CHUNK_SIZE).min(end)
             }
         }
     }
@@ -371,6 +381,37 @@ mod tests {
         }
         let split = plan.midpoint(0, len);
         assert_eq!(plan.count(0, split), candidate.len() / 2);
+    }
+
+    #[test]
+    fn bounded_sparse_scan_keeps_partial_chunks_and_bitmap_word_boundaries() {
+        let word_slots = usize::BITS as usize * TRACKING_CHUNK_SIZE;
+        let len = word_slots * 3 + 7;
+        let chunks = [0, usize::BITS as usize, usize::BITS as usize * 3];
+        let plan = TrackingPlan::build(len, |chunk| chunks.contains(&chunk));
+        assert!(matches!(plan, TrackingPlan::Sparse(_)));
+        let boundaries = [
+            0,
+            1,
+            63,
+            64,
+            word_slots - 1,
+            word_slots,
+            word_slots + 1,
+            word_slots * 2,
+            len - 1,
+            len,
+        ];
+        for start in boundaries {
+            for end in boundaries.into_iter().filter(|&end| end >= start) {
+                let expected = (start..end)
+                    .find(|i| chunks.contains(&(i / TRACKING_CHUNK_SIZE)))
+                    .unwrap_or(end);
+                assert_eq!(plan.next_in(start, end), expected, "{start}..{end}");
+            }
+        }
+        assert_eq!(TrackingPlan::Empty.next_in(0, 64), 64);
+        assert_eq!(TrackingPlan::Dense { len }.next_in(64, 64), 64);
     }
 
     #[test]

@@ -91,6 +91,16 @@ pub trait ShiperatorCaptain: ShiperatorOutput {
     fn next_possible(&self, index: usize) -> usize {
         index
     }
+    /// Returns the next candidate in `index..end`, or `end` if none remains.
+    /// Tracking captains stop scanning at the producer's exclusive upper bound.
+    /// Custom captains retain their existing `next_possible` implementation.
+    #[inline]
+    fn next_possible_in(&self, index: usize, end: usize) -> usize {
+        if index >= end {
+            return end;
+        }
+        self.next_possible(index).min(end)
+    }
     /// Exclusive upper bound at or before `end` whose last slot is a candidate.
     /// Returns zero when no preceding slot can match.
     #[inline]

@@ -66,7 +66,7 @@ impl<S: ShiperatorCaptain + ShiperatorSailor> Iterator for Shiperator<S> {
 
                 return unsafe { Some(self.shiperator.get_captain_data(current)) };
             } else {
-                let current = self.shiperator.next_possible(self.start);
+                let current = self.shiperator.next_possible_in(self.start, self.end);
 
                 if current >= self.end {
                     self.start = self.end;
@@ -122,7 +122,7 @@ impl<S: ShiperatorCaptain + ShiperatorSailor> Iterator for Shiperator<S> {
                 }
             } else {
                 while self.start < self.end {
-                    let current = self.shiperator.next_possible(self.start);
+                    let current = self.shiperator.next_possible_in(self.start, self.end);
 
                     if current >= self.end {
                         self.start = self.end;

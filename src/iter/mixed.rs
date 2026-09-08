@@ -140,6 +140,11 @@ macro_rules! impl_shiperator_output {
                 index
             }
             #[inline]
+            fn next_possible_in(&self, index: usize, end: usize) -> usize {
+                $(if self.mask & (1 << $index) != 0 { return self.shiperator.$index.next_possible_in(index, end); })+
+                index.min(end)
+            }
+            #[inline]
             fn previous_possible(&self, end: usize) -> usize {
                 $(if self.mask & (1 << $index) != 0 { return self.shiperator.$index.previous_possible(end); })+
                 end

@@ -10,6 +10,9 @@ use core::marker::PhantomData;
 use core::ptr::{self, NonNull};
 use core::sync::atomic::Ordering;
 
+#[cfg(all(test, feature = "std"))]
+mod bounded_scan_tests;
+
 pub struct FullRawWindow<'a, T> {
     sparse: *const *const EntityId,
     sparse_len: usize,
@@ -41,6 +44,9 @@ fn tracking_chunk_matches(
     check_insertion: bool,
     check_modification: bool,
 ) -> bool {
+    #[cfg(all(test, feature = "std"))]
+    bounded_scan_tests::record_chunk_visit(chunk);
+
     (check_insertion
         && (chunk >= insertion_chunks_len
             || last_insertion.is_older_than(unsafe { *insertion_chunks.add(chunk) })))
@@ -53,7 +59,7 @@ fn tracking_chunk_matches(
 #[allow(clippy::too_many_arguments)]
 #[inline]
 fn next_tracked_index(
-    dense_len: usize,
+    end: usize,
     insertion_chunks: *const TrackingTimestamp,
     insertion_chunks_len: usize,
     modification_chunks: *const AtomicTimestamp,
@@ -64,7 +70,7 @@ fn next_tracked_index(
     check_insertion: bool,
     check_modification: bool,
 ) -> usize {
-    while index < dense_len {
+    while index < end {
         let chunk = index >> TRACKING_CHUNK_SHIFT;
 
         if tracking_chunk_matches(
@@ -84,7 +90,7 @@ fn next_tracked_index(
         index = (chunk + 1) << TRACKING_CHUNK_SHIFT;
     }
 
-    index
+    end
 }
 
 unsafe impl<T: Send + Component> Send for FullRawWindow<'_, T> {}
@@ -243,11 +249,12 @@ impl<'w, T: Component> FullRawWindow<'w, T> {
     pub(crate) fn next_tracked(
         &self,
         index: usize,
+        end: usize,
         check_insertion: bool,
         check_modification: bool,
     ) -> usize {
         next_tracked_index(
-            self.dense_len,
+            end.min(self.dense_len),
             self.insertion_chunks,
             self.insertion_chunks_len,
             self.modification_chunks,
@@ -437,11 +444,12 @@ impl<'w, T: Component, Track> FullRawWindowMut<'w, T, Track> {
     pub(crate) fn next_tracked(
         &self,
         index: usize,
+        end: usize,
         check_insertion: bool,
         check_modification: bool,
     ) -> usize {
         next_tracked_index(
-            self.dense_len,
+            end.min(self.dense_len),
             self.insertion_chunks,
             self.insertion_chunks_len,
             self.modification_chunks,

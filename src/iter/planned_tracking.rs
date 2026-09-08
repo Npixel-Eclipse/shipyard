@@ -63,6 +63,13 @@ impl<S: ShiperatorCaptain> ShiperatorCaptain for PlannedTracking<S> {
         self.plan.next(index)
     }
     #[inline]
+    fn next_possible_in(&self, index: usize, end: usize) -> usize {
+        if matches!(self.plan, TrackingPlan::Dense { .. }) {
+            return self.inner.next_possible_in(index, end);
+        }
+        self.plan.next_in(index, end)
+    }
+    #[inline]
     fn previous_possible(&self, end: usize) -> usize {
         self.plan.previous(end)
     }

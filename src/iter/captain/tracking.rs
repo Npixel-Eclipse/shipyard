@@ -35,7 +35,12 @@ macro_rules! impl_shiperator_captain_tracking {
             #[inline]
             fn next_possible(&self, index: usize) -> usize {
                 self.0
-                    .next_tracked(index, $check_insertion, $check_modification)
+                    .next_tracked(index, self.0.len(), $check_insertion, $check_modification)
+            }
+
+            #[inline]
+            fn next_possible_in(&self, index: usize, end: usize) -> usize {
+                self.0.next_tracked(index, end, $check_insertion, $check_modification)
             }
 
             #[inline]
@@ -43,7 +48,7 @@ macro_rules! impl_shiperator_captain_tracking {
                 if self.0.len().div_ceil(TRACKING_CHUNK_SIZE) > max_chunks {
                     return false;
                 }
-                self.0.next_tracked(0, $check_insertion, $check_modification) >= self.0.len()
+                self.0.next_tracked(0, self.0.len(), $check_insertion, $check_modification) >= self.0.len()
             }
         }
 
@@ -77,7 +82,12 @@ macro_rules! impl_shiperator_captain_tracking {
                 #[inline]
                 fn next_possible(&self, index: usize) -> usize {
                     self.0
-                        .next_tracked(index, $check_insertion, $check_modification)
+                        .next_tracked(index, self.0.len(), $check_insertion, $check_modification)
+                }
+
+                #[inline]
+                fn next_possible_in(&self, index: usize, end: usize) -> usize {
+                    self.0.next_tracked(index, end, $check_insertion, $check_modification)
                 }
 
                 #[inline]
@@ -85,7 +95,7 @@ macro_rules! impl_shiperator_captain_tracking {
                     if self.0.len().div_ceil(TRACKING_CHUNK_SIZE) > max_chunks {
                         return false;
                     }
-                    self.0.next_tracked(0, $check_insertion, $check_modification) >= self.0.len()
+                    self.0.next_tracked(0, self.0.len(), $check_insertion, $check_modification) >= self.0.len()
                 }
             }
         )+
