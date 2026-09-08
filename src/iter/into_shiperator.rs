@@ -77,7 +77,11 @@ where
     #[inline]
     fn iter(self) -> Shiperator<Self::Shiperator> {
         let mut storage_ids = ShipHashSet::new();
-        let (shiperator, len, entities) = self.into_shiperator(&mut storage_ids);
+        let (shiperator, mut len, mut entities) = self.into_shiperator(&mut storage_ids);
+        if shiperator.has_no_candidates() {
+            len = 0;
+            entities = RawEntityIdAccess::dangling();
+        }
         let is_infallible = shiperator.is_exact_sized();
 
         Shiperator {

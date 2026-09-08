@@ -80,6 +80,23 @@ macro_rules! impl_shiperator_output {
             }
 
             #[inline]
+            fn has_no_candidates(&self) -> bool {
+                $(if self.shiperator.$index.has_no_candidates() { return true; })+
+                false
+            }
+            #[cfg(feature = "parallel")]
+            #[inline]
+            fn candidate_count(&self, start: usize, end: usize) -> usize {
+                $(if self.mask & (1 << $index) != 0 { return self.shiperator.$index.candidate_count(start, end); })+
+                end - start
+            }
+            #[cfg(feature = "parallel")]
+            #[inline]
+            fn candidate_midpoint(&self, start: usize, end: usize) -> usize {
+                $(if self.mask & (1 << $index) != 0 { return self.shiperator.$index.candidate_midpoint(start, end); })+
+                start + (end - start) / 2
+            }
+            #[inline]
             fn next_possible(&self, index: usize) -> usize {
                 $(
                     if self.mask & (1 << $index) != 0 {

@@ -31,6 +31,23 @@ pub trait ShiperatorCaptain: ShiperatorOutput {
     /// By default `into_shiperator` returns Shiperators that thinks they are captains.\
     /// This function is called on the ones that end up not being picked.
     fn unpick(&mut self);
+    /// True only when current metadata proves that this required input is empty.
+    #[inline]
+    fn has_no_candidates(&self) -> bool {
+        false
+    }
+    /// Upper bound on candidate slots in this captain's dense-index interval.
+    #[cfg(feature = "parallel")]
+    #[inline]
+    fn candidate_count(&self, start: usize, end: usize) -> usize {
+        end - start
+    }
+    /// Split a nonempty interval near half of its candidate work.
+    #[cfg(feature = "parallel")]
+    #[inline]
+    fn candidate_midpoint(&self, start: usize, end: usize) -> usize {
+        start + (end - start) / 2
+    }
     /// Returns the next index at or after `index` that may yield an item.
     ///
     /// Tracking Shiperators use it to skip chunks without any flagged component.

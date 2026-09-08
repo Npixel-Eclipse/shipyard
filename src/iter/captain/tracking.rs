@@ -4,8 +4,6 @@ use crate::sparse_set::{FullRawWindow, FullRawWindowMut};
 use crate::track;
 use crate::tracking::{Inserted, InsertedOrModified, Modified};
 
-const TRACKING_FACTOR: f32 = 2.0;
-
 macro_rules! impl_shiperator_captain_tracking {
     ($wrapper: ident, $check_insertion: expr, $check_modification: expr; $($track: path)+) => {
         impl<'tmp, T: Component> ShiperatorCaptain for $wrapper<FullRawWindow<'tmp, T>> {
@@ -18,9 +16,8 @@ macro_rules! impl_shiperator_captain_tracking {
             fn next_slice(&mut self) {}
 
             #[inline]
-            #[allow(clippy::cast_precision_loss)]
             fn sail_time(&self) -> usize {
-                (self.0.sail_time() as f32 * TRACKING_FACTOR) as usize
+                self.0.sail_time()
             }
 
             #[inline]
@@ -51,9 +48,8 @@ macro_rules! impl_shiperator_captain_tracking {
                 fn next_slice(&mut self) {}
 
                 #[inline]
-                #[allow(clippy::cast_precision_loss)]
-                fn sail_time(&self) -> usize {
-                    (self.0.sail_time() as f32 * TRACKING_FACTOR) as usize
+                    fn sail_time(&self) -> usize {
+                    self.0.sail_time()
                 }
 
                 #[inline]

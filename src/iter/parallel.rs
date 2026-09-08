@@ -13,8 +13,11 @@ impl<S> ParShiperator<S> {
     }
 }
 
-fn configure_split<S>(producer: &mut Shiperator<S>) {
-    let total_len = producer.end - producer.start + producer.entities.follow_up_len();
+fn configure_split<S: ShiperatorCaptain>(producer: &mut Shiperator<S>) {
+    let total_len = producer
+        .shiperator
+        .candidate_count(producer.start, producer.end)
+        + producer.entities.follow_up_len();
     let threads = rayon::current_num_threads().max(1);
 
     producer.min_split_len = (total_len / (threads * 4)).max(MIN_SPLIT_LEN);
@@ -29,12 +32,16 @@ impl<S: ShiperatorCaptain + ShiperatorSailor + Send + Clone>
         let follow_up_len = self.entities.follow_up_len();
         let remaining = self.end - self.start;
 
-        let max_len = self.end - self.start + follow_up_len;
+        let max_len = self.shiperator.candidate_count(self.start, self.end) + follow_up_len;
         if max_len <= self.min_split_len.max(1) {
             return (self, None);
         }
 
-        let new_end = self.start + (remaining / 2);
+        let new_end = if follow_up_len == 0 {
+            self.shiperator.candidate_midpoint(self.start, self.end)
+        } else {
+            self.start + remaining / 2
+        };
 
         let (entities, other_entities) = self.entities.split_at(follow_up_len / 2);
 

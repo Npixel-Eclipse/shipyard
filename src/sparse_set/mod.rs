@@ -7,7 +7,9 @@ mod remove;
 mod sparse_array;
 #[cfg(feature = "thread_local")]
 mod thread_local;
+mod tracking_plan;
 mod window;
+pub(crate) use tracking_plan::TrackingPlan;
 
 pub use add_component::TupleAddComponent;
 pub use bulk_add_entity::BulkAddEntity;
@@ -26,9 +28,9 @@ use crate::component::Component;
 use crate::entity_id::EntityId;
 use crate::error;
 use crate::memory_usage::StorageMemoryUsage;
+use crate::r#mut::ModFlag;
 use crate::r#mut::{Mut, SafeMut};
 use crate::storage::{SBoxBuilder, Storage, StorageId};
-use crate::r#mut::ModFlag;
 use crate::tracking::{AtomicTimestamp, Tracking, TrackingTimestamp};
 use alloc::boxed::Box;
 use alloc::vec::Vec;
@@ -337,11 +339,7 @@ impl<T: Component> SparseSet<T> {
                         .modification_data
                         .get_unchecked_mut(sparse_entity.uindex()) = current;
                 }
-                flag_modification_chunk(
-                    &self.modification_chunks,
-                    sparse_entity.uindex(),
-                    current,
-                );
+                flag_modification_chunk(&self.modification_chunks, sparse_entity.uindex(), current);
             }
 
             dense_entity.copy_index_gen(entity);
@@ -366,11 +364,7 @@ impl<T: Component> SparseSet<T> {
                         .insertion_data
                         .get_unchecked_mut(sparse_entity.uindex()) = current;
                 }
-                flag_insertion_chunk(
-                    &mut self.insertion_chunks,
-                    sparse_entity.uindex(),
-                    current,
-                );
+                flag_insertion_chunk(&mut self.insertion_chunks, sparse_entity.uindex(), current);
             }
 
             dense_entity.copy_index_gen(entity);
@@ -438,11 +432,7 @@ impl<T: Component> SparseSet<T> {
 
                 if self.is_tracking_insertion() {
                     let moved = self.insertion_data[sparse_entity.uindex()];
-                    flag_insertion_chunk(
-                        &mut self.insertion_chunks,
-                        sparse_entity.uindex(),
-                        moved,
-                    );
+                    flag_insertion_chunk(&mut self.insertion_chunks, sparse_entity.uindex(), moved);
                 }
                 if self.is_tracking_modification() {
                     let moved = self.modification_data[sparse_entity.uindex()];
@@ -529,8 +519,10 @@ impl<T: Component> SparseSet<T> {
 
         self.insertion_data
             .extend(core::iter::repeat(TrackingTimestamp::new(0)).take(self.dense.len()));
-        self.insertion_chunks
-            .resize(tracking_chunk_count(self.dense.len()), TrackingTimestamp::origin());
+        self.insertion_chunks.resize(
+            tracking_chunk_count(self.dense.len()),
+            TrackingTimestamp::origin(),
+        );
 
         self
     }

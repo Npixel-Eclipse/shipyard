@@ -4,6 +4,9 @@ mod mixed;
 mod output;
 #[cfg(feature = "parallel")]
 mod parallel;
+mod planned_tracking;
+#[doc(hidden)]
+pub use planned_tracking::PlannedTracking;
 mod sailor;
 mod with_id;
 
@@ -159,7 +162,7 @@ impl<S: ShiperatorCaptain + ShiperatorSailor> DoubleEndedIterator for Shiperator
             } else {
                 let entity_id = unsafe { self.entities.get(self.end) };
 
-                if let Some(indices) = self.shiperator.indices_of(entity_id, self.end) {
+                if let Some(indices) = self.shiperator.captain_indices_of(entity_id, self.end) {
                     return unsafe { Some(self.shiperator.get_sailor_data(indices)) };
                 }
             }
@@ -195,7 +198,7 @@ impl<S: ShiperatorCaptain + ShiperatorSailor> DoubleEndedIterator for Shiperator
                     self.end -= 1;
                     let entity_id = unsafe { self.entities.get(self.end) };
 
-                    if let Some(indices) = self.shiperator.indices_of(entity_id, self.end) {
+                    if let Some(indices) = self.shiperator.captain_indices_of(entity_id, self.end) {
                         init = f(init, unsafe { self.shiperator.get_sailor_data(indices) });
                     }
                 }
