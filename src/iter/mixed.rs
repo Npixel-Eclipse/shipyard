@@ -36,6 +36,15 @@ macro_rules! impl_shiperator_output {
 
         impl<$($type: ShiperatorCaptain),+> ShiperatorCaptain for Mixed<($($type,)+)> {
             #[inline]
+            fn has_stable_membership(&self) -> bool {
+                $(self.shiperator.$index.has_stable_membership())&&+
+            }
+
+            #[inline]
+            fn can_split(&self) -> bool {
+                $(self.shiperator.$index.can_split())&&+
+            }
+            #[inline]
             unsafe fn get_captain_data(&self, index: usize) -> Self::Out {
                 ($(
                     self.shiperator.$index.get_captain_data(index),
@@ -45,8 +54,21 @@ macro_rules! impl_shiperator_output {
             #[inline]
             fn next_slice(&mut self) {
                 $(
-                    self.shiperator.$index.next_slice();
+                    if self.mask & (1 << $index) != 0 {
+                        self.shiperator.$index.next_slice();
+                    }
                 )+
+            }
+
+            #[inline]
+            fn set_slice(&mut self, slice: usize) {
+                $(if self.mask & (1 << $index) != 0 { self.shiperator.$index.set_slice(slice); })+
+            }
+
+            #[inline]
+            fn slice_index(&self) -> usize {
+                $(if self.mask & (1 << $index) != 0 { return self.shiperator.$index.slice_index(); })+
+                0
             }
 
             #[inline]
@@ -85,6 +107,29 @@ macro_rules! impl_shiperator_output {
             }
 
             #[inline]
+            fn has_no_candidates(&self) -> bool {
+                $(if self.shiperator.$index.has_no_candidates() { return true; })+
+                false
+            }
+            #[cfg(feature = "parallel")]
+            #[inline]
+            fn candidate_count(&self, start: usize, end: usize) -> usize {
+                $(if self.mask & (1 << $index) != 0 { return self.shiperator.$index.candidate_count(start, end); })+
+                end - start
+            }
+            #[cfg(feature = "parallel")]
+            #[inline]
+            fn candidate_count_at(&self, slice: usize, start: usize, end: usize) -> usize {
+                $(if self.mask & (1 << $index) != 0 { return self.shiperator.$index.candidate_count_at(slice, start, end); })+
+                end - start
+            }
+            #[cfg(feature = "parallel")]
+            #[inline]
+            fn candidate_midpoint(&self, start: usize, end: usize) -> usize {
+                $(if self.mask & (1 << $index) != 0 { return self.shiperator.$index.candidate_midpoint(start, end); })+
+                start + (end - start) / 2
+            }
+            #[inline]
             fn next_possible(&self, index: usize) -> usize {
                 $(
                     if self.mask & (1 << $index) != 0 {
@@ -93,6 +138,11 @@ macro_rules! impl_shiperator_output {
                 )+
 
                 index
+            }
+            #[inline]
+            fn previous_possible(&self, end: usize) -> usize {
+                $(if self.mask & (1 << $index) != 0 { return self.shiperator.$index.previous_possible(end); })+
+                end
             }
         }
 
@@ -108,33 +158,9 @@ macro_rules! impl_shiperator_output {
 
             #[inline]
             fn indices_of(&self, eid: EntityId, index: usize, ) -> Option<Self::Index> {
-                if self.mask.count_ones() == 1 {
-                    let one = self.mask.trailing_zeros();
-
-                    Some(($(
-                        if one == $index {
-                            $type::index_from_usize(index)
-                        } else {
-                            if let Some(index) = self.shiperator.$index.indices_of(eid, index) {
-                                index
-                            } else {
-                                return None
-                            }
-                        },
-                    )+))
-                } else {
-                    Some(($(
-                        if self.mask & (1 << $index) != 0 {
-                            $type::index_from_usize(index)
-                        } else {
-                            if let Some(index) = self.shiperator.$index.indices_of(eid, index) {
-                                index
-                            } else {
-                                return None
-                            }
-                        },
-                    )+))
-                }
+                // A membership probe may come from another OR source. Only
+                // captain_indices_of is allowed to reuse this dense index.
+                Some(($(self.shiperator.$index.indices_of(eid, index)?,)+))
             }
 
             #[inline]

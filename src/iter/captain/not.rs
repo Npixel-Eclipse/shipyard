@@ -8,6 +8,10 @@ const NOT_FACTOR: f32 = 1.2;
 
 impl<'tmp, T: Component> ShiperatorCaptain for Not<FullRawWindow<'tmp, T>> {
     #[inline]
+    fn has_stable_membership(&self) -> bool {
+        true
+    }
+    #[inline]
     unsafe fn get_captain_data(&self, _index: usize) -> Self::Out {
         unreachable!()
     }
@@ -33,6 +37,10 @@ impl<'tmp, T: Component> ShiperatorCaptain for Not<FullRawWindow<'tmp, T>> {
 }
 
 impl<'tmp, T: Component, Track> ShiperatorCaptain for Not<FullRawWindowMut<'tmp, T, Track>> {
+    #[inline]
+    fn has_stable_membership(&self) -> bool {
+        true
+    }
     #[inline]
     unsafe fn get_captain_data(&self, _index: usize) -> Self::Out {
         unreachable!()
@@ -61,6 +69,8 @@ macro_rules! impl_shiperator_captain_not_tracking {
         where
             $type<T>: ShiperatorCaptain,
         {
+            #[inline]
+            fn has_stable_membership(&self) -> bool { self.0.has_stable_membership() }
             #[inline]
             unsafe fn get_captain_data(&self, _index: usize) -> Self::Out {
                 unreachable!()

@@ -1,7 +1,7 @@
 use crate::atomic_refcell::{ExclusiveBorrow, SharedBorrow};
 use crate::component::Component;
 use crate::entity_id::EntityId;
-use crate::sparse_set::TRACKING_CHUNK_SHIFT;
+use crate::sparse_set::{TrackingPlan, TRACKING_CHUNK_SHIFT};
 use crate::tracking::{AtomicTimestamp, Tracking, TrackingTimestamp};
 use crate::views::{View, ViewMut};
 use alloc::boxed::Box;
@@ -28,6 +28,28 @@ pub struct FullRawWindow<'a, T> {
     _phantom: PhantomData<&'a T>,
 }
 
+#[inline]
+#[allow(clippy::too_many_arguments)]
+fn tracking_chunk_matches(
+    chunk: usize,
+    insertion_chunks: *const TrackingTimestamp,
+    insertion_chunks_len: usize,
+    modification_chunks: *const AtomicTimestamp,
+    modification_chunks_len: usize,
+    last_insertion: TrackingTimestamp,
+    last_modification: TrackingTimestamp,
+    check_insertion: bool,
+    check_modification: bool,
+) -> bool {
+    (check_insertion
+        && (chunk >= insertion_chunks_len
+            || last_insertion.is_older_than(unsafe { *insertion_chunks.add(chunk) })))
+        || (check_modification
+            && (chunk >= modification_chunks_len
+                || last_modification.get()
+                    < unsafe { &*modification_chunks.add(chunk) }.load(Ordering::Relaxed)))
+}
+
 #[allow(clippy::too_many_arguments)]
 #[inline]
 fn next_tracked_index(
@@ -45,18 +67,17 @@ fn next_tracked_index(
     while index < dense_len {
         let chunk = index >> TRACKING_CHUNK_SHIFT;
 
-        if check_insertion
-            && (chunk >= insertion_chunks_len
-                || last_insertion.is_older_than(unsafe { *insertion_chunks.add(chunk) }))
-        {
-            return index;
-        }
-
-        if check_modification
-            && (chunk >= modification_chunks_len
-                || last_modification.get()
-                    < unsafe { &*modification_chunks.add(chunk) }.load(Ordering::Relaxed))
-        {
+        if tracking_chunk_matches(
+            chunk,
+            insertion_chunks,
+            insertion_chunks_len,
+            modification_chunks,
+            modification_chunks_len,
+            last_insertion,
+            last_modification,
+            check_insertion,
+            check_modification,
+        ) {
             return index;
         }
 
@@ -197,6 +218,28 @@ impl<'w, T: Component> FullRawWindow<'w, T> {
     }
 
     #[inline]
+    pub(crate) fn tracking_plan(
+        &self,
+        check_insertion: bool,
+        check_modification: bool,
+        max_chunks: usize,
+    ) -> TrackingPlan {
+        TrackingPlan::build_with_budget(self.dense_len, max_chunks, |chunk| {
+            tracking_chunk_matches(
+                chunk,
+                self.insertion_chunks,
+                self.insertion_chunks_len,
+                self.modification_chunks,
+                self.modification_chunks_len,
+                self.last_insertion,
+                self.last_modification,
+                check_insertion,
+                check_modification,
+            )
+        })
+    }
+
+    #[inline]
     pub(crate) fn next_tracked(
         &self,
         index: usize,
@@ -216,7 +259,6 @@ impl<'w, T: Component> FullRawWindow<'w, T> {
             check_modification,
         )
     }
-
 }
 
 impl<T: Component> Clone for FullRawWindow<'_, T> {
@@ -370,6 +412,28 @@ impl<'w, T: Component, Track> FullRawWindowMut<'w, T, Track> {
     }
 
     #[inline]
+    pub(crate) fn tracking_plan(
+        &self,
+        check_insertion: bool,
+        check_modification: bool,
+        max_chunks: usize,
+    ) -> TrackingPlan {
+        TrackingPlan::build_with_budget(self.dense_len, max_chunks, |chunk| {
+            tracking_chunk_matches(
+                chunk,
+                self.insertion_chunks,
+                self.insertion_chunks_len,
+                self.modification_chunks,
+                self.modification_chunks_len,
+                self.last_insertion,
+                self.last_modification,
+                check_insertion,
+                check_modification,
+            )
+        })
+    }
+
+    #[inline]
     pub(crate) fn next_tracked(
         &self,
         index: usize,
@@ -519,5 +583,31 @@ impl RawEntityIdAccess {
         };
 
         (self, other)
+    }
+}
+
+#[cfg(test)]
+mod planning_tests {
+    use super::*;
+
+    #[test]
+    fn missing_chunk_metadata_is_never_treated_as_empty() {
+        for (inserted, modified) in [(true, false), (false, true), (true, true)] {
+            let plan = TrackingPlan::build(257, |chunk| {
+                tracking_chunk_matches(
+                    chunk,
+                    core::ptr::null(),
+                    0,
+                    core::ptr::null(),
+                    0,
+                    TrackingTimestamp::origin(),
+                    TrackingTimestamp::origin(),
+                    inserted,
+                    modified,
+                )
+            });
+            assert!(!plan.is_empty());
+            assert!(matches!(plan, TrackingPlan::Dense { len: 257 }));
+        }
     }
 }
