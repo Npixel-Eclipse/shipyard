@@ -50,3 +50,7 @@ rustdoc-args = ["--cfg", "docsrs"]
 consolidate-commits = false
 pre-release-commit-message = "Bump {{crate_name}} version to {{version}}"
 tag-message = "Release {{crate_name}} version {{version}}"
+
+[[example]]
+name = "chunk_planning"
+required-features = ["parallel", "std"]

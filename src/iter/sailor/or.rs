@@ -17,34 +17,40 @@ impl<T: ShiperatorCaptain + ShiperatorSailor, U: ShiperatorCaptain + ShiperatorS
 
     #[inline]
     fn indices_of(&self, eid: EntityId, index: usize) -> Option<Self::Index> {
-        if self.is_captain {
-            if self.is_past_first_storage {
-                let Some(index) = (self.storages).1.indices_of(eid, index) else {
-                    return None;
-                };
-
-                if (self.storages).0.indices_of(eid, 0).is_some() {
-                    return None;
-                }
-
-                Some(OneOfTwo::Two(index))
-            } else {
-                let Some(index) = (self.storages).0.indices_of(eid, index) else {
-                    return None;
-                };
-
-                Some(OneOfTwo::One(index))
-            }
+        // Membership probes must not depend on which source drives iteration.
+        // This also preserves left precedence without probing right on a hit.
+        if let Some(index) = self.storages.0.indices_of(eid, index) {
+            Some(OneOfTwo::One(index))
         } else {
-            let index0 = (self.storages).0.indices_of(eid, index);
-            let index1 = (self.storages).1.indices_of(eid, index);
+            self.storages.1.indices_of(eid, index).map(OneOfTwo::Two)
+        }
+    }
 
-            match (index0, index1) {
-                (None, None) => None,
-                (None, Some(index1)) => Some(OneOfTwo::Two(index1)),
-                (Some(index0), None) => Some(OneOfTwo::One(index0)),
-                (Some(index0), Some(_)) => Some(OneOfTwo::One(index0)),
+    #[inline]
+    fn captain_indices_of(&self, eid: EntityId, index: usize) -> Option<Self::Index> {
+        if self.current_slice < self.left_slices {
+            let index = self.storages.0.captain_indices_of(eid, index)?;
+            if !self.storages.0.has_stable_membership() {
+                // A returned mutable value can stop matching the left filter.
+                // Remember it so a later right source cannot yield it again.
+                self.seen_left
+                    .borrow_mut()
+                    .get_or_insert_with(Default::default)
+                    .insert(eid);
             }
+            Some(OneOfTwo::One(index))
+        } else {
+            let index = self.storages.1.captain_indices_of(eid, index)?;
+            let seen_left = self
+                .seen_left
+                .borrow()
+                .as_ref()
+                .is_some_and(|seen| seen.contains(&eid));
+            // Also check current membership for reverse and mixed traversal.
+            if seen_left || self.storages.0.indices_of(eid, 0).is_some() {
+                return None;
+            }
+            Some(OneOfTwo::Two(index))
         }
     }
 

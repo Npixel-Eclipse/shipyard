@@ -288,8 +288,9 @@ fn mandatory_entity_slice_keeps_its_order() {
 
 #[test]
 fn chunk_budget_boundary_preserves_membership_and_driver_order() {
-    // Plain64 allows eight metadata chunks; 513 tracked entities need nine.
-    for len in [512, 513] {
+    // Plain64 allows 32 planning chunks; 2049 tracked entities need 33.
+    // Keep the former empty-only probe boundary covered as well.
+    for len in [512, 513, 2048, 2049] {
         for nonempty in [false, true] {
             let mut world = World::new();
             let ids = world
@@ -310,7 +311,7 @@ fn chunk_budget_boundary_preserves_membership_and_driver_order() {
             world.run(|values: View<Changed>, plain: View<Plain>| {
                 let iter = (values.modified(), &plain).iter();
                 if !nonempty {
-                    assert_eq!(iter.size_hint().1, Some(if len == 512 { 0 } else { 64 }));
+                    assert_eq!(iter.size_hint().1, Some(if len <= 2048 { 0 } else { 64 }));
                 }
                 let actual = iter.with_id().map(|(id, _)| id).collect::<Vec<_>>();
                 assert_eq!(actual, changed);
