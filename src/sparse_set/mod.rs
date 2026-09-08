@@ -651,6 +651,33 @@ impl<T: Component> SparseSet<T> {
             }
             self.dense.swap(i, pos);
             self.data.swap(i, pos);
+            if self.is_tracking_insertion {
+                self.insertion_data.swap(i, pos);
+            }
+            if self.is_tracking_modification {
+                self.modification_data.swap(i, pos);
+            }
+        }
+
+        if self.is_tracking_insertion {
+            self.insertion_chunks.clear();
+            self.insertion_chunks.resize(
+                tracking_chunk_count(self.dense.len()),
+                TrackingTimestamp::origin(),
+            );
+            for (i, &timestamp) in self.insertion_data.iter().enumerate() {
+                flag_insertion_chunk(&mut self.insertion_chunks, i, timestamp);
+            }
+        }
+        if self.is_tracking_modification {
+            self.modification_chunks.clear();
+            self.modification_chunks
+                .resize_with(tracking_chunk_count(self.dense.len()), || {
+                    AtomicTimestamp::new(TrackingTimestamp::origin().get())
+                });
+            for (i, &timestamp) in self.modification_data.iter().enumerate() {
+                flag_modification_chunk(&self.modification_chunks, i, timestamp);
+            }
         }
 
         for (i, id) in self.dense.iter().enumerate() {
