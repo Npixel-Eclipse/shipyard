@@ -94,3 +94,8 @@ tag-message = "Release {{crate_name}} version {{version}}"
 name = "tracking_chunks"
 harness = false
 required-features = ["parallel", "std"]
+
+[[bench]]
+name = "tracking_plan"
+harness = false
+required-features = ["parallel", "std"]
