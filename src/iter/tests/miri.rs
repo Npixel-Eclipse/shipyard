@@ -122,6 +122,7 @@ where
     let is_exact_sized = is_exact_traversal(&mixed, &entities);
 
     IntoIterRef {
+        dense_candidates: mixed.has_dense_candidates(),
         shiperator: mixed,
         _all_borrow: all_borrow,
         _borrow: borrow,

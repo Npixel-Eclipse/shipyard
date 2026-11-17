@@ -6,7 +6,9 @@ use crate::borrow::{NonSend, NonSendSync, NonSync};
 use crate::component::Component;
 use crate::entity_id::EntityId;
 use crate::error;
+use crate::sparse_set::ChunkTimestamp;
 use crate::sparse_set::SparseSet;
+use crate::sparse_set::TRACKING_CHUNK_SIZE;
 use crate::tracking::TrackingTimestamp;
 use core::any::type_name;
 use core::ops::{Deref, DerefMut};
@@ -51,7 +53,9 @@ impl<'a, T> AsRef<T> for Ref<'a, T> {
 /// Exclusive reference to a component.
 pub struct RefMut<'a, T> {
     inner: T,
+    // This borrow's tracking timestamp stays fixed, so mark it only once.
     flag: Option<&'a mut TrackingTimestamp>,
+    chunk: Option<&'a ChunkTimestamp>,
     current: TrackingTimestamp,
     all_borrow: Option<SharedBorrow<'a>>,
     borrow: ExclusiveBorrow<'a>,
@@ -66,6 +70,7 @@ impl<'a, T> RefMut<'a, T> {
         RefMut {
             inner: f(orig.inner),
             flag: orig.flag,
+            chunk: orig.chunk,
             current: orig.current,
             all_borrow: orig.all_borrow,
             borrow: orig.borrow,
@@ -92,8 +97,11 @@ impl<'a, T> AsRef<T> for RefMut<'a, T> {
 impl<'a, T> DerefMut for RefMut<'a, T> {
     #[inline]
     fn deref_mut(&mut self) -> &mut Self::Target {
-        if let Some(flag) = &mut self.flag {
-            **flag = self.current;
+        if let Some(flag) = self.flag.take() {
+            *flag = self.current;
+            if let Some(chunk) = self.chunk {
+                chunk.mark(self.current);
+            }
         }
 
         &mut self.inner
@@ -103,8 +111,11 @@ impl<'a, T> DerefMut for RefMut<'a, T> {
 impl<'a, T> AsMut<T> for RefMut<'a, T> {
     #[inline]
     fn as_mut(&mut self) -> &mut T {
-        if let Some(flag) = &mut self.flag {
-            **flag = self.current;
+        if let Some(flag) = self.flag.take() {
+            *flag = self.current;
+            if let Some(chunk) = self.chunk {
+                chunk.mark(self.current);
+            }
         }
 
         &mut self.inner
@@ -265,6 +276,7 @@ impl<T: Component + Send + Sync> GetComponent for &'_ mut T {
         let SparseSet {
             data,
             modification_data,
+            modification_summary,
             is_tracking_modification,
             ..
         } = sparse_set;
@@ -273,6 +285,7 @@ impl<T: Component + Send + Sync> GetComponent for &'_ mut T {
             inner: unsafe { data.get_unchecked_mut(index) },
             flag: is_tracking_modification
                 .then(|| unsafe { modification_data.get_unchecked_mut(index) }),
+            chunk: modification_summary.get(index / TRACKING_CHUNK_SIZE),
             current,
             all_borrow,
             borrow,
@@ -306,6 +319,7 @@ impl<T: Component + Sync> GetComponent for NonSend<&'_ mut T> {
         let NonSend(SparseSet {
             data,
             modification_data,
+            modification_summary,
             is_tracking_modification,
             ..
         }) = sparse_set;
@@ -314,6 +328,7 @@ impl<T: Component + Sync> GetComponent for NonSend<&'_ mut T> {
             inner: unsafe { data.get_unchecked_mut(index) },
             flag: is_tracking_modification
                 .then(|| unsafe { modification_data.get_unchecked_mut(index) }),
+            chunk: modification_summary.get(index / TRACKING_CHUNK_SIZE),
             current,
             all_borrow,
             borrow,
@@ -347,6 +362,7 @@ impl<T: Component + Send> GetComponent for NonSync<&'_ mut T> {
         let NonSync(SparseSet {
             data,
             modification_data,
+            modification_summary,
             is_tracking_modification,
             ..
         }) = sparse_set;
@@ -355,6 +371,7 @@ impl<T: Component + Send> GetComponent for NonSync<&'_ mut T> {
             inner: unsafe { data.get_unchecked_mut(index) },
             flag: is_tracking_modification
                 .then(|| unsafe { modification_data.get_unchecked_mut(index) }),
+            chunk: modification_summary.get(index / TRACKING_CHUNK_SIZE),
             current,
             all_borrow,
             borrow,
@@ -388,6 +405,7 @@ impl<T: Component> GetComponent for NonSendSync<&'_ mut T> {
         let NonSendSync(SparseSet {
             data,
             modification_data,
+            modification_summary,
             is_tracking_modification,
             ..
         }) = sparse_set;
@@ -396,6 +414,7 @@ impl<T: Component> GetComponent for NonSendSync<&'_ mut T> {
             inner: unsafe { data.get_unchecked_mut(index) },
             flag: is_tracking_modification
                 .then(|| unsafe { modification_data.get_unchecked_mut(index) }),
+            chunk: modification_summary.get(index / TRACKING_CHUNK_SIZE),
             current,
             all_borrow,
             borrow,

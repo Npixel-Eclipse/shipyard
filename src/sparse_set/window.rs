@@ -1,3 +1,5 @@
+use super::ChunkTimestamp;
+use super::tracking_chunks::ModificationSummary;
 #[cfg(test)]
 mod tests;
 
@@ -30,7 +32,9 @@ pub struct FullRawWindow<'a, T, Track: Tracking> {
     pub(crate) segment_start: usize,
     pub(crate) data: *const T,
     pub(crate) insertion_data: *const TrackingTimestamp,
+    pub(crate) insertion_chunks: NonNull<[ChunkTimestamp]>,
     pub(crate) modification_data: *const TrackingTimestamp,
+    pub(crate) modification_summary: NonNull<ModificationSummary>,
     pub(crate) last_insertion: TrackingTimestamp,
     pub(crate) last_modification: TrackingTimestamp,
     pub(crate) current: TrackingTimestamp,
@@ -79,7 +83,9 @@ impl<'w, T: Component, Track: Tracking> FullRawWindow<'w, T, Track> {
             segment_start: 0,
             data: view.data.as_ptr(),
             insertion_data: view.insertion_data.as_ptr(),
+            insertion_chunks: NonNull::from(&view.insertion_chunks[..]),
             modification_data: view.modification_data.as_ptr(),
+            modification_summary: NonNull::from(&view.modification_summary),
             last_insertion: view.last_insertion,
             last_modification: view.last_modification,
             current: view.current,
@@ -114,7 +120,9 @@ impl<'w, T: Component, Track: Tracking> FullRawWindow<'w, T, Track> {
                 segment_start: 0,
                 data: sparse_set.data.as_ptr(),
                 insertion_data: sparse_set.insertion_data.as_ptr(),
+                insertion_chunks: NonNull::from(&sparse_set.insertion_chunks[..]),
                 modification_data: sparse_set.modification_data.as_ptr(),
+                modification_summary: NonNull::from(&sparse_set.modification_summary),
                 last_insertion,
                 last_modification,
                 current,
@@ -139,7 +147,9 @@ impl<'w, T: Component, Track: Tracking> FullRawWindow<'w, T, Track> {
             segment_start: 0,
             data: view.data.as_ptr(),
             insertion_data: view.insertion_data.as_ptr(),
+            insertion_chunks: NonNull::from(&view.insertion_chunks[..]),
             modification_data: view.modification_data.as_ptr(),
+            modification_summary: NonNull::from(&view.modification_summary),
             last_insertion: view.last_insertion,
             last_modification: view.last_modification,
             current: view.current,
@@ -188,7 +198,6 @@ impl<'w, T: Component, Track: Tracking> FullRawWindow<'w, T, Track> {
         // The access is only used by iterators holding that borrow, which prevents any modification.
         unsafe { RawEntityIdAccess::new(self.dense, self.dense_len) }
     }
-
     /// Converts an index local to the current segment into an absolute storage index.
     #[inline]
     pub(crate) fn resolve_index(&self, local_index: usize) -> usize {
@@ -286,7 +295,9 @@ impl<T: Component, Track: Tracking> Clone for FullRawWindow<'_, T, Track> {
             segment_start: self.segment_start,
             data: self.data,
             insertion_data: self.insertion_data,
+            insertion_chunks: self.insertion_chunks,
             modification_data: self.modification_data,
+            modification_summary: self.modification_summary,
             last_insertion: self.last_insertion,
             last_modification: self.last_modification,
             current: self.current,
@@ -307,6 +318,11 @@ pub struct FullRawWindowMut<'a, T, Track: Tracking> {
     pub(crate) segment_start: usize,
     pub(crate) data: *mut T,
     pub(crate) insertion_data: *const TrackingTimestamp,
+    pub(crate) modification_summary: NonNull<ModificationSummary>,
+    pub(crate) modification_writers: NonNull<[ChunkTimestamp]>,
+    /// Every candidate in the installed segment already has its summary marked.
+    pub(crate) chunks_prepared: bool,
+    pub(crate) insertion_chunks: NonNull<[ChunkTimestamp]>,
     pub(crate) modification_data: *mut TrackingTimestamp,
     pub(crate) last_insertion: TrackingTimestamp,
     pub(crate) last_modification: TrackingTimestamp,
@@ -334,6 +350,10 @@ impl<'w, T: Component, Track: Tracking> FullRawWindowMut<'w, T, Track> {
             segment_start: 0,
             data: view.data.as_mut_ptr(),
             insertion_data: view.insertion_data.as_ptr(),
+            modification_summary: NonNull::from(&view.modification_summary),
+            modification_writers: NonNull::from(view.modification_summary.writers()),
+            chunks_prepared: false,
+            insertion_chunks: NonNull::from(&view.insertion_chunks[..]),
             modification_data: view.modification_data.as_mut_ptr(),
             last_insertion: view.last_insertion,
             last_modification: view.last_modification,
@@ -376,6 +396,10 @@ impl<'w, T: Component, Track: Tracking> FullRawWindowMut<'w, T, Track> {
             segment_start: 0,
             data: sparse_set.data.as_mut_ptr(),
             insertion_data: sparse_set.insertion_data.as_ptr(),
+            modification_summary: NonNull::from(&sparse_set.modification_summary),
+            modification_writers: NonNull::from(sparse_set.modification_summary.writers()),
+            chunks_prepared: false,
+            insertion_chunks: NonNull::from(&sparse_set.insertion_chunks[..]),
             modification_data: sparse_set.modification_data.as_mut_ptr(),
             last_insertion,
             last_modification,
@@ -432,7 +456,6 @@ impl<'w, T: Component, Track: Tracking> FullRawWindowMut<'w, T, Track> {
         // The access is only used by iterators holding that borrow, which prevents any modification.
         unsafe { RawEntityIdAccess::new(self.dense, self.dense_len) }
     }
-
     /// Converts an index local to the current segment into an absolute storage index.
     #[inline]
     pub(crate) fn resolve_index(&self, local_index: usize) -> usize {
@@ -449,6 +472,7 @@ impl<'w, T: Component, Track: Tracking> FullRawWindowMut<'w, T, Track> {
     /// the entity stored at absolute index `segment_start + i` in this window.
     #[inline]
     pub(crate) unsafe fn set_segment_start(&mut self, segment_start: usize) {
+        self.chunks_prepared = false;
         self.segment_start = segment_start;
     }
 
@@ -530,6 +554,10 @@ impl<T: Component, Track: Tracking> Clone for FullRawWindowMut<'_, T, Track> {
             segment_start: self.segment_start,
             data: self.data,
             insertion_data: self.insertion_data,
+            modification_summary: self.modification_summary,
+            modification_writers: self.modification_writers,
+            chunks_prepared: self.chunks_prepared,
+            insertion_chunks: self.insertion_chunks,
             modification_data: self.modification_data,
             last_insertion: self.last_insertion,
             last_modification: self.last_modification,
@@ -651,6 +679,15 @@ impl EntityCursor {
         self.local_index += 1;
 
         true
+    }
+
+    /// Consumes at most `count` candidates.
+    #[inline]
+    pub(crate) fn advance_by(&mut self, count: usize) {
+        let count = count.min(self.len());
+        // SAFE: `count` is within the remaining allocation, including its end.
+        self.next = unsafe { self.next.add(count) };
+        self.local_index += count;
     }
 
     /// Splits the unconsumed entities after the first `index` of them.

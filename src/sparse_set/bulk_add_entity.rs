@@ -106,6 +106,7 @@ impl<T: Send + Sync + Component> BulkInsert for T {
                 .resize(new_len, TrackingTimestamp::origin());
         }
 
+        sparse_set.refresh_tracking_chunks(old_len..old_len + new_entities_count);
         let SparseSet { sparse, dense, .. } = &mut *sparse_set;
 
         // update sparse to reflect the new state of dense and data
@@ -202,6 +203,7 @@ macro_rules! impl_bulk_insert {
                 )*
 
                 let old_len = $sparse_set1.dense.len() - new_entities_count;
+                $sparse_set1.refresh_tracking_chunks(old_len..old_len + new_entities_count);
                 let SparseSet { sparse, dense, .. } = &mut *$sparse_set1;
 
                 sparse.bulk_allocate(dense[old_len], dense[dense.len() - 1]);
@@ -212,6 +214,7 @@ macro_rules! impl_bulk_insert {
                 }
                 $(
                     let old_len = $sparse_set.dense.len() - new_entities_count;
+                    $sparse_set.refresh_tracking_chunks(old_len..old_len + new_entities_count);
                     let SparseSet { sparse, dense, .. } = &mut *$sparse_set;
 
                     sparse.bulk_allocate(dense[old_len], dense[dense.len() - 1]);

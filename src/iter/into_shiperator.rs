@@ -73,7 +73,7 @@ impl<T: IntoShiperator> IntoIter for T
 where
     <T as IntoShiperator>::Shiperator: Shiperator,
 {
-    #[inline]
+    #[inline(always)]
     fn iter(self) -> Shiper<Self::Shiperator> {
         let (mut shiperator, entities, metadata) = self.into_shiperator();
 
