@@ -1,3 +1,4 @@
+use super::tracking_plan::TrackingPlan;
 use crate::tracking::TrackingTimestamp;
 use alloc::vec::Vec;
 use core::ops::Range;
@@ -28,7 +29,7 @@ impl ChunkTimestamp {
         }
     }
 
-    #[cfg(test)]
+    #[inline]
     pub(crate) fn changed_since(&self, last: TrackingTimestamp) -> bool {
         last.get() < self.0.load(Ordering::Relaxed)
     }
@@ -136,7 +137,7 @@ impl ModificationSummary {
         }
     }
 
-    #[cfg(test)]
+    #[inline]
     pub(crate) fn all_changed(&self, last: TrackingTimestamp) -> bool {
         self.whole.0.load(Ordering::Relaxed) > last.get()
     }
@@ -144,6 +145,24 @@ impl ModificationSummary {
     #[cfg(test)]
     pub(crate) fn changed(&self, index: usize, last: TrackingTimestamp) -> bool {
         self.all_changed(last) || self.chunks[index].0.load(Ordering::Relaxed) > last.get()
+    }
+
+    #[inline]
+    pub(crate) fn query_plan(
+        &self,
+        modified: bool,
+        len: usize,
+        max_chunks: usize,
+        last: TrackingTimestamp,
+        mut inserted_candidate: impl FnMut(usize) -> bool,
+    ) -> TrackingPlan {
+        if modified && self.all_changed(last) {
+            return TrackingPlan::Dense { len };
+        }
+        // The query is built before any mutable segment is handed out.
+        TrackingPlan::build_with_budget(len, max_chunks, |chunk| {
+            inserted_candidate(chunk) || (modified && self.chunks[chunk].changed_since(last))
+        })
     }
 
     #[cfg(test)]

@@ -198,6 +198,29 @@ impl<'w, T: Component, Track: Tracking> FullRawWindow<'w, T, Track> {
         // The access is only used by iterators holding that borrow, which prevents any modification.
         unsafe { RawEntityIdAccess::new(self.dense, self.dense_len) }
     }
+
+    pub(crate) fn tracking_plan<const INSERTED: bool, const MODIFIED: bool>(
+        &self,
+        max_chunks: usize,
+    ) -> super::tracking_plan::TrackingPlan {
+        // SAFE: The storage borrow keeps its summary alive.
+        let summary = unsafe { self.modification_summary.as_ref() };
+        summary.query_plan(
+            MODIFIED && Track::track_modification(),
+            self.dense_len,
+            max_chunks,
+            self.last_modification,
+            |chunk| {
+                INSERTED
+                    && Track::track_insertion()
+                    // SAFE: The storage borrow keeps the insertion summaries alive.
+                    && unsafe { self.insertion_chunks.as_ref() }
+                        .get(chunk)
+                        .is_none_or(|t| t.changed_since(self.last_insertion))
+            },
+        )
+    }
+
     /// Converts an index local to the current segment into an absolute storage index.
     #[inline]
     pub(crate) fn resolve_index(&self, local_index: usize) -> usize {
@@ -456,6 +479,29 @@ impl<'w, T: Component, Track: Tracking> FullRawWindowMut<'w, T, Track> {
         // The access is only used by iterators holding that borrow, which prevents any modification.
         unsafe { RawEntityIdAccess::new(self.dense, self.dense_len) }
     }
+
+    pub(crate) fn tracking_plan<const INSERTED: bool, const MODIFIED: bool>(
+        &self,
+        max_chunks: usize,
+    ) -> super::tracking_plan::TrackingPlan {
+        // SAFE: The storage borrow keeps its summary alive.
+        let summary = unsafe { self.modification_summary.as_ref() };
+        summary.query_plan(
+            MODIFIED && Track::track_modification(),
+            self.dense_len,
+            max_chunks,
+            self.last_modification,
+            |chunk| {
+                INSERTED
+                    && Track::track_insertion()
+                    // SAFE: The storage borrow keeps the insertion summaries alive.
+                    && unsafe { self.insertion_chunks.as_ref() }
+                        .get(chunk)
+                        .is_none_or(|t| t.changed_since(self.last_insertion))
+            },
+        )
+    }
+
     /// Converts an index local to the current segment into an absolute storage index.
     #[inline]
     pub(crate) fn resolve_index(&self, local_index: usize) -> usize {
