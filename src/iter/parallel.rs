@@ -2,20 +2,69 @@ use crate::entity_id::EntityId;
 use crate::iter::{Shiperator, ShiperatorCaptain, ShiperatorSailor, WithId};
 use crate::sparse_set::RawEntityIdAccess;
 use alloc::vec::Vec;
+use core::num::NonZeroUsize;
 
 const MIN_SPLIT_LEN: usize = 16;
 
 #[allow(missing_docs)]
-pub struct ParShiperator<S>(pub(crate) Shiperator<S>);
+pub struct ParShiperator<S>(pub(crate) Shiperator<S>, pub(crate) Option<NonZeroUsize>);
 
 impl<S> ParShiperator<S> {
     /// Returns the [`EntityId`] alongside the component(s).
     pub fn with_id(self) -> WithId<Self> {
         WithId(self)
     }
+
+    /// Sets the candidate-count threshold at which this iterator stops splitting.
+    ///
+    /// A producer with at most `threshold` remaining candidate slots will not
+    /// split. Candidate slots are an upper bound before filtering and OR
+    /// deduplication, not the number of results or the dense-index span.
+    /// Rayon may stop splitting earlier, and queries that cannot safely split
+    /// still use a single producer. This is not a maximum task size.
+    ///
+    /// This replaces the automatic threshold for this iterator only. Without
+    /// an override, it remains `max(candidates / (threads * 4), 16)`, using the
+    /// current Rayon pool when the iterator is consumed. Repeated calls use
+    /// the last value, which is preserved by [`Self::with_id`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if `threshold` is zero.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use rayon::prelude::*;
+    /// use shipyard::{track, Component, IntoIter, View, World};
+    ///
+    /// struct Value(usize);
+    /// impl Component for Value {
+    ///     type Tracking = track::Untracked;
+    /// }
+    ///
+    /// let mut world = World::new();
+    /// world.add_entity(Value(3));
+    /// let values = world.borrow::<View<Value>>()?;
+    /// let sum: usize = values.par_iter().with_split_threshold(8).map(|v| v.0).sum();
+    /// assert_eq!(sum, 3);
+    /// # Ok::<(), shipyard::error::GetStorage>(())
+    /// ```
+    pub fn with_split_threshold(mut self, threshold: usize) -> Self {
+        self.1 =
+            Some(NonZeroUsize::new(threshold).expect("split threshold must be greater than zero"));
+        self
+    }
 }
 
-fn configure_split<S: ShiperatorCaptain>(producer: &mut Shiperator<S>) {
+fn configure_split<S: ShiperatorCaptain>(
+    producer: &mut Shiperator<S>,
+    threshold: Option<NonZeroUsize>,
+) {
+    if let Some(threshold) = threshold {
+        producer.min_split_len = threshold.get();
+        return;
+    }
     let total_len = producer
         .shiperator
         .candidate_count(producer.start, producer.end)
@@ -125,8 +174,8 @@ where
     where
         C: rayon::iter::plumbing::UnindexedConsumer<Self::Item>,
     {
-        let mut producer = self.0;
-        configure_split(&mut producer);
+        let ParShiperator(mut producer, threshold) = self;
+        configure_split(&mut producer, threshold);
 
         rayon::iter::plumbing::bridge_unindexed(producer, consumer)
     }
@@ -153,9 +202,23 @@ where
     where
         C: rayon::iter::plumbing::UnindexedConsumer<Self::Item>,
     {
-        let WithId(ParShiperator(mut producer)) = self;
-        configure_split(&mut producer);
+        let WithId(ParShiperator(mut producer, threshold)) = self;
+        configure_split(&mut producer, threshold);
 
         rayon::iter::plumbing::bridge_unindexed(WithId(producer), consumer)
+    }
+}
+
+impl<S> WithId<ParShiperator<S>> {
+    /// Sets the candidate-count split threshold for this iterator.
+    ///
+    /// See [`ParShiperator::with_split_threshold`] for details. Repeated calls
+    /// use the last value, including calls made before `with_id()`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `threshold` is zero.
+    pub fn with_split_threshold(self, threshold: usize) -> Self {
+        WithId(self.0.with_split_threshold(threshold))
     }
 }

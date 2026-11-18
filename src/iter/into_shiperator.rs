@@ -113,7 +113,7 @@ where
     #[cfg(feature = "parallel")]
     #[inline]
     fn par_iter(self) -> ParShiperator<Self::Shiperator> {
-        ParShiperator(self.iter())
+        ParShiperator(self.iter(), None)
     }
 }
 
