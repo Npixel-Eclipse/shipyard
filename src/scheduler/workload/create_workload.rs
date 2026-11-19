@@ -10,6 +10,8 @@ use crate::ShipHashMap;
 use alloc::boxed::Box;
 use alloc::format;
 // use alloc::string::String;
+#[cfg(feature = "scheduler-experiment")]
+use crate::scheduler::dag::{write_plan_output, DagInput, DagPlan, Fallible};
 use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt::Debug;
@@ -17,6 +19,10 @@ use core::hash::Hash;
 
 #[allow(clippy::type_complexity)]
 struct ToBePlacedSystem {
+    #[cfg(feature = "scheduler-experiment")]
+    occurrence: usize,
+    #[cfg(feature = "scheduler-experiment")]
+    fallible: bool,
     index: usize,
     display_name: Box<dyn Label>,
     borrow_constraints: Vec<TypeInfo>,
@@ -83,6 +89,7 @@ pub(super) fn create_workload(
     tracking_to_enable: &mut Vec<fn(&AllStorages) -> Result<(), error::GetStorage>>,
     workloads: &mut ShipHashMap<Box<dyn Label>, Batches>,
     default: &mut Box<dyn Label>,
+    #[cfg(feature = "scheduler-experiment")] dag_registered_fallible: &mut Vec<bool>,
 ) -> Result<WorkloadInfo, error::AddWorkload> {
     if workloads.contains_key(&builder.name) {
         return Err(error::AddWorkload::AlreadyExists);
@@ -95,6 +102,8 @@ pub(super) fn create_workload(
         system_generators,
         lookup_table,
         tracking_to_enable,
+        #[cfg(feature = "scheduler-experiment")]
+        dag_registered_fallible,
     );
 
     if let Err(err) = check_require_in_workload(&mut to_be_placed_systems) {
@@ -135,7 +144,35 @@ pub(super) fn create_workload(
         ..Default::default()
     };
 
-    let batches_info = order_systems(&mut to_be_placed_systems, &mut batches)?;
+    #[cfg(feature = "scheduler-experiment")]
+    let dag_inputs: Vec<_> = to_be_placed_systems
+        .iter()
+        .map(|system| DagInput {
+            system_index: system.index,
+            hard_after: system.hard_after.0.clone(),
+            borrow_constraints: system.borrow_constraints.clone(),
+            fallible: system.fallible,
+        })
+        .collect();
+    #[cfg(feature = "scheduler-experiment")]
+    let mut dag_occurrences = Vec::new();
+    let batches_info = order_systems(
+        &mut to_be_placed_systems,
+        &mut batches,
+        #[cfg(feature = "scheduler-experiment")]
+        &mut dag_occurrences,
+    )?;
+    #[cfg(feature = "scheduler-experiment")]
+    {
+        batches.dag = DagPlan::build(&dag_inputs, &dag_occurrences, &batches);
+        write_plan_output(
+            &*workload_name,
+            system_names,
+            &dag_inputs,
+            &dag_occurrences,
+            &batches,
+        );
+    }
     let workload_info = WorkloadInfo {
         name: format!("{:?}", workload_name),
         batches_info,
@@ -291,30 +328,43 @@ fn insert_systems_in_scheduler(
     system_generators: &mut Vec<Box<dyn Fn(&mut Vec<TypeInfo>) -> TypeId + Send + Sync + 'static>>,
     lookup_table: &mut ShipHashMap<TypeId, usize>,
     all_tracking_to_enable: &mut Vec<fn(&AllStorages) -> Result<(), error::GetStorage>>,
+    #[cfg(feature = "scheduler-experiment")] dag_registered_fallible: &mut Vec<bool>,
 ) -> Vec<ToBePlacedSystem> {
     builder
         .systems
         .drain(..)
+        .enumerate()
         .map(
-            |WorkloadSystem {
-                 type_id,
-                 display_name,
-                 system_fn,
-                 borrow_constraints,
-                 mut tracking_to_enable,
-                 generator,
-                 run_if,
-                 mut tags,
-                 before_all,
-                 after_all,
-                 after,
-                 before,
-                 unique_id,
-                 require_in_workload,
-                 require_before,
-                 require_after,
-             }| {
+            |(
+                occurrence,
+                WorkloadSystem {
+                    type_id,
+                    display_name,
+                    system_fn,
+                    borrow_constraints,
+                    mut tracking_to_enable,
+                    generator,
+                    run_if,
+                    mut tags,
+                    before_all,
+                    after_all,
+                    after,
+                    before,
+                    unique_id,
+                    require_in_workload,
+                    require_before,
+                    require_after,
+                },
+            )| {
+                #[cfg(not(feature = "scheduler-experiment"))]
+                let _ = occurrence;
+                #[cfg(feature = "scheduler-experiment")]
+                let marked_fallible = tags.iter().any(|tag| {
+                    tag.as_any().downcast_ref::<TypeId>() == Some(&TypeId::of::<Fallible>())
+                });
                 let system_index = *lookup_table.entry(type_id).or_insert_with(|| {
+                    #[cfg(feature = "scheduler-experiment")]
+                    dag_registered_fallible.push(marked_fallible);
                     systems.push(system_fn);
                     system_names.push(display_name.clone());
                     system_generators.push(generator);
@@ -340,6 +390,10 @@ fn insert_systems_in_scheduler(
                 tags.push(Box::new(UniqueSystemId(unique_id)));
 
                 ToBePlacedSystem {
+                    #[cfg(feature = "scheduler-experiment")]
+                    occurrence,
+                    #[cfg(feature = "scheduler-experiment")]
+                    fallible: dag_registered_fallible[system_index],
                     index: system_index,
                     display_name,
                     borrow_constraints,
@@ -558,6 +612,7 @@ fn map_before_to_after(to_be_placed_systems: &mut [ToBePlacedSystem]) {
 fn order_systems(
     to_be_placed_systems: &mut Vec<ToBePlacedSystem>,
     batches: &mut Batches,
+    #[cfg(feature = "scheduler-experiment")] dag_occurrences: &mut Vec<Vec<usize>>,
 ) -> Result<Vec<BatchInfo>, error::AddWorkload> {
     if to_be_placed_systems.is_empty() {
         return Ok(Vec::new());
@@ -580,6 +635,8 @@ fn order_systems(
         systems: (None, Vec::new()),
     }];
     batches.parallel.push((None, Vec::new()));
+    #[cfg(feature = "scheduler-experiment")]
+    dag_occurrences.push(Vec::new());
     batches.parallel_run_if.push((usize::MAX, Vec::new()));
     let mut latest_batch = &mut batches.parallel[0];
     let mut latest_batch_run_if = &mut batches.parallel_run_if[0];
@@ -592,6 +649,8 @@ fn order_systems(
             let conflict = check_can_go_in_parallel_batch(latest_batch_info, &system);
             if conflict.is_some() {
                 batches.parallel.push((None, Vec::new()));
+                #[cfg(feature = "scheduler-experiment")]
+                dag_occurrences.push(Vec::new());
                 batches.parallel_run_if.push((usize::MAX, Vec::new()));
                 batches_info.push(BatchInfo {
                     systems: (None, Vec::new()),
@@ -606,6 +665,10 @@ fn order_systems(
             let is_single_system = system.borrow_constraints.iter().any(|constraint| {
                 !constraint.thread_safe || constraint.storage_id == TypeId::of::<AllStorages>()
             });
+            #[cfg(feature = "scheduler-experiment")]
+            if let Some(occurrences) = dag_occurrences.last_mut() {
+                occurrences.push(system.occurrence);
+            }
 
             if is_single_system {
                 latest_batch.0 = Some(system.index);
@@ -671,6 +734,8 @@ fn order_systems(
             break;
         } else {
             batches.parallel.push((None, Vec::new()));
+            #[cfg(feature = "scheduler-experiment")]
+            dag_occurrences.push(Vec::new());
             batches.parallel_run_if.push((usize::MAX, Vec::new()));
             batches_info.push(BatchInfo {
                 systems: (None, Vec::new()),

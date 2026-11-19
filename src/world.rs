@@ -1,5 +1,7 @@
 mod builder;
 mod run_batches;
+#[cfg(feature = "scheduler-experiment")]
+mod run_batches_dag;
 
 pub use builder::WorldBuilder;
 

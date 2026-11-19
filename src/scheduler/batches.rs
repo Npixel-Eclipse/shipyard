@@ -1,3 +1,5 @@
+#[cfg(feature = "scheduler-experiment")]
+use super::dag::DagPlan;
 use crate::error;
 use crate::scheduler::system::WorkloadRunIfFn;
 use crate::world::World;
@@ -8,6 +10,8 @@ use alloc::vec::Vec;
 #[derive(Default)]
 #[allow(clippy::type_complexity)]
 pub(crate) struct Batches {
+    #[cfg(feature = "scheduler-experiment")]
+    pub(crate) dag: Option<DagPlan>,
     /// Index into the list of systems
     pub(crate) parallel: Vec<(Option<usize>, Vec<usize>)>,
     /// Index into `systems_run_if`

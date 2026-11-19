@@ -19,6 +19,16 @@ use core::sync::atomic::{AtomicU64, Ordering};
 #[cfg(feature = "std")]
 use std::error::Error;
 
+#[cfg(feature = "scheduler-experiment")]
+use super::dag::Fallible;
+
+// Preserve try-system provenance without changing the public WorkloadSystem layout.
+fn mark_fallible(#[allow(unused_mut)] mut system: WorkloadSystem) -> WorkloadSystem {
+    #[cfg(feature = "scheduler-experiment")]
+    system.tags.push(Box::new(TypeId::of::<Fallible>()));
+    system
+}
+
 /// Validates a function can become a failable system.
 pub trait IntoWorkloadTrySystem<Views, R> {
     /// Wraps a fallible function in a struct containing all information required by a workload.  
@@ -52,7 +62,7 @@ where
     {
         let system_type_name = type_name::<F>();
 
-        Ok(WorkloadSystem {
+        Ok(mark_fallible(WorkloadSystem {
             borrow_constraints: Vec::new(),
             tracking_to_enable: Vec::new(),
             system_fn: Box::new(move |_: &World| {
@@ -78,7 +88,7 @@ where
             require_in_workload: DedupedLabels::new(),
             require_before: DedupedLabels::new(),
             require_after: DedupedLabels::new(),
-        })
+        }))
     }
     #[cfg(not(feature = "std"))]
     fn into_workload_try_system<Ok, Err: 'static + Send + Any>(
@@ -89,7 +99,7 @@ where
     {
         let system_type_name = type_name::<F>();
 
-        Ok(WorkloadSystem {
+        Ok(mark_fallible(WorkloadSystem {
             borrow_constraints: Vec::new(),
             tracking_to_enable: Vec::new(),
             system_fn: Box::new(move |_: &World| {
@@ -115,7 +125,7 @@ where
             require_in_workload: DedupedLabels::new(),
             require_before: DedupedLabels::new(),
             require_after: DedupedLabels::new(),
-        })
+        }))
     }
 }
 
@@ -127,7 +137,7 @@ impl IntoWorkloadTrySystem<WorkloadSystem, Result<(), error::InvalidSystem>> for
     fn into_workload_try_system<Ok, Err: Into<Box<dyn Error + Send + Sync>>>(
         self,
     ) -> Result<WorkloadSystem, error::InvalidSystem> {
-        Ok(self)
+        Ok(mark_fallible(self))
     }
     /// Wraps a fallible function in a struct containing all information required by a workload.  
     /// The workload will stop if an error is returned.
@@ -135,7 +145,7 @@ impl IntoWorkloadTrySystem<WorkloadSystem, Result<(), error::InvalidSystem>> for
     fn into_workload_try_system<Ok, Err: 'static + Send + Any>(
         self,
     ) -> Result<WorkloadSystem, error::InvalidSystem> {
-        Ok(self)
+        Ok(mark_fallible(self))
     }
 }
 
@@ -192,7 +202,7 @@ macro_rules! impl_into_workload_try_system {
                 )+
 
                 let last_run = AtomicU64::new(0);
-                Ok(WorkloadSystem {
+                Ok(mark_fallible(WorkloadSystem {
                     borrow_constraints: borrows,
                     tracking_to_enable,
                     system_fn: Box::new(move |world: &World| {
@@ -225,7 +235,7 @@ macro_rules! impl_into_workload_try_system {
                     require_in_workload: DedupedLabels::new(),
                     require_before: DedupedLabels::new(),
                     require_after: DedupedLabels::new(),
-                })
+                }))
             }
             #[cfg(not(feature = "std"))]
             fn into_workload_try_system<Ok, Err: 'static + Send + Any>(self) -> Result<WorkloadSystem, error::InvalidSystem> where Ret: Into<Result<Ok, Err>> {
@@ -269,7 +279,7 @@ macro_rules! impl_into_workload_try_system {
                 )+
 
                 let last_run = AtomicU64::new(0);
-                Ok(WorkloadSystem {
+                Ok(mark_fallible(WorkloadSystem {
                     borrow_constraints: borrows,
                     tracking_to_enable,
                     system_fn: Box::new(move |world: &World| {
@@ -302,7 +312,7 @@ macro_rules! impl_into_workload_try_system {
                     require_in_workload: DedupedLabels::new(),
                     require_before: DedupedLabels::new(),
                     require_after: DedupedLabels::new(),
-                })
+                }))
             }
         }
     }

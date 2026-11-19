@@ -26,6 +26,7 @@ serde = { version = "1", optional = true, default-features = false, features = [
 ] }
 shipyard_proc = { version = "0.6", optional = true }
 tracing = { version = "0.1.44", default-features = false, optional = true }
+serde_json = { version = "1.0.148", optional = true }
 
 [features]
 default = ["parallel", "proc", "std"]
@@ -36,6 +37,8 @@ proc = ["shipyard_proc"]
 serde1 = ["serde", "hashbrown/serde"]
 std = ["hashbrown/default-hasher"]
 thread_local = []
+# Local-only scheduling experiment; never enabled by the default feature set.
+scheduler-experiment = ["std", "parallel", "dep:serde_json"]
 
 [dev-dependencies]
 bincode = "1.3.3"

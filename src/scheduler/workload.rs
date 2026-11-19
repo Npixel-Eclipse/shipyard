@@ -435,6 +435,8 @@ impl Workload {
     #[allow(clippy::blocks_in_conditions)]
     pub fn add_to_world(self, world: &World) -> Result<(), error::AddWorkload> {
         let Scheduler {
+            #[cfg(feature = "scheduler-experiment")]
+            dag_registered_fallible,
             systems,
             system_names,
             system_generators,
@@ -460,6 +462,8 @@ impl Workload {
             &mut tracking_to_enable,
             workloads,
             default,
+            #[cfg(feature = "scheduler-experiment")]
+            dag_registered_fallible,
         )?;
 
         let all_storages = world
@@ -531,6 +535,8 @@ impl Workload {
         let mut default: Box<dyn Label> = Box::new("");
 
         let mut workloads = ShipHashMap::new();
+        #[cfg(feature = "scheduler-experiment")]
+        let mut dag_registered_fallible = Vec::new();
 
         let workload_info = create_workload::create_workload(
             self,
@@ -541,6 +547,8 @@ impl Workload {
             &mut workload.tracking_to_enable,
             &mut workloads,
             &mut default,
+            #[cfg(feature = "scheduler-experiment")]
+            &mut dag_registered_fallible,
         )?;
 
         workload.batches = workloads.remove(&workload_name).unwrap();
@@ -627,6 +635,8 @@ mod tests {
                 sequential_run_if: Vec::new(),
                 workload_run_if: None,
                 systems_run_if: Vec::new(),
+                #[cfg(feature = "scheduler-experiment")]
+                dag: None,
             })
         );
         assert_eq!(&scheduler.default, &label);
@@ -656,6 +666,8 @@ mod tests {
                 sequential_run_if: Vec::new(),
                 workload_run_if: None,
                 systems_run_if: Vec::new(),
+                #[cfg(feature = "scheduler-experiment")]
+                dag: None,
             })
         );
         assert_eq!(&scheduler.default, &label);
@@ -687,6 +699,8 @@ mod tests {
                 sequential_run_if: Vec::new(),
                 workload_run_if: None,
                 systems_run_if: Vec::new(),
+                #[cfg(feature = "scheduler-experiment")]
+                dag: None,
             })
         );
         assert_eq!(&scheduler.default, &label);
@@ -718,6 +732,8 @@ mod tests {
                 sequential_run_if: Vec::new(),
                 workload_run_if: None,
                 systems_run_if: Vec::new(),
+                #[cfg(feature = "scheduler-experiment")]
+                dag: None,
             })
         );
         assert_eq!(&scheduler.default, &label);
@@ -749,6 +765,8 @@ mod tests {
                 sequential_run_if: Vec::new(),
                 workload_run_if: None,
                 systems_run_if: Vec::new(),
+                #[cfg(feature = "scheduler-experiment")]
+                dag: None,
             })
         );
         assert_eq!(&scheduler.default, &label);
@@ -774,6 +792,8 @@ mod tests {
                 sequential_run_if: Vec::new(),
                 workload_run_if: None,
                 systems_run_if: Vec::new(),
+                #[cfg(feature = "scheduler-experiment")]
+                dag: None,
             })
         );
         assert_eq!(&scheduler.default, &label);
@@ -812,6 +832,8 @@ mod tests {
                 sequential_run_if: Vec::new(),
                 workload_run_if: None,
                 systems_run_if: Vec::new(),
+                #[cfg(feature = "scheduler-experiment")]
+                dag: None,
             })
         );
         assert_eq!(&scheduler.default, &label);
@@ -842,6 +864,8 @@ mod tests {
                 sequential_run_if: Vec::new(),
                 workload_run_if: None,
                 systems_run_if: Vec::new(),
+                #[cfg(feature = "scheduler-experiment")]
+                dag: None,
             })
         );
         assert_eq!(&scheduler.default, &label);
@@ -866,6 +890,8 @@ mod tests {
                 sequential_run_if: Vec::new(),
                 workload_run_if: None,
                 systems_run_if: Vec::new(),
+                #[cfg(feature = "scheduler-experiment")]
+                dag: None,
             })
         );
         assert_eq!(&scheduler.default, &label);
@@ -891,6 +917,8 @@ mod tests {
                 sequential_run_if: Vec::new(),
                 workload_run_if: None,
                 systems_run_if: Vec::new(),
+                #[cfg(feature = "scheduler-experiment")]
+                dag: None,
             })
         );
         assert_eq!(&scheduler.default, &label);
@@ -915,6 +943,8 @@ mod tests {
                 sequential_run_if: Vec::new(),
                 workload_run_if: None,
                 systems_run_if: Vec::new(),
+                #[cfg(feature = "scheduler-experiment")]
+                dag: None,
             })
         );
         assert_eq!(&scheduler.default, &label);
@@ -958,6 +988,8 @@ mod tests {
                 sequential_run_if: Vec::new(),
                 workload_run_if: None,
                 systems_run_if: Vec::new(),
+                #[cfg(feature = "scheduler-experiment")]
+                dag: None,
             })
         );
         assert_eq!(&scheduler.default, &label);
@@ -987,6 +1019,8 @@ mod tests {
                 sequential_run_if: Vec::new(),
                 workload_run_if: None,
                 systems_run_if: Vec::new(),
+                #[cfg(feature = "scheduler-experiment")]
+                dag: None,
             })
         );
         assert_eq!(&scheduler.default, &label);
@@ -1011,6 +1045,8 @@ mod tests {
                 sequential_run_if: Vec::new(),
                 workload_run_if: None,
                 systems_run_if: Vec::new(),
+                #[cfg(feature = "scheduler-experiment")]
+                dag: None,
             })
         );
         assert_eq!(&scheduler.default, &label);
@@ -1035,6 +1071,8 @@ mod tests {
                 sequential_run_if: Vec::new(),
                 workload_run_if: None,
                 systems_run_if: Vec::new(),
+                #[cfg(feature = "scheduler-experiment")]
+                dag: None,
             })
         );
         assert_eq!(&scheduler.default, &label);
@@ -1064,6 +1102,8 @@ mod tests {
                 sequential_run_if: Vec::new(),
                 workload_run_if: None,
                 systems_run_if: Vec::new(),
+                #[cfg(feature = "scheduler-experiment")]
+                dag: None,
             })
         );
         assert_eq!(&scheduler.default, &label);
@@ -1095,6 +1135,8 @@ mod tests {
                 sequential_run_if: Vec::new(),
                 workload_run_if: None,
                 systems_run_if: Vec::new(),
+                #[cfg(feature = "scheduler-experiment")]
+                dag: None,
             })
         );
         assert_eq!(&scheduler.default, &label);
@@ -1119,6 +1161,8 @@ mod tests {
                 sequential_run_if: Vec::new(),
                 workload_run_if: None,
                 systems_run_if: Vec::new(),
+                #[cfg(feature = "scheduler-experiment")]
+                dag: None,
             })
         );
         assert_eq!(&scheduler.default, &label);
@@ -1159,6 +1203,8 @@ mod tests {
                 sequential_run_if: Vec::new(),
                 workload_run_if: None,
                 systems_run_if: Vec::new(),
+                #[cfg(feature = "scheduler-experiment")]
+                dag: None,
             })
         );
         assert_eq!(&scheduler.default, &label);
@@ -1443,7 +1489,9 @@ mod tests {
                 sequential: vec![0, 1, 2],
                 sequential_run_if: Vec::new(),
                 workload_run_if: None,
-                systems_run_if: Vec::new()
+                systems_run_if: Vec::new(),
+                #[cfg(feature = "scheduler-experiment")]
+                dag: None,
             }
         );
     }
