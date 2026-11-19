@@ -18,7 +18,7 @@ use crate::get_unique::GetUnique;
 use crate::iter::Shiperator;
 use crate::iter_component::{IntoIterRef, IterComponent, into_iter};
 use crate::memory_usage::WorldMemoryUsage;
-use crate::r#mut::Mut;
+use crate::r#mut::SafeMut;
 use crate::reserve::BulkEntityIter;
 use crate::scheduler::info::WorkloadsInfo;
 use crate::scheduler::{AsLabel, Batches, Label, Scheduler};
@@ -536,7 +536,7 @@ struct Position([f32; 2]);
 
 fn sys1((entity, [x, y]): (EntityId, [f32; 2]), mut positions: ViewMut<Position>) {
     if let Ok(mut pos) = (&mut positions).get(entity) {
-        pos.0 = [x, y];
+        pos.modify(|pos| pos.0 = [x, y]);
     }
 }
 
@@ -1157,6 +1157,24 @@ impl World {
         self.all_storages.get_mut().par_strip(entities);
     }
 
+    /// Deletes multiple entities and all their components. Returns the number of entities deleted.
+    #[inline]
+    #[track_caller]
+    pub fn bulk_delete_entity(&mut self, entities: impl IntoIterator<Item = EntityId>) -> usize {
+        self.all_storages.get_mut().bulk_delete_entity(entities)
+    }
+
+    /// Deletes multiple entities and all their components in parallel. Returns the number of entities deleted.
+    #[inline]
+    #[track_caller]
+    #[cfg(all(feature = "parallel", not(feature = "thread_local")))]
+    pub fn par_bulk_delete_entity(
+        &mut self,
+        entities: impl IntoIterator<Item = EntityId>,
+    ) -> usize {
+        self.all_storages.get_mut().par_bulk_delete_entity(entities)
+    }
+
     /// Deletes all entities with any of the given components.
     /// The storage's type has to be used and not the component.
     /// `SparseSet` is the default storage.
@@ -1293,7 +1311,7 @@ impl World {
         self.all_storages.get_mut().retain(f);
     }
 
-    /// Deletes all components for which `f(id, Mut<component>)` returns `false`.
+    /// Deletes all components for which `f(id, SafeMut<component>)` returns `false`.
     ///
     /// # Panics
     ///
@@ -1301,7 +1319,7 @@ impl World {
     #[track_caller]
     pub fn retain_mut<T: Component + Send + Sync>(
         &mut self,
-        f: impl FnMut(EntityId, Mut<'_, T>) -> bool,
+        f: impl FnMut(EntityId, SafeMut<'_, T>) -> bool,
     ) {
         self.all_storages.get_mut().retain_mut(f);
     }
@@ -1484,7 +1502,7 @@ let entity = world.add_entity((USIZE(0), U32(1)));
 let (i, j) = world.get::<(&USIZE, &mut U32)>(entity).unwrap();
 
 assert!(*i == &USIZE(0));
-assert!(*j == &U32(1));
+assert!(j.as_ref() == &U32(1));
 ```"]
     #[cfg_attr(
         feature = "thread_local",

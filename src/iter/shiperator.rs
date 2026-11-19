@@ -5,7 +5,7 @@ mod tracking;
 use crate::component::Component;
 use crate::entity_id::EntityId;
 use crate::iter::{EntityCursor, SegmentEntry, SegmentRow};
-use crate::r#mut::Mut;
+use crate::r#mut::{Mut, SafeMut};
 use crate::optional::Optional;
 use crate::sparse_set::{FullRawWindow, FullRawWindowMut, TRACKING_CHUNK_SIZE};
 use crate::track;
@@ -560,14 +560,14 @@ impl_shiperator_no_mut![track::Untracked track::Insertion track::InsertionAndDel
 impl<'tmp, T: Component, Track: ModificationTracking> FullRawWindowMut<'tmp, T, Track> {
     // Same index contract as get_data; the candidate's summary already covers current.
     #[inline(always)]
-    unsafe fn get_prepared_data(&self, index: usize) -> Mut<'tmp, T> {
+    unsafe fn get_prepared_data(&self, index: usize) -> SafeMut<'tmp, T> {
         unsafe {
-            Mut {
+            SafeMut::new(Mut {
                 flag: Some(&mut *self.modification_data.add(index)),
                 chunk: None,
                 current: self.current,
                 data: &mut *self.data.add(index),
-            }
+            })
         }
     }
 
@@ -580,7 +580,7 @@ impl<'tmp, T: Component, Track: ModificationTracking> FullRawWindowMut<'tmp, T, 
         mut f: F,
     ) -> B
     where
-        F: FnMut(B, Option<EntityId>, Mut<'tmp, T>) -> B,
+        F: FnMut(B, Option<EntityId>, SafeMut<'tmp, T>) -> B,
     {
         if entities.is_empty() {
             return acc;
@@ -609,12 +609,12 @@ impl<'tmp, T: Component, Track: ModificationTracking> FullRawWindowMut<'tmp, T, 
             entities.advance();
             // SAFE: This unique candidate was consumed before yielding; its summary covers current.
             let item = unsafe {
-                Mut {
+                SafeMut::new(Mut {
                     flag: Some(&mut *self.modification_data.add(index)),
                     chunk: None,
                     current: self.current,
                     data: &mut *self.data.add(index),
-                }
+                })
             };
             acc = f(acc, entity_id, item);
         }
@@ -626,7 +626,7 @@ macro_rules! impl_shiperator_mut {
     ($($track: path)+) => {
         $(
             impl<'tmp, T: Component> Shiperator for FullRawWindowMut<'tmp, T, $track> {
-                type Out = Mut<'tmp, T>;
+                type Out = SafeMut<'tmp, T>;
                 type Index = usize;
 
                 #[inline]
@@ -702,7 +702,7 @@ macro_rules! impl_shiperator_mut {
                     // this item. `$track` tracks modification, so the storage keeps one
                     // modification timestamp per component and `index` is one of them.
                     unsafe {
-                        Mut {
+                        SafeMut::new(Mut {
                             flag: Some(&mut *self.modification_data.add(index)),
                             chunk: if self.chunks_prepared { None } else {
                                 let chunks = self.modification_writers.as_ref();
@@ -712,7 +712,7 @@ macro_rules! impl_shiperator_mut {
                             },
                             current: self.current,
                             data: &mut *self.data.add(index),
-                        }
+                        })
                     }
                 }
 

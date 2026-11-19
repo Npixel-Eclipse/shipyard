@@ -131,3 +131,5 @@ fn std_thread_id_generator() -> u64 {
 
     unsafe { *thread_id }
 }
+
+pub use r#mut::SafeMut;

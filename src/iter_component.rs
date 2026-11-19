@@ -12,7 +12,7 @@ use crate::iter::is_exact_traversal;
 use crate::iter::mixed::embed_captain_entities;
 use crate::iter::planner::{self, Child, ConstructionMetadata};
 use crate::iter::{Mixed, RawEntityIdAccess, Shiperator};
-use crate::r#mut::Mut;
+use crate::r#mut::SafeMut;
 use crate::sparse_set::{FullRawWindow, FullRawWindowMut};
 use crate::tracking::Tracking;
 use crate::tracking::TrackingTimestamp;
@@ -302,7 +302,7 @@ unsafe impl<T: Component + Send + Sync> IterComponent for &'_ mut T {
 
         if view.sparse_set.is_tracking_modification && !T::Tracking::track_modification() {
             panic!(
-                "`{0}` tracks modification but trying to iterate `&mut {0}`. Use `Mut<{0}>` instead.",
+                "`{0}` tracks modification but trying to iterate `&mut {0}`. Use `SafeMut<{0}>` instead.",
                 type_name::<T>()
             );
         }
@@ -339,7 +339,7 @@ unsafe impl<T: Component + Sync> IterComponent for NonSend<&'_ mut T> {
 
         if view.sparse_set.is_tracking_modification && !T::Tracking::track_modification() {
             panic!(
-                "`{0}` tracks modification but trying to iterate `&mut {0}`. Use `Mut<{0}>` instead.",
+                "`{0}` tracks modification but trying to iterate `&mut {0}`. Use `SafeMut<{0}>` instead.",
                 type_name::<T>()
             );
         }
@@ -376,7 +376,7 @@ unsafe impl<T: Component + Send> IterComponent for NonSync<&'_ mut T> {
 
         if view.sparse_set.is_tracking_modification && !T::Tracking::track_modification() {
             panic!(
-                "`{0}` tracks modification but trying to iterate `&mut {0}`. Use `Mut<{0}>` instead.",
+                "`{0}` tracks modification but trying to iterate `&mut {0}`. Use `SafeMut<{0}>` instead.",
                 type_name::<T>()
             );
         }
@@ -413,7 +413,7 @@ unsafe impl<T: Component> IterComponent for NonSendSync<&'_ mut T> {
 
         if view.sparse_set.is_tracking_modification && !T::Tracking::track_modification() {
             panic!(
-                "`{0}` tracks modification but trying to iterate `&mut {0}`. Use `Mut<{0}>` instead.",
+                "`{0}` tracks modification but trying to iterate `&mut {0}`. Use `SafeMut<{0}>` instead.",
                 type_name::<T>()
             );
         }
@@ -427,7 +427,7 @@ unsafe impl<T: Component> IterComponent for NonSendSync<&'_ mut T> {
 }
 
 // SAFE: See `&mut T`.
-unsafe impl<T: Component + Send + Sync> IterComponent for Mut<'_, T> {
+unsafe impl<T: Component + Send + Sync> IterComponent for SafeMut<'_, T> {
     type Shiperator<'a> = FullRawWindowMut<'a, T, track::Modification>;
     type Borrow<'a> = ExclusiveBorrow<'a>;
 
@@ -457,7 +457,7 @@ unsafe impl<T: Component + Send + Sync> IterComponent for Mut<'_, T> {
 
 // SAFE: See `&mut T`, the wrapper's borrow also checks the thread we're on.
 #[cfg(feature = "thread_local")]
-unsafe impl<T: Component + Sync> IterComponent for NonSend<Mut<'_, T>> {
+unsafe impl<T: Component + Sync> IterComponent for NonSend<SafeMut<'_, T>> {
     type Shiperator<'a> = FullRawWindowMut<'a, T, track::Modification>;
     type Borrow<'a> = ExclusiveBorrow<'a>;
 
@@ -491,7 +491,7 @@ unsafe impl<T: Component + Sync> IterComponent for NonSend<Mut<'_, T>> {
 
 // SAFE: See `&mut T`, the wrapper's borrow also checks the thread we're on.
 #[cfg(feature = "thread_local")]
-unsafe impl<T: Component + Send> IterComponent for NonSync<Mut<'_, T>> {
+unsafe impl<T: Component + Send> IterComponent for NonSync<SafeMut<'_, T>> {
     type Shiperator<'a> = FullRawWindowMut<'a, T, track::Modification>;
     type Borrow<'a> = ExclusiveBorrow<'a>;
 
@@ -525,7 +525,7 @@ unsafe impl<T: Component + Send> IterComponent for NonSync<Mut<'_, T>> {
 
 // SAFE: See `&mut T`, the wrapper's borrow also checks the thread we're on.
 #[cfg(feature = "thread_local")]
-unsafe impl<T: Component> IterComponent for NonSendSync<Mut<'_, T>> {
+unsafe impl<T: Component> IterComponent for NonSendSync<SafeMut<'_, T>> {
     type Shiperator<'a> = FullRawWindowMut<'a, T, track::Modification>;
     type Borrow<'a> = ExclusiveBorrow<'a>;
 

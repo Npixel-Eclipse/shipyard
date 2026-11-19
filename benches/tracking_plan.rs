@@ -68,7 +68,7 @@ fn bench(c: &mut Criterion) {
                         _ => false,
                     };
                     if changed {
-                        (&mut values).get(id).unwrap().0 = i;
+                        (&mut values).get(id).unwrap().modify(|t| t.0 = i);
                         expected += i;
                     }
                 }

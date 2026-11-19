@@ -48,7 +48,7 @@ fn bench(c: &mut Criterion) {
                     "dense" => true,
                     _ => false,
                 } {
-                    (&mut tracked).get(id).unwrap().0 = i as u64;
+                    (&mut tracked).get(id).unwrap().modify(|t| t.0 = i as u64);
                     expected += 2 * i as u64;
                 }
             }
@@ -98,14 +98,19 @@ fn bench(c: &mut Criterion) {
         b.iter(|| {
             let mut tracked = world.borrow::<ViewMut<Tracked>>().unwrap();
             for &id in &ids {
-                (&mut tracked).get(black_box(id)).unwrap().0 += 1;
+                (&mut tracked)
+                    .get(black_box(id))
+                    .unwrap()
+                    .modify(|t| t.0 += 1);
             }
         })
     });
     c.bench_function("chunks/write/iter", |b| {
         b.iter(|| {
             let mut tracked = world.borrow::<ViewMut<Tracked>>().unwrap();
-            (&mut tracked).iter().for_each(|mut t| t.0 += 1);
+            (&mut tracked)
+                .iter()
+                .for_each(|mut t| t.modify(|t| t.0 += 1));
         })
     });
     c.bench_function("chunks/insert", |b| {

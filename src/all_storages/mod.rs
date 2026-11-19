@@ -35,7 +35,7 @@ use crate::get_unique::GetUnique;
 use crate::iter::Shiperator;
 use crate::iter_component::{IntoIterRef, IterComponent, into_iter};
 use crate::memory_usage::AllStoragesMemoryUsage;
-use crate::r#mut::Mut;
+use crate::r#mut::SafeMut;
 use crate::public_transport::RwLock;
 use crate::reserve::BulkEntityIter;
 use crate::sparse_set::{
@@ -50,6 +50,7 @@ use crate::unique::UniqueStorage;
 use crate::views::EntitiesViewMut;
 use alloc::boxed::Box;
 use alloc::sync::Arc;
+use alloc::vec::Vec;
 use clone::adopt_groups;
 use core::any::type_name;
 use core::sync::atomic::AtomicU64;
@@ -631,6 +632,36 @@ impl AllStorages {
         inner(self, &iter, current);
     }
 
+    /// Deletes multiple entities and all their components. Returns the number of entities deleted.
+    pub fn bulk_delete_entity(&mut self, entities: impl IntoIterator<Item = EntityId>) -> usize {
+        let mut ents = self.entities_mut().expect("entities_mut");
+        let alive: Vec<_> = entities
+            .into_iter()
+            .filter(|e| ents.delete_unchecked(*e))
+            .collect();
+        drop(ents);
+        let count = alive.len();
+        self.bulk_strip(alive);
+        count
+    }
+
+    /// Deletes multiple entities and all their components in parallel. Returns the number of entities deleted.
+    #[cfg(all(feature = "parallel", not(feature = "thread_local")))]
+    pub fn par_bulk_delete_entity(
+        &mut self,
+        entities: impl IntoIterator<Item = EntityId>,
+    ) -> usize {
+        let mut ents = self.entities_mut().expect("entities_mut");
+        let alive: Vec<_> = entities
+            .into_iter()
+            .filter(|e| ents.delete_unchecked(*e))
+            .collect();
+        drop(ents);
+        let count = alive.len();
+        self.par_strip(alive);
+        count
+    }
+
     /// Deletes all components of an entity except the ones passed in `S`.  
     /// The storage's type has to be used and not the component.  
     /// `SparseSet` is the default storage.
@@ -775,7 +806,7 @@ impl AllStorages {
             .private_retain(current, f);
     }
 
-    /// Deletes all components for which `f(id, Mut<component>)` returns `false`.
+    /// Deletes all components for which `f(id, SafeMut<component>)` returns `false`.
     ///
     /// # Panics
     ///
@@ -783,7 +814,7 @@ impl AllStorages {
     #[track_caller]
     pub fn retain_mut<T: Component + Send + Sync>(
         &mut self,
-        f: impl FnMut(EntityId, Mut<'_, T>) -> bool,
+        f: impl FnMut(EntityId, SafeMut<'_, T>) -> bool,
     ) {
         let current = self.get_current();
 
@@ -1544,7 +1575,7 @@ let entity = all_storages.add_entity((USIZE(0), U32(1)));
 let (i, j) = all_storages.get::<(&USIZE, &mut U32)>(entity).unwrap();
 
 assert!(*i == &USIZE(0));
-assert!(*j == &U32(1));
+assert!(j.as_ref() == &U32(1));
 ```"]
     #[cfg_attr(
         feature = "thread_local",

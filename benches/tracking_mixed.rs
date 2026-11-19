@@ -62,7 +62,7 @@ fn bench(c: &mut Criterion) {
             b.iter(|| {
                 let (mut pos, vel) = world.borrow::<(ViewMut<Pos>, View<Vel>)>().unwrap();
                 for (mut p, v) in (&mut pos, &vel).iter() {
-                    p.0 += v.0;
+                    p.modify(|p| p.0 += v.0);
                 }
             })
         });
@@ -70,14 +70,16 @@ fn bench(c: &mut Criterion) {
             b.iter(|| {
                 let (mut pos, vel) = world.borrow::<(ViewMut<Pos>, View<Vel>)>().unwrap();
                 for (v, mut p) in (&vel, &mut pos).iter() {
-                    p.0 += v.0;
+                    p.modify(|p| p.0 += v.0);
                 }
             })
         });
         c.bench_function(&format!("mixed/{name}/fold"), |b| {
             b.iter(|| {
                 let (mut pos, vel) = world.borrow::<(ViewMut<Pos>, View<Vel>)>().unwrap();
-                (&mut pos, &vel).iter().for_each(|(mut p, v)| p.0 += v.0);
+                (&mut pos, &vel)
+                    .iter()
+                    .for_each(|(mut p, v)| p.modify(|p| p.0 += v.0));
             })
         });
         c.bench_function(&format!("mixed/{name}/read_only"), |b| {
@@ -92,7 +94,7 @@ fn bench(c: &mut Criterion) {
             b.iter(|| {
                 let (mut pos, vel) = world.borrow::<(ViewMut<Pos>, View<Vel>)>().unwrap();
                 if let Some((mut p, v)) = (&mut pos, &vel).iter().next() {
-                    p.0 += v.0;
+                    p.modify(|p| p.0 += v.0);
                 }
             })
         });
@@ -103,7 +105,7 @@ fn bench(c: &mut Criterion) {
                     .unwrap();
                 ((&mut pos, &vel), &extra)
                     .iter()
-                    .for_each(|((mut p, v), e)| p.0 += v.0 + e.0);
+                    .for_each(|((mut p, v), e)| p.modify(|p| p.0 += v.0 + e.0));
             })
         });
         let pool = rayon::ThreadPoolBuilder::new()
@@ -116,7 +118,7 @@ fn bench(c: &mut Criterion) {
                     let (mut pos, vel) = world.borrow::<(ViewMut<Pos>, View<Vel>)>().unwrap();
                     (&mut pos, &vel)
                         .par_iter()
-                        .for_each(|(mut p, v)| p.0 += v.0);
+                        .for_each(|(mut p, v)| p.modify(|p| p.0 += v.0));
                 })
             })
         });
