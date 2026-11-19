@@ -26,7 +26,7 @@ serde = { version = "1", optional = true, default-features = false, features = [
 ] }
 shipyard_proc = { version = "0.6", optional = true }
 tracing = { version = "0.1.44", default-features = false, optional = true }
-serde_json = { version = "1.0.148", optional = true }
+serde_json = { version = "1.0.145", optional = true }
 
 [features]
 default = ["parallel", "proc", "std"]
