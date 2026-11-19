@@ -119,7 +119,11 @@ fn combined_modification_join() {
     world.add_entity((M32(2), I16(2)));
     {
         let mut values = world.borrow::<ViewMut<M32>>().unwrap();
-        (&mut values).iter().nth(1).unwrap().0 += 10;
+        (&mut values)
+            .iter()
+            .nth(1)
+            .unwrap()
+            .modify(|value| value.0 += 10);
     }
 
     let (mut values, markers) = world.borrow::<(ViewMut<M32>, View<I16>)>().unwrap();
@@ -208,8 +212,8 @@ fn basic() {
             let mut iter = (&mut u32s).iter();
             assert_eq!(iter.size_hint(), (4, Some(4)));
             let mut next = iter.next().unwrap();
-            next.0 += 1;
-            next.0 -= 1;
+            next.modify(|value| value.0 += 1);
+            next.modify(|value| value.0 -= 1);
             assert_eq!(*next, U32(0));
             assert_eq!(*iter.next().unwrap(), U32(1));
             assert_eq!(*iter.next().unwrap(), U32(2));
@@ -256,8 +260,8 @@ fn basic() {
             let mut iter = (&mut u32s, &mut i16s).iter();
             assert_eq!(iter.size_hint(), (0, Some(4)));
             let mut next = iter.next().unwrap();
-            (next.0).0 += 1;
-            (next.0).0 -= 1;
+            next.0.modify(|value| value.0 += 1);
+            next.0.modify(|value| value.0 -= 1);
             assert_eq!((*next.0, *next.1), (U32(0), I16(10)));
             assert_eq!(
                 iter.next().map(|(x, y)| (*x, *y)).unwrap(),
@@ -293,8 +297,8 @@ fn basic() {
             let mut iter = (&mut i16s, &mut u32s).iter();
             assert_eq!(iter.size_hint(), (0, Some(4)));
             let mut next = iter.next().unwrap();
-            (next.1).0 += 1;
-            (next.1).0 -= 1;
+            next.1.modify(|value| value.0 += 1);
+            next.1.modify(|value| value.0 -= 1);
             assert_eq!((*next.0, *next.1), (I16(10), U32(0)));
             assert_eq!(
                 iter.next().map(|(x, y)| (*x, *y)).unwrap(),

@@ -54,7 +54,7 @@ fn bench(c: &mut Criterion) {
                 for i in (0..N as usize).step_by(stride) {
                     let mut value = (&mut tracked).get(ids[i]).unwrap();
                     // Mark modified without changing the value.
-                    value.0 = i as u64;
+                    value.modify(|value| value.0 = i as u64);
                     expected += 3 * i as u64;
                 }
             }

@@ -344,7 +344,7 @@ fn retain_mut() {
     sparse_set.private_retain_mut(TrackingTimestamp::new(0), |entity, mut component| {
         assert_eq!(component.0 as u64, entity.index());
         visited.push(entity.index());
-        component.0 += 100;
+        component.modify(|value| value.0 += 100);
 
         entity.index() % 2 == 0
     });

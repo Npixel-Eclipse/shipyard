@@ -738,7 +738,10 @@ fn regroup_guarded() {
         .unwrap()
         .regroup_connected_set(&set)
         .unwrap();
-    (&mut held).get(heap).unwrap().0.push(8);
+    (&mut held)
+        .get(heap)
+        .unwrap()
+        .modify(|value| value.0.push(8));
     drop(held);
 
     let counted_view = world.borrow::<View<'_, Counted>>().unwrap();
@@ -824,7 +827,10 @@ fn regroup_tracked() {
     });
 
     world.run(|mut tracked: ViewMut<'_, TrackedCounted, track::All>| {
-        (&mut tracked).get(e[5]).unwrap().values.push(50);
+        (&mut tracked)
+            .get(e[5])
+            .unwrap()
+            .modify(|value| value.values.push(50));
     });
     world.remove::<(Aligned,)>(e[1]);
     let (component,) = world.remove::<(TrackedCounted,)>(e[6]);
@@ -869,7 +875,7 @@ fn regroup_tracked() {
 
     assert_eq!(results(&world), before);
     for (mut tracked, _) in &mut world.iter::<(&mut TrackedCounted, &Aligned)>() {
-        tracked.values.push(10);
+        tracked.modify(|value| value.values.push(10));
     }
     let (tracked, aligned) = world
         .borrow::<(View<'_, TrackedCounted, track::All>, View<'_, Aligned>)>()

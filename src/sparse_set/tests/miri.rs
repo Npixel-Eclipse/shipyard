@@ -342,7 +342,7 @@ fn retain() {
     }
 
     sparse_set.private_retain_mut(now(), |entity, mut component| {
-        component.values.push(10);
+        component.modify(|value| value.values.push(10));
         entity.index() % 2 == 0
     });
     assert_eq!(drops(&counter), 2);
@@ -539,7 +539,10 @@ fn tracked_reorder() {
     let mut items = world
         .borrow::<ViewMut<'_, TrackedItem, track::All>>()
         .unwrap();
-    (&mut items).get(e1).unwrap().0.values.push(10);
+    (&mut items)
+        .get(e1)
+        .unwrap()
+        .modify(|value| value.0.values.push(10));
 
     // Sorted by first value: e2, e1, e0, e3. Removing e2 then moves e3 to the front.
     items.sort_unstable_by(|a, b| a.0.values[0].cmp(&b.0.values[0]));
@@ -729,7 +732,7 @@ fn window_mut_tracked() {
         let index = unsafe {
             let index = window.captain_indices_of(&cursor, 1).unwrap();
             let mut component = window.get_data(index);
-            component.0.values.push(10);
+            component.modify(|value| value.0.values.push(10));
 
             index
         };
@@ -853,7 +856,7 @@ fn grouped_retain() {
 
     sparse_set.private_retain_mut(now(), |entity, mut component| {
         assert_eq!(component.values[0] as u64, entity.index());
-        component.values.push(10);
+        component.modify(|value| value.values.push(10));
         entity.index() % 2 == 0
     });
     assert_eq!(drops(&counter), 4);

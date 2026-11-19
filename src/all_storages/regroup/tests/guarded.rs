@@ -155,7 +155,9 @@ fn clean_timestamps() {
     let entity = world.add_entity((TrackedA(0), TrackedB));
     world.add_entity((TrackedA(1), TrackedB));
     regroup_set_of::<TrackedA>(&world).unwrap();
-    world.run(|mut a: ViewMut<'_, TrackedA, track::All>| (&mut a).get(entity).unwrap().0 = 5);
+    world.run(|mut a: ViewMut<'_, TrackedA, track::All>| {
+        (&mut a).get(entity).unwrap().modify(|value| value.0 = 5)
+    });
     let before = timestamps(&world);
 
     let regrouped = regroup_set_of::<TrackedA>(&world).unwrap();

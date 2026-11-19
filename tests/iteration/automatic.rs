@@ -7,7 +7,7 @@
 //! counts its captain's, and only a fully aligned group knows its exact length.
 
 use super::ways::every_way;
-use shipyard::advanced::Mut;
+use shipyard::SafeMut;
 use shipyard::iter::OneOfTwo;
 use shipyard::*;
 
@@ -696,7 +696,7 @@ fn retain() {
 
     world.retain::<A>(|_, a| a.0 % 3 != 0);
     world.retain_mut::<B>(|_, mut b| {
-        b.0 += 100;
+        b.modify(|value| value.0 += 100);
         b.0 % 2 == 0
     });
 
@@ -832,7 +832,7 @@ fn generation_reuse() {
     assert_eq!(pair_items(&world), pair_values(&world, &pairs));
 }
 
-/// Asserts that writing through `Mut` in every segment of the grouped walks flags exactly
+/// Asserts that writing through `SafeMut` in every segment of the grouped walks flags exactly
 /// the written components, reading flags nothing.
 #[test]
 fn tracked_mutation() {
@@ -850,9 +850,10 @@ fn tracked_mutation() {
         .clear_all_modified();
 
     let (a, mut tracked) = world.borrow::<(View<A>, ViewMut<Tracked>)>().unwrap();
-    let items = every_way!((&a, &mut tracked).iter(), |(a, t): (&A, Mut<Tracked>)| (
-        a.0, t.0
-    ));
+    let items = every_way!((&a, &mut tracked).iter(), |(a, t): (
+        &A,
+        SafeMut<Tracked>
+    )| (a.0, t.0));
     assert_eq!(items.len(), 11);
     assert!(pairs.iter().all(|&id| !tracked.is_modified(id)));
 
@@ -860,7 +861,7 @@ fn tracked_mutation() {
     // walked before A's since it's longer, so `Tracked` drives when it's written.
     (&a, &mut tracked).iter().for_each(|(a, mut t)| {
         if a.0 == 3 || a.0 == 10 {
-            t.0 += 100;
+            t.modify(|value| value.0 += 100);
         }
     });
 
@@ -1102,7 +1103,7 @@ mod derived {
     }
 
     /// Asserts that a named derived view over the grouped walks yields every match in every
-    /// way, and that reading its `Mut`s flags nothing.
+    /// way, and that reading its `SafeMut`s flags nothing.
     #[test]
     fn named_reads() {
         let (world, matches) = world();
@@ -1149,7 +1150,7 @@ mod derived {
     fn write(motion: &mut MotionView<'_>, way: Way, prefix: usize, target: u32) {
         let write = |mut motion: Motion| {
             if motion.position.0 == target {
-                motion.vel.0 += 1000;
+                motion.vel.modify(|value| value.0 += 1000);
             }
         };
 
@@ -1187,7 +1188,7 @@ mod derived {
         }
     }
 
-    /// Asserts that writing through one item's `Mut`, in every way and after every interesting
+    /// Asserts that writing through one item's `SafeMut`, in every way and after every interesting
     /// `next` prefix, flags only that entity's `Vel`.
     ///
     /// The targets cover both members driving the aligned segment, the untracked `Pos`

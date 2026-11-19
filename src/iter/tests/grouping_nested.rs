@@ -899,7 +899,7 @@ fn held_mut() {
     assert_eq!(items.len(), 6);
     for ((a, modif), c) in &mut items {
         a.0 += 100;
-        modif.0 += 200;
+        modif.modify(|value| value.0 += 200);
         c.0 += 300;
     }
     drop(items);

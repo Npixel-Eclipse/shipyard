@@ -84,7 +84,7 @@ fn attach(&mut self, id: EntityId, parent: EntityId) {
     // either the designated parent already has a Parent component – and thus one or more children
     if let Ok(mut p) = parents.get(parent) {
         // increase the parent's children counter
-        p.num_children += 1;
+        p.modify(|value| value.num_children += 1);
 
         // get the ids of the new previous and next siblings of our new child
         let prev = children[p.first_child].prev;

@@ -106,7 +106,10 @@ impl Small {
     /// Gives the target back the A it was created with.
     fn reset_target(&self) {
         let mut a = self.world.borrow::<ViewMut<A>>().unwrap();
-        (&mut a).get(self.target).unwrap().0 = a_value(0);
+        (&mut a)
+            .get(self.target)
+            .unwrap()
+            .modify(|value| value.0 = a_value(0));
     }
 }
 
@@ -236,7 +239,12 @@ fn read_a_c(target: EntityId) -> impl Fn(View<A>, View<C>) + Send + Sync + 'stat
 
 /// Assigns the same value each time, so repeated runs stay valid and never change membership.
 fn write_a(target: EntityId) -> impl Fn(ViewMut<A>) + Send + Sync + 'static {
-    move |mut a: ViewMut<A>| (&mut a).get(target).unwrap().0 = black_box(WRITTEN)
+    move |mut a: ViewMut<A>| {
+        (&mut a)
+            .get(target)
+            .unwrap()
+            .modify(|value| value.0 = black_box(WRITTEN))
+    }
 }
 
 /// How a case's workload runs.

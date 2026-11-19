@@ -389,7 +389,7 @@ fn tracking_filter() {
     let mut items: Vec<_> = tracked.inserted_mut().iter().collect();
     assert_eq!(items.len(), 2);
     for item in &mut items {
-        item.0 += 10;
+        item.modify(|value| value.0 += 10);
     }
     drop(items);
 

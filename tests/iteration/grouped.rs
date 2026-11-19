@@ -6,7 +6,7 @@
 //! against a world built the same way without the group.
 
 use super::ways::every_way;
-use shipyard::advanced::Mut;
+use shipyard::SafeMut;
 use shipyard::iter::OneOfTwo;
 use shipyard::*;
 
@@ -59,7 +59,7 @@ fn world(grouped: bool) -> (World, Vec<EntityId>) {
     (&mut world.borrow::<ViewMut<B>>().unwrap())
         .get(e[1])
         .unwrap()
-        .0 += 100;
+        .modify(|value| value.0 += 100);
 
     (world, e)
 }
@@ -154,7 +154,7 @@ fn mut_triple() {
 
     let items = same_as_ungrouped!(
         |v: (View<C>, ViewMut<B>, ViewMut<A>)| (&v.0, &mut v.1, &mut v.2).iter(),
-        |(c, b, a): (&C, Mut<B>, &mut A)| (c.0, b.0, a.0),
+        |(c, b, a): (&C, SafeMut<B>, &mut A)| (c.0, b.0, a.0),
     );
 
     assert_eq!(items, [(e[2], (22, 12, 2)), (e[8], (28, 18, 8))]);
@@ -242,7 +242,7 @@ fn owned() {
     let (grouped, e) = world(true);
     let mut iter = grouped.iter::<(&A, &mut B)>();
 
-    let mut items = every_way!(iter.iter(), |(a, b): (&A, Mut<B>)| (a.0, b.0));
+    let mut items = every_way!(iter.iter(), |(a, b): (&A, SafeMut<B>)| (a.0, b.0));
     items.sort_by_key(|(id, _)| *id);
 
     assert_eq!(

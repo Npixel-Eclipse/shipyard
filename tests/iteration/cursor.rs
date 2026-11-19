@@ -261,7 +261,7 @@ fn tracked_mutation() {
 
     let outputs: Vec<_> = (&mut tracked, &b).iter().collect();
     for (mut tracked, b) in outputs {
-        tracked.0 = b.0;
+        tracked.modify(|value| value.0 = b.0);
     }
 
     let modified: Vec<_> = e.iter().map(|&id| tracked.is_modified(id)).collect();

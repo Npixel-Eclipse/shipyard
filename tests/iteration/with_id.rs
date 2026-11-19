@@ -69,7 +69,7 @@ fn parallel_with_id_keeps_entity_alignment() {
     world.run(|mut tracked: ViewMut<Tracked, track::All>| {
         for &index in &[5usize, 70, 200, 299] {
             let mut value = (&mut tracked).get(ids[index]).unwrap();
-            value.0 = index;
+            value.modify(|value| value.0 = index);
         }
     });
 

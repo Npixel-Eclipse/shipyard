@@ -50,7 +50,10 @@ fn as_view() {
     let entity = world.add_entity(Heap(vec![1]));
 
     let mut heaps = world.borrow::<ViewMut<'_, Heap>>().unwrap();
-    (&mut heaps).get(entity).unwrap().0.push(2);
+    (&mut heaps)
+        .get(entity)
+        .unwrap()
+        .modify(|value| value.0.push(2));
     {
         let view = heaps.as_view();
         assert_eq!((&view).get(entity).unwrap().0, [1, 2]);
@@ -74,7 +77,7 @@ fn get_refs() {
     let entity = world.add_entity(Heap(vec![1]));
 
     let mut values = RefMut::map(world.get::<&mut Heap>(entity).unwrap(), |heap| &mut heap.0);
-    values.push(2);
+    values.modify(|value| value.push(2));
     assert!(world.borrow::<View<'_, Heap>>().is_err());
     drop(values);
 
@@ -203,7 +206,10 @@ fn system_unwind() {
         world.run(
             move |mut heaps: ViewMut<'_, Heap>, mut config: UniqueViewMut<'_, Config>| {
                 let _counter = counter;
-                (&mut heaps).get(entity).unwrap().0.push(2);
+                (&mut heaps)
+                    .get(entity)
+                    .unwrap()
+                    .modify(|value| value.0.push(2));
                 config.0.push(3);
                 panic!("system panicked while holding views");
             },
@@ -267,7 +273,10 @@ fn other_thread() {
     });
 
     let mut sync_only = world.borrow::<NonSend<ViewMut<'_, SyncOnly>>>().unwrap();
-    (&mut *sync_only).get(entity).unwrap().0.push(3);
+    (&mut *sync_only)
+        .get(entity)
+        .unwrap()
+        .modify(|value| value.0.push(3));
     assert_eq!((&*sync_only).get(entity).unwrap().0, [2, 3]);
     drop(sync_only);
 

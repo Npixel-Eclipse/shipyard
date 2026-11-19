@@ -34,6 +34,11 @@ impl<'a, T: ?Sized> Mut<'a, T> {
 }
 
 impl<'a, T: ?Sized> SafeMut<'a, T> {
+    #[cfg(test)]
+    pub(crate) fn has_chunk(&self) -> bool {
+        self.inner.chunk.is_some()
+    }
+
     pub(crate) fn new(inner: Mut<'a, T>) -> Self {
         Self { inner }
     }

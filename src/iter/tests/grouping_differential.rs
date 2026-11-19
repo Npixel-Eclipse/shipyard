@@ -26,7 +26,7 @@ use crate::get::Get;
 use crate::iter::plan::SegmentDescriptor;
 use crate::iter::planner::{NodeMetadata, Route, Walk};
 use crate::iter::{EntityCursor, IntoIter, IntoShiperator, OneOfTwo, Shiperator};
-use crate::r#mut::Mut;
+use crate::r#mut::SafeMut;
 use crate::sparse_set::{GroupRegion, Ring, SparseSet};
 use crate::storage::StorageId;
 use crate::track;
@@ -435,7 +435,7 @@ impl Scenario {
                 let value = self.new_value();
                 with_kind!(slot, K => {
                     let mut view = self.world.borrow::<ViewMut<'_, K>>().unwrap();
-                    *(&mut view).get(id).unwrap() = K::new(value);
+                    (&mut view).get(id).unwrap().modify(|component| *component = K::new(value));
                     self.model.get_mut(&id).unwrap()[slot] = Some(K::new(value).value());
                 });
             }
@@ -2124,7 +2124,7 @@ fn tracked_reads() {
         &mut rng,
         "tracked reads",
         (&a, &mut tracked).iter(),
-        |(a, tracked): (&A, Mut<'_, Tracked>)| (a.0, tracked.0),
+        |(a, tracked): (&A, SafeMut<'_, Tracked>)| (a.0, tracked.0),
         expected,
     );
 
@@ -2143,12 +2143,12 @@ fn tracked_writes() {
     let mut iter = (&a, &mut tracked).iter();
     for (a, mut tracked) in (&mut iter).take(3) {
         if a.0 % 2 == 1 {
-            tracked.0 += 100;
+            tracked.modify(|value| value.0 += 100);
         }
     }
     iter.fold((), |(), (a, mut tracked)| {
         if a.0 % 2 == 1 {
-            tracked.0 += 100;
+            tracked.modify(|value| value.0 += 100);
         }
     });
 
@@ -2207,7 +2207,7 @@ fn tracked_overlap_reads() {
         &mut rng,
         "tracked overlap reads",
         (&a, &mut tracked).iter(),
-        |(a, tracked): (&A, Mut<'_, Tracked>)| (a.0, tracked.0),
+        |(a, tracked): (&A, SafeMut<'_, Tracked>)| (a.0, tracked.0),
         expected,
     );
 
@@ -2226,12 +2226,12 @@ fn tracked_overlap_writes() {
     let mut iter = (&a, &mut tracked).iter();
     for (a, mut tracked) in (&mut iter).take(5) {
         if a.0 % 2 == 1 {
-            tracked.0 += 100;
+            tracked.modify(|value| value.0 += 100);
         }
     }
     iter.fold((), |(), (a, mut tracked)| {
         if a.0 % 2 == 1 {
-            tracked.0 += 100;
+            tracked.modify(|value| value.0 += 100);
         }
     });
 

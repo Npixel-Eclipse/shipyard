@@ -1,7 +1,7 @@
 //! Iterators borrowing their storages themselves, from `World::iter` and `AllStorages::iter`.
 
 use super::ways::every_way;
-use shipyard::advanced::Mut;
+use shipyard::SafeMut;
 use shipyard::advanced::atomic_refcell::SharedBorrow;
 use shipyard::advanced::tracking::TrackingTimestamp;
 use shipyard::all_storages::AllStorages;
@@ -172,19 +172,21 @@ fn mut_duplicate() {
     let _ = world.iter::<(&mut A, &mut A)>();
 }
 
-/// Asserts that `Mut` outputs of `World::iter` only flag what's written through them,
+/// Asserts that `SafeMut` outputs of `World::iter` only flag what's written through them,
 /// across repeated iterations.
 #[test]
 fn mut_flags() {
     let (world, e) = world();
-    let mut iter = world.iter::<(Mut<Modif>, &B)>();
+    let mut iter = world.iter::<(SafeMut<Modif>, &B)>();
 
-    let items = every_way!(iter.iter(), |(modif, b): (Mut<Modif>, &B)| (modif.0, b.0));
+    let items = every_way!(iter.iter(), |(modif, b): (SafeMut<Modif>, &B)| (
+        modif.0, b.0
+    ));
     assert_eq!(items, [(e[1], (1, 11)), (e[3], (3, 13))]);
 
     iter.iter().with_id().for_each(|(id, (mut modif, _))| {
         if id == e[3] {
-            modif.0 += 100;
+            modif.modify(|value| value.0 += 100);
         }
     });
     drop(iter);

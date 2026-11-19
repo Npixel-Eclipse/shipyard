@@ -48,7 +48,11 @@ fn combined_individual_wrappers() {
     });
 
     world.run(|mut view: NonSync<ViewMut<ModifyOnly>>| {
-        (&mut *view).iter().next().unwrap().0 += 1;
+        (&mut *view)
+            .iter()
+            .next()
+            .unwrap()
+            .modify(|value| value.0 += 1);
         assert!(view.is_inserted_or_modified(modified));
     });
     world.run(|view: NonSync<ViewMut<ModifyOnly>>| {
@@ -153,7 +157,7 @@ fn clear_all_modified_thread_local() {
     world.run(
         |mut unit: NonSendSync<ViewMut<UnitInsertAndModification>>| {
             for mut u in (&mut *unit).iter() {
-                *u = UnitInsertAndModification::new();
+                u.modify(|value| *value = UnitInsertAndModification::new());
             }
         },
     );

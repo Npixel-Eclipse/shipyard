@@ -313,7 +313,7 @@ fn tracking_removals() {
     }
     world.run(|mut a: ViewMut<'_, TrackedA, track::All>| {
         for i in [1, 4, 8] {
-            (&mut a).get(e[i]).unwrap().0 += 100;
+            (&mut a).get(e[i]).unwrap().modify(|value| value.0 += 100);
         }
     });
     world.regroup();
@@ -371,7 +371,7 @@ fn queries() {
     world.run(|a: ViewMut<'_, TrackedA, track::All>| a.clear_all_inserted());
     world.run(|mut a: ViewMut<'_, TrackedA, track::All>| {
         for i in [2, 9] {
-            (&mut a).get(e[i]).unwrap().0 += 100;
+            (&mut a).get(e[i]).unwrap().modify(|value| value.0 += 100);
         }
     });
     for i in [1, 6, 13] {
@@ -428,7 +428,7 @@ fn queries() {
             View<'_, TrackedB, track::All>,
         )| {
             for (mut a, _) in (&mut a, &b).iter() {
-                a.0 += 1000;
+                a.modify(|value| value.0 += 1000);
             }
         },
     );

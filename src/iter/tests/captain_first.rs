@@ -93,7 +93,10 @@ fn tracking_rejects_before_sailor_lookups() {
     let (a, mut tracked) = world
         .borrow::<(View<'_, A>, ViewMut<'_, Tracked>)>()
         .unwrap();
-    (&mut tracked).get(ids[1]).unwrap().0 += 10;
+    (&mut tracked)
+        .get(ids[1])
+        .unwrap()
+        .modify(|value| value.0 += 10);
 
     let lookups = Cell::new(0);
     for fold in [false, true] {

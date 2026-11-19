@@ -112,7 +112,7 @@ fn sailor_absolute() {
     assert_eq!(unsafe { a_window.get_data(index) }, &A(1));
 }
 
-/// Asserts that resolving indices and creating `Mut`s without writing through them
+/// Asserts that resolving indices and creating `SafeMut`s without writing through them
 /// doesn't mark any component as modified.
 #[test]
 fn resolve_no_modify() {
@@ -131,7 +131,7 @@ fn resolve_no_modify() {
     for local in 0..3 {
         // SAFE: `local` is within the 3 components long segment
         // and is the local index of the current candidate of `segment_entities`.
-        // Each `Mut` is dropped before the next one is created.
+        // Each `SafeMut` is dropped before the next one is created.
         unsafe {
             let index = window.captain_indices_of(&segment_entities, local).unwrap();
             let _ = window.get_data(index);
@@ -168,7 +168,7 @@ fn tracked_resolution() {
     unsafe {
         let index = window.captain_indices_of(&segment_entities, 1).unwrap();
         let mut component = window.get_data(index);
-        component.0 = 42;
+        component.modify(|value| value.0 = 42);
     }
 
     let modified = Modified(window);

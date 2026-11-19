@@ -37,7 +37,7 @@ fn filter() {
         .par_iter()
         .filter(|x| x.0 % 2 != 0)
         .map(|mut x| {
-            x.0 += 1;
+            x.modify(|value| value.0 += 1);
             x
         })
         .map(|x| *x)

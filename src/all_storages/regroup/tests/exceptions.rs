@@ -105,7 +105,7 @@ fn tracked() -> World {
 
     world.run(|mut a: ViewMut<'_, TrackedA, track::All>| {
         for &entity in entities.iter().skip(1).step_by(4) {
-            (&mut a).get(entity).unwrap().0 += 100;
+            (&mut a).get(entity).unwrap().modify(|value| value.0 += 100);
         }
     });
     for &entity in entities.iter().step_by(3) {

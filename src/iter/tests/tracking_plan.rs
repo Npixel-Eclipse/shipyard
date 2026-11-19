@@ -22,7 +22,7 @@ fn dense_candidates_still_filter_after_splitting() {
     {
         let mut tracked = world.borrow::<ViewMut<'_, Tracked>>().unwrap();
         for &id in ids.iter().step_by(64) {
-            (&mut tracked).get(id).unwrap().0 += 1;
+            (&mut tracked).get(id).unwrap().modify(|value| value.0 += 1);
         }
     }
     let tracked = world.borrow::<View<'_, Tracked>>().unwrap();
@@ -56,7 +56,10 @@ fn sparse_captain_and_balanced_split() {
     {
         let mut tracked = world.borrow::<ViewMut<'_, Tracked>>().unwrap();
         for i in [3904, 4095] {
-            (&mut tracked).get(ids[i]).unwrap().0 += 1;
+            (&mut tracked)
+                .get(ids[i])
+                .unwrap()
+                .modify(|value| value.0 += 1);
         }
     }
     let (a, tracked) = world.borrow::<(View<'_, A>, View<'_, Tracked>)>().unwrap();
@@ -151,7 +154,10 @@ fn or_splits_weighted_follow_ups_and_omits_empty_branches() {
     {
         let mut other = world.borrow::<ViewMut<'_, Other>>().unwrap();
         for i in [65, 640, 1299] {
-            *(&mut other).get(ids[i]).unwrap() = Other;
+            (&mut other)
+                .get(ids[i])
+                .unwrap()
+                .modify(|value| *value = Other);
         }
     }
     let inserted: Vec<_> = (1300..2600)

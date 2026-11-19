@@ -144,11 +144,17 @@ fn mutation_entry_points_update_summaries() {
         .borrow::<ViewMut<'_, Tracked>>()
         .unwrap()
         .clear_all_inserted_and_modified();
-    world.get::<&mut Tracked>(ids[0]).unwrap().0 += 1;
+    world
+        .get::<&mut Tracked>(ids[0])
+        .unwrap()
+        .modify(|value| value.0 += 1);
     {
         let mut tracked = world.borrow::<ViewMut<'_, Tracked>>().unwrap();
         tracked[ids[64]].0 += 1;
-        (&mut tracked).get(ids[128]).unwrap().as_mut().0 += 1;
+        (&mut tracked)
+            .get(ids[128])
+            .unwrap()
+            .modify(|value| value.0 += 1);
         tracked.apply(ids[192], ids[193], |a, _| a.0 += 1);
         tracked.apply_mut(ids[256], ids[320], |a, b| {
             a.0 += 1;
@@ -156,13 +162,13 @@ fn mutation_entry_points_update_summaries() {
         });
         tracked.retain_mut(|id, mut value| {
             if id == ids[384] {
-                value.0 += 1;
+                value.modify(|value| value.0 += 1);
             }
             true
         });
         for (id, mut value) in (&mut tracked).iter().with_id() {
             if id == ids[448] {
-                value.0 += 1;
+                value.modify(|value| value.0 += 1);
             }
         }
     }
@@ -227,7 +233,7 @@ fn parallel_writes_share_chunk_summaries() {
         let mut tracked = world.borrow::<ViewMut<'_, Tracked>>().unwrap();
         (&mut tracked).par_iter().for_each(|mut t| {
             if t.0 % 7 == 0 {
-                t.0 += 1;
+                t.modify(|value| value.0 += 1);
             }
         });
     }
@@ -291,12 +297,12 @@ fn get_respects_dynamic_tracking_and_storage_replacement() {
     let id = world.add_entity((A(0),));
     {
         let mut values = world.borrow::<ViewMut<'_, A>>().unwrap();
-        (&mut values).get(id).unwrap().0 += 1;
+        (&mut values).get(id).unwrap().modify(|value| value.0 += 1);
         assert!(values.modification_data.is_empty());
         values.track_modification();
         assert_eq!((&mut values).get(id).unwrap().0, 1);
         assert_eq!(values.modification_data[0].get(), 0);
-        (&mut values).get(id).unwrap().0 += 1;
+        (&mut values).get(id).unwrap().modify(|value| value.0 += 1);
     }
     {
         let values = world.borrow::<View<'_, A, track::Modification>>().unwrap();
@@ -309,7 +315,7 @@ fn get_respects_dynamic_tracking_and_storage_replacement() {
     *values.sparse_set = crate::sparse_set::SparseSet::new();
     let current = values.current;
     let _ = values.sparse_set.insert(id, A(5), current);
-    (&mut values).get(id).unwrap().0 += 1;
+    (&mut values).get(id).unwrap().modify(|value| value.0 += 1);
     assert_eq!(values.get(id).unwrap().0, 6);
     assert!(values.modification_data.is_empty());
 }

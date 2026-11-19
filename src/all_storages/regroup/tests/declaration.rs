@@ -138,7 +138,7 @@ fn tracking() {
     world.run(|a: ViewMut<'_, TrackedA, track::All>| a.clear_all_inserted());
     let new = world.add_entity((TrackedA(2), TrackedB));
     world.run(|mut a: ViewMut<'_, TrackedA, track::All>| {
-        (&mut a).get(old).unwrap().0 = 10;
+        (&mut a).get(old).unwrap().modify(|value| value.0 = 10);
     });
 
     let state = |world: &World| {

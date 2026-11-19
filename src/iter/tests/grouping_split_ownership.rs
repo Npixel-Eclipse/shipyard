@@ -290,7 +290,7 @@ fn tracked_mutation() {
     assert_eq!(outputs.len(), ids.len());
     for (mut m, _) in outputs {
         if [0, 6, 10].contains(&m.0) {
-            m.0 += 100;
+            m.modify(|value| value.0 += 100);
         }
     }
     for (i, &id) in ids.iter().enumerate() {

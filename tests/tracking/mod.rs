@@ -97,7 +97,11 @@ fn combined_modification() {
         let mut view = world
             .borrow::<ViewMut<Probe<track::Modification>>>()
             .unwrap();
-        (&mut view).iter().next().unwrap().0 += 10;
+        (&mut view)
+            .iter()
+            .next()
+            .unwrap()
+            .modify(|value| value.0 += 10);
     }
 
     let view = world.borrow::<View<Probe<track::Modification>>>().unwrap();
@@ -130,7 +134,11 @@ fn combined_modification() {
     let mut view = world
         .borrow::<ViewMut<Probe<track::Modification>>>()
         .unwrap();
-    (&mut view).iter().nth(1).unwrap().0 += 10;
+    (&mut view)
+        .iter()
+        .nth(1)
+        .unwrap()
+        .modify(|value| value.0 += 10);
     assert!(!view.is_inserted_or_modified(changed));
     assert!(view.is_inserted_or_modified(untouched));
 }
@@ -152,8 +160,16 @@ fn combined_both() {
         let mut view = world
             .borrow::<ViewMut<Probe<track::InsertionAndModification>>>()
             .unwrap();
-        (&mut view).iter().nth(1).unwrap().0 += 10;
-        (&mut view).iter().nth(3).unwrap().0 += 10;
+        (&mut view)
+            .iter()
+            .nth(1)
+            .unwrap()
+            .modify(|value| value.0 += 10);
+        (&mut view)
+            .iter()
+            .nth(3)
+            .unwrap()
+            .modify(|value| value.0 += 10);
     }
 
     let view = world
@@ -190,7 +206,7 @@ fn combined_both() {
         vec![11, 3, 14]
     );
     for mut value in view.inserted_or_modified_mut().iter() {
-        value.0 += 100;
+        value.modify(|value| value.0 += 100);
     }
     assert_eq!(
         view.inserted_or_modified()
@@ -401,7 +417,7 @@ fn clear_all_modified() {
 
     world.run(|mut unit: ViewMut<UnitInsertAndModification>| {
         for mut u in (&mut unit).iter() {
-            *u = UnitInsertAndModification;
+            u.modify(|value| *value = UnitInsertAndModification);
         }
     });
 

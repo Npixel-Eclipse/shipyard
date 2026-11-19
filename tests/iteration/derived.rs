@@ -183,7 +183,7 @@ struct RenamedView<'v> {
 }
 
 /// Asserts that a named derived view yields its renamed fields in every way,
-/// ignoring the skipped field's storage, and that reading its `Mut`s flags nothing.
+/// ignoring the skipped field's storage, and that reading its `SafeMut`s flags nothing.
 #[test]
 fn renamed_skipped() {
     let (world, e) = tracked_world();
@@ -199,7 +199,7 @@ fn renamed_skipped() {
     assert!(!renamed.vm_vel.is_modified(e[3]));
 }
 
-/// Asserts that writing through a named derived view's `Mut` in bulk flags only that component.
+/// Asserts that writing through a named derived view's `SafeMut` in bulk flags only that component.
 #[test]
 fn named_mut() {
     let (world, e) = tracked_world();
@@ -210,7 +210,7 @@ fn named_mut() {
         .with_id()
         .for_each(|(id, mut renamed)| {
             if id == e[3] {
-                renamed.vel.0 += 100;
+                renamed.vel.modify(|value| value.0 += 100);
             }
         });
 

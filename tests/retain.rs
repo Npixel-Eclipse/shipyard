@@ -14,7 +14,7 @@ fn no_pack() {
     let eid1 = world.add_entity(U32(1));
 
     world.retain_mut::<U32>(|_, mut i| {
-        i.0 *= 2;
+        i.modify(|value| value.0 *= 2);
 
         i.0 != 0
     });
@@ -32,7 +32,7 @@ fn track() {
     let eid1 = world.add_entity(U32(1));
 
     world.retain_mut::<U32>(|_, mut i| {
-        i.0 *= 2;
+        i.modify(|value| value.0 *= 2);
 
         i.0 != 0
     });
@@ -65,7 +65,7 @@ fn grouped() {
     world.regroup();
 
     world.retain_mut::<U32>(|_, mut i| {
-        i.0 *= 2;
+        i.modify(|value| value.0 *= 2);
 
         i.0 % 3 != 0
     });

@@ -1,5 +1,5 @@
 use super::*;
-use crate::r#mut::Mut;
+use crate::r#mut::SafeMut;
 use crate::{Component, Get, IntoIter, View, ViewMut, World, track};
 
 #[derive(Clone)]
@@ -96,8 +96,8 @@ fn mutation_paths_and_read_only_access() {
         // All variants preserve exact item flags after a read-only traversal.
         assert_eq!(view.modified().iter().count(), 0);
         let mut item = (&mut view).get(ids[0]).unwrap();
-        item.0 += 1;
-        *Mut::map(item, |t| &mut t.0).as_mut() += 1;
+        item.modify(|value| value.0 += 1);
+        SafeMut::map(item, |t| &mut t.0).modify(|value| *value += 1);
         view[ids[64]].0 += 1;
         view.apply_mut(ids[128], ids[192], |a, b| {
             a.0 += 1;
@@ -105,15 +105,15 @@ fn mutation_paths_and_read_only_access() {
         });
         view.retain_mut(|_, mut t| {
             if t.0 == 258 {
-                t.0 += 1;
+                t.modify(|value| value.0 += 1);
             }
             true
         });
     }
     {
         let mut item = world.get::<&mut Tracked>(ids[256]).unwrap();
-        item.0 += 1;
-        **crate::get_component::RefMut::map(item, |t| &mut t.0).as_mut() += 1;
+        item.modify(|value| value.0 += 1);
+        crate::get_component::RefMut::map(item, |t| &mut t.0).modify(|value| *value += 1);
     }
     check(&world);
     assert_eq!(
@@ -184,16 +184,20 @@ fn retained_mut_items_can_write_in_parallel() {
     {
         let mut view = world.borrow::<ViewMut<'_, Tracked>>().unwrap();
         let items = (&mut view).iter().fold(Vec::new(), |mut items, t| {
-            assert!(t.chunk.is_none());
+            assert!(!t.has_chunk());
             items.push(t);
             items
         });
-        items.into_par_iter().for_each(|mut t| t.0 += 1);
+        items
+            .into_par_iter()
+            .for_each(|mut t| t.modify(|value| value.0 += 1));
     }
     check(&world);
     {
         let mut view = world.borrow::<ViewMut<'_, Tracked>>().unwrap();
-        (&mut view).par_iter().for_each(|mut t| t.0 += 1);
+        (&mut view)
+            .par_iter()
+            .for_each(|mut t| t.modify(|value| value.0 += 1));
     }
     check(&world);
     assert_eq!(
@@ -222,7 +226,7 @@ fn folding_only_marks_accessed_components() {
             let mut view = world.borrow::<ViewMut<'_, Tracked>>().unwrap();
             (&mut view).iter().for_each(|mut t| {
                 if t.0 % TRACKING_CHUNK_SIZE == offset {
-                    t.0 += 1;
+                    t.modify(|value| value.0 += 1);
                 }
             });
         }
@@ -247,15 +251,15 @@ fn retained_items_without_chunk_references_still_track() {
         let mut view = world.borrow::<ViewMut<'_, Tracked>>().unwrap();
         let items = (&mut view).iter().fold(Vec::new(), |mut items, mut t| {
             if t.0 % TRACKING_CHUNK_SIZE == 0 {
-                t.0 += 1;
+                t.modify(|value| value.0 += 1);
             } else {
-                assert!(t.chunk.is_none());
+                assert!(!t.has_chunk());
             }
             items.push(t);
             items
         });
         for t in items.into_iter().rev() {
-            *Mut::map(t, |t| &mut t.0).as_mut() += 1;
+            SafeMut::map(t, |t| &mut t.0).modify(|value| *value += 1);
         }
     }
     check(&world);
@@ -290,7 +294,7 @@ fn folding_uses_absolute_chunk_boundaries() {
             let visited = unsafe {
                 window.set_segment_start(start);
                 window.fold_segment::<true, _, _>(&mut cursor, Vec::new(), |mut ids, id, mut t| {
-                    t.0 += 1;
+                    t.modify(|value| value.0 += 1);
                     ids.push(id.unwrap());
                     ids
                 })
@@ -320,7 +324,7 @@ fn a_panicking_fold_keeps_visited_modifications() {
         let mut view = world.borrow::<ViewMut<'_, Tracked>>().unwrap();
         (&mut view).iter().for_each(|mut t| {
             let index = t.0;
-            t.0 += 1;
+            t.modify(|value| value.0 += 1);
             assert!(index < 65, "stop during the second chunk");
         });
     }));
@@ -349,12 +353,12 @@ fn next_prepares_before_yielding_and_keeps_exact_flags() {
             let mut iter = (&mut view).iter();
             let held = iter.next();
             for t in iter.by_ref().take(64) {
-                assert!(t.chunk.is_none());
+                assert!(!t.has_chunk());
             }
             drop(iter);
             if let Some(mut t) = held {
-                assert!(t.chunk.is_none());
-                t.0 += 1;
+                assert!(!t.has_chunk());
+                t.modify(|value| value.0 += 1);
             }
         }
         check(&world);
@@ -377,8 +381,8 @@ fn split_next_keeps_prepared_chunks() {
         let first = iter.next().unwrap();
         let (left, right) = iter.split_current_segment_at(63);
         for mut t in right.chain(left).chain(core::iter::once(first)) {
-            assert!(t.chunk.is_none());
-            t.0 += 1;
+            assert!(!t.has_chunk());
+            t.modify(|value| value.0 += 1);
         }
     }
     check(&world);
@@ -406,9 +410,9 @@ fn mixed_sailors_keep_per_item_tracking() {
             .unwrap();
         let mut iter = (&mut view, &marker).iter();
         let (mut t, _) = iter.next().unwrap();
-        assert!(t.chunk.is_some());
+        assert!(t.has_chunk());
         drop(iter);
-        t.0 += 1;
+        t.modify(|value| value.0 += 1);
     }
     check(&world);
     let view = world.borrow::<View<'_, Tracked>>().unwrap();
@@ -441,8 +445,8 @@ fn preparing_an_offset_segment_marks_only_its_chunks() {
             window.prepare_tracking(Some(1..66));
             for index in 64..129 {
                 let mut t = window.get_data(index);
-                assert!(t.chunk.is_none());
-                t.0 += 1;
+                assert!(!t.has_chunk());
+                t.modify(|value| value.0 += 1);
             }
             window.set_segment_start(0);
         }
@@ -477,7 +481,7 @@ fn parallel_tracking_queries_keep_summaries() {
     {
         let mut view = world.borrow::<ViewMut<'_, Tracked>>().unwrap();
         for mut t in (&mut view).iter().take(65) {
-            t.0 += 1;
+            t.modify(|value| value.0 += 1);
         }
     }
     (0..16).into_par_iter().for_each(|_| {
@@ -493,7 +497,9 @@ fn parallel_tracking_queries_keep_summaries() {
     });
     {
         let mut view = world.borrow::<ViewMut<'_, Tracked>>().unwrap();
-        view.modified_mut().par_iter().for_each(|mut t| t.0 += 1);
+        view.modified_mut()
+            .par_iter()
+            .for_each(|mut t| t.modify(|value| value.0 += 1));
     }
     check(&world);
 }
@@ -508,7 +514,7 @@ fn summary_query_finds_late_mutations_and_rows_moved_after_invalidation() {
         let mut view = world.borrow::<ViewMut<'_, Tracked>>().unwrap();
         let items: Vec<_> = (&mut view).iter().collect();
         for mut t in items.into_iter().skip(128).take(2) {
-            t.0 += 1;
+            t.modify(|value| value.0 += 1);
         }
     }
     world.delete_entity(ids[0]);

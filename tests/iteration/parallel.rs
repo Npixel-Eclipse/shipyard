@@ -144,7 +144,7 @@ fn mutable() {
 }
 
 /// Asserts that parallel tracked outputs flag the same entities as sequential ones:
-/// only the components written through their `Mut`.
+/// only the components written through their `SafeMut`.
 #[test]
 fn tracked() {
     let build = || {
@@ -161,14 +161,14 @@ fn tracked() {
     parallel_world.run(|mut tracked: ViewMut<'_, Tracked, track::Modification>| {
         (&mut tracked).par_iter().for_each(|mut tracked| {
             if tracked.0 % 4 == 0 {
-                tracked.0 += 1;
+                tracked.modify(|value| value.0 += 1);
             }
         });
     });
     sequential_world.run(|mut tracked: ViewMut<'_, Tracked, track::Modification>| {
         (&mut tracked).iter().for_each(|mut tracked| {
             if tracked.0 % 4 == 0 {
-                tracked.0 += 1;
+                tracked.modify(|value| value.0 += 1);
             }
         });
     });

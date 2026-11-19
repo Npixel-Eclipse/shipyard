@@ -300,7 +300,7 @@ fn par_update_pack() {
         assert_eq!(usizes.modified().iter().count(), 0);
 
         (&mut usizes).par_iter().for_each(|mut i| {
-            i.0 += 1;
+            i.modify(|value| value.0 += 1);
         });
 
         let mut iter = usizes.inserted().iter();
@@ -361,8 +361,8 @@ fn par_multiple_update_pack() {
             assert_eq!(u32s.modified().iter().count(), 0);
 
             (&usizes, &mut u32s).par_iter().for_each(|(x, mut y)| {
-                y.0 += x.0 as u32;
-                y.0 -= x.0 as u32;
+                y.modify(|value| value.0 += x.0 as u32);
+                y.modify(|value| value.0 -= x.0 as u32);
             });
 
             let mut modified: Vec<_> = u32s.modified().iter().collect();
@@ -407,7 +407,7 @@ fn par_update_filter() {
             .par_iter()
             .filter(|x| x.0 % 2 == 0)
             .for_each(|mut i| {
-                i.0 += 1;
+                i.modify(|value| value.0 += 1);
             });
 
         let mut iter = usizes.inserted().iter();

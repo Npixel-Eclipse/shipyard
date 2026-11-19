@@ -1,7 +1,7 @@
 //! Tracking filters, `Not`, `Optional` and `Or` consumed in every way.
 
 use super::ways::every_way;
-use shipyard::advanced::Mut;
+use shipyard::SafeMut;
 use shipyard::iter::OneOfTwo;
 use shipyard::*;
 
@@ -57,7 +57,7 @@ fn world() -> (World, Vec<EntityId>) {
     (&mut world.borrow::<ViewMut<Tracked>>().unwrap())
         .get(e[1])
         .unwrap()
-        .0 += 10;
+        .modify(|value| value.0 += 10);
 
     (world, e)
 }
@@ -331,7 +331,7 @@ fn nested_mut() {
         tracked,
     ): (
         (&mut A, &Small),
-        Mut<Tracked>
+        SafeMut<Tracked>
     )| (
         a.0, small.0, tracked.0
     ));
