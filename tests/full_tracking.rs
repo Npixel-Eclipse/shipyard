@@ -84,7 +84,10 @@ fn chunk_boundaries_regroup_and_remove() {
         world.clear_all_inserted_and_modified();
         world.run(|_: View<Tracked>| {});
         for &i in &[0, 63, 64, 65, 2048, 4096, 4098] {
-            world.get::<&mut Tracked>(ids[i]).unwrap().0 += 1;
+            world
+                .get::<&mut Tracked>(ids[i])
+                .unwrap()
+                .modify(|t| t.0 += 1);
             world.add_component(ids[i], Other);
         }
         check(&world);
@@ -112,7 +115,9 @@ fn dense_whole_mark_and_late_writes() {
     {
         let mut tracked = world.borrow::<ViewMut<Tracked>>().unwrap();
         let values: Vec<_> = (&mut tracked).iter().take(65).collect();
-        values.into_par_iter().for_each(|mut t| t.0 += 1);
+        values
+            .into_par_iter()
+            .for_each(|mut t| t.modify(|t| t.0 += 1));
     }
     check(&world);
     assert_eq!(
@@ -128,12 +133,17 @@ fn dense_whole_mark_and_late_writes() {
     world.run(|_: View<Tracked>| {});
     {
         let mut tracked = world.borrow::<ViewMut<Tracked>>().unwrap();
-        (&mut tracked).iter().for_each(|mut t| t.0 += 1);
+        (&mut tracked)
+            .iter()
+            .for_each(|mut t| t.modify(|t| t.0 += 1));
     }
     check(&world);
     world.clear_all_modified();
     world.run(|_: View<Tracked>| {});
-    world.get::<&mut Tracked>(ids[4098]).unwrap().0 += 1;
+    world
+        .get::<&mut Tracked>(ids[4098])
+        .unwrap()
+        .modify(|t| t.0 += 1);
     for i in 0..130 {
         world.add_entity(Tracked(i));
     }
@@ -150,11 +160,14 @@ fn dense_and_sparse_filtered_mutable_iteration() {
         world.clear_all_inserted_and_modified();
         world.run(|_: View<Tracked>| {});
         for &id in ids.iter().step_by(step) {
-            world.get::<&mut Tracked>(id).unwrap().0 += 1;
+            world.get::<&mut Tracked>(id).unwrap().modify(|t| t.0 += 1);
         }
         check(&world);
         let mut tracked = world.borrow::<ViewMut<Tracked>>().unwrap();
-        tracked.modified_mut().par_iter().for_each(|mut t| t.0 += 1);
+        tracked
+            .modified_mut()
+            .par_iter()
+            .for_each(|mut t| t.modify(|t| t.0 += 1));
         drop(tracked);
         check(&world);
     }
@@ -171,7 +184,7 @@ fn forced_small_driver_negated_and_empty_filters() {
     let mut tracked = world.borrow::<ViewMut<Tracked>>().unwrap();
     assert_eq!((&ids[..1], tracked.modified()).iter().count(), 0);
     assert_eq!((!tracked.modified()).iter().count(), ids.len());
-    (&mut tracked).get(ids[4098]).unwrap().0 += 1;
+    (&mut tracked).get(ids[4098]).unwrap().modify(|t| t.0 += 1);
     let reversed: Vec<_> = ids.iter().rev().copied().collect();
     assert_eq!(
         (&reversed[..], tracked.modified())
@@ -202,13 +215,15 @@ fn captain_becoming_sailor_keeps_late_writes() {
             match mode {
                 0 => (&mut tracked, &other)
                     .iter()
-                    .for_each(|(mut t, _)| t.0 += 1),
+                    .for_each(|(mut t, _)| t.modify(|t| t.0 += 1)),
                 1 => (&mut tracked, &other)
                     .par_iter()
-                    .for_each(|(mut t, _)| t.0 += 1),
+                    .for_each(|(mut t, _)| t.modify(|t| t.0 += 1)),
                 _ => {
                     let items: Vec<_> = (&mut tracked, &other).iter().collect();
-                    items.into_par_iter().for_each(|(mut t, _)| t.0 += 1);
+                    items
+                        .into_par_iter()
+                        .for_each(|(mut t, _)| t.modify(|t| t.0 += 1));
                 }
             }
         }

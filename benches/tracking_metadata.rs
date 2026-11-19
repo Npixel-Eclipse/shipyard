@@ -27,20 +27,22 @@ fn bench(c: &mut Criterion) {
         .collect();
     bench_view(c, &world, "get", |v| {
         for &id in &ids {
-            (&mut *v).get(black_box(id)).unwrap().0 += 1;
+            (&mut *v).get(black_box(id)).unwrap().modify(|t| t.0 += 1);
         }
     });
-    bench_view(c, &world, "iter", |v| v.iter().for_each(|mut t| t.0 += 1));
+    bench_view(c, &world, "iter", |v| {
+        v.iter().for_each(|mut t| t.modify(|t| t.0 += 1))
+    });
     bench_view(c, &world, "repeat", |v| {
         v.iter().for_each(|mut t| {
             for _ in 0..8 {
-                black_box(&mut t).0 += 1;
+                black_box(&mut t).modify(|t| t.0 += 1);
             }
         })
     });
     bench_view(c, &world, "sparse", |v| {
         for &id in ids.iter().step_by(64) {
-            (&mut *v).get(black_box(id)).unwrap().0 += 1;
+            (&mut *v).get(black_box(id)).unwrap().modify(|t| t.0 += 1);
         }
     });
     bench_view(c, &world, "read_only", |v| {
@@ -51,30 +53,30 @@ fn bench(c: &mut Criterion) {
     bench_view(c, &world, "first", |v| {
         v.iter().enumerate().for_each(|(index, mut t)| {
             if index % 64 == 0 {
-                t.0 += 1;
+                t.modify(|t| t.0 += 1);
             }
         })
     });
     bench_view(c, &world, "last", |v| {
         v.iter().enumerate().for_each(|(index, mut t)| {
             if index % 64 == 63 {
-                t.0 += 1;
+                t.modify(|t| t.0 += 1);
             }
         })
     });
     bench_view(c, &world, "for_loop", |v| {
         for mut t in v.iter() {
-            t.0 += 1;
+            t.modify(|t| t.0 += 1);
         }
     });
     bench_view(c, &world, "next_one", |v| {
         if let Some(mut t) = v.iter().next() {
-            t.0 += 1;
+            t.modify(|t| t.0 += 1);
         }
     });
     bench_view(c, &world, "next_64", |v| {
         for mut t in v.iter().take(64) {
-            t.0 += 1;
+            t.modify(|t| t.0 += 1);
         }
     });
     bench_view(c, &world, "next_read", |v| {
@@ -85,7 +87,7 @@ fn bench(c: &mut Criterion) {
     bench_view(c, &world, "with_id", |v| {
         v.iter()
             .with_id()
-            .for_each(|(id, mut t)| t.0 += id.index() + 1)
+            .for_each(|(id, mut t)| t.modify(|t| t.0 += id.index() + 1))
     });
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(16)
@@ -97,7 +99,7 @@ fn bench(c: &mut Criterion) {
                 let start = Instant::now();
                 for _ in 0..iterations {
                     let mut v = world.borrow::<ViewMut<Tracked>>().unwrap();
-                    (&mut v).par_iter().for_each(|mut t| t.0 += 1);
+                    (&mut v).par_iter().for_each(|mut t| t.modify(|t| t.0 += 1));
                 }
                 start.elapsed()
             })
