@@ -3,20 +3,21 @@ use crate::borrow::{NonSend, NonSendSync, NonSync};
 use crate::component::Component;
 use crate::entity_id::EntityId;
 use crate::memory_usage::StorageMemoryUsage;
-use crate::sparse_set::{sparse_array::SparseArray, SparseSet, BUCKET_SIZE};
-use crate::storage::{SBoxBuilder, Storage, StorageId};
+use crate::sparse_set::{Groups, SparseSet, sparse_array::SparseArray};
+use crate::storage::{ReorderParts, SBoxBuilder, Storage, StorageId};
 use crate::tracking::TrackingTimestamp;
+use core::ops::Range;
 
 impl<T: Component + Sync> Storage for NonSend<SparseSet<T>> {
     #[inline]
     fn delete(&mut self, entity: EntityId, current: TrackingTimestamp) {
-        self.dyn_delete(entity, current);
+        self.strip_delete(entity, current);
     }
     #[inline]
     fn clear(&mut self, current: TrackingTimestamp) {
         self.private_clear(current);
     }
-    fn sparse_array(&self) -> Option<&SparseArray<EntityId, BUCKET_SIZE>> {
+    fn sparse_array(&self) -> Option<&SparseArray> {
         Some(&self.sparse)
     }
     fn memory_usage(&self) -> Option<StorageMemoryUsage> {
@@ -24,6 +25,12 @@ impl<T: Component + Sync> Storage for NonSend<SparseSet<T>> {
     }
     fn is_empty(&self) -> bool {
         self.0.is_empty()
+    }
+    fn clear_all_inserted(&mut self, current: TrackingTimestamp) {
+        self.0.last_insert = current;
+    }
+    fn clear_all_modified(&mut self, current: TrackingTimestamp) {
+        self.0.last_modified = current;
     }
     fn clear_all_removed_and_deleted(&mut self) {
         self.deletion_data.clear();
@@ -47,7 +54,7 @@ impl<T: Component + Sync> Storage for NonSend<SparseSet<T>> {
         other_current: TrackingTimestamp,
     ) {
         if let Some(component) = self.dyn_remove(from, current) {
-            let other_sparse_set = other_all_storages.exclusive_storage_or_insert_non_send_mut(
+            let other_sparse_set = other_all_storages.exclusive_component_or_insert_non_send_mut(
                 StorageId::of::<NonSend<SparseSet<T>>>(),
                 || NonSend(SparseSet::<T>::new()),
             );
@@ -56,7 +63,7 @@ impl<T: Component + Sync> Storage for NonSend<SparseSet<T>> {
         }
     }
     fn try_clone(&self, other_current: TrackingTimestamp) -> Option<SBoxBuilder> {
-        self.clone.map(|clone| {
+        self.clone.as_ref().map(|clone| {
             let mut sparse_set = SparseSet::<T>::new();
 
             sparse_set.is_tracking_insertion = self.is_tracking_insertion;
@@ -66,7 +73,7 @@ impl<T: Component + Sync> Storage for NonSend<SparseSet<T>> {
 
             sparse_set.sparse = self.sparse.clone();
             sparse_set.dense = self.dense.clone();
-            sparse_set.data = self.data.iter().map(clone).collect();
+            sparse_set.data = (clone.clone_storage)(&self.data);
 
             if sparse_set.is_tracking_insertion {
                 sparse_set
@@ -90,29 +97,51 @@ impl<T: Component + Sync> Storage for NonSend<SparseSet<T>> {
         to: EntityId,
         other_current: TrackingTimestamp,
     ) {
-        if let Some(clone) = &self.clone {
-            if let Some(component) = self.private_get(from) {
-                let other_sparse_set = other_all_storages.exclusive_storage_or_insert_non_send_mut(
-                    StorageId::of::<NonSend<SparseSet<T>>>(),
-                    || NonSend(SparseSet::<T>::new()),
-                );
+        if let Some(clone) = &self.clone
+            && let Some(component) = self.private_get(from)
+        {
+            let other_sparse_set = other_all_storages.exclusive_component_or_insert_non_send_mut(
+                StorageId::of::<NonSend<SparseSet<T>>>(),
+                || NonSend(SparseSet::<T>::new()),
+            );
 
-                let _ = other_sparse_set.insert(to, (clone)(component), other_current);
-            }
+            let _ = other_sparse_set.insert(to, (clone.clone_component)(component), other_current);
         }
+    }
+
+    fn groups(&self) -> Option<&Groups> {
+        Some(&self.groups)
+    }
+
+    fn groups_mut(&mut self) -> Option<&mut Groups> {
+        Some(&mut self.groups)
+    }
+
+    fn dense(&self) -> Option<&[EntityId]> {
+        Some(&self.dense)
+    }
+
+    unsafe fn reorder_ids(&mut self) -> Option<ReorderParts<'_>> {
+        // SAFE: our caller upholds `Storage::reorder_ids`'s requirements, they're the same.
+        Some(unsafe { self.0.private_reorder_ids() })
+    }
+
+    unsafe fn repair_rows(&mut self, domain: Range<usize>) {
+        // SAFE: our caller upholds `Storage::repair_rows`'s requirements, they're the same.
+        unsafe { self.0.private_repair_rows(domain) }
     }
 }
 
 impl<T: Component + Send> Storage for NonSync<SparseSet<T>> {
     #[inline]
     fn delete(&mut self, entity: EntityId, current: TrackingTimestamp) {
-        self.dyn_delete(entity, current);
+        self.strip_delete(entity, current);
     }
     #[inline]
     fn clear(&mut self, current: TrackingTimestamp) {
         self.private_clear(current);
     }
-    fn sparse_array(&self) -> Option<&SparseArray<EntityId, BUCKET_SIZE>> {
+    fn sparse_array(&self) -> Option<&SparseArray> {
         Some(&self.sparse)
     }
     fn memory_usage(&self) -> Option<StorageMemoryUsage> {
@@ -120,6 +149,12 @@ impl<T: Component + Send> Storage for NonSync<SparseSet<T>> {
     }
     fn is_empty(&self) -> bool {
         self.0.is_empty()
+    }
+    fn clear_all_inserted(&mut self, current: TrackingTimestamp) {
+        self.0.last_insert = current;
+    }
+    fn clear_all_modified(&mut self, current: TrackingTimestamp) {
+        self.0.last_modified = current;
     }
     fn clear_all_removed_and_deleted(&mut self) {
         self.deletion_data.clear();
@@ -142,7 +177,7 @@ impl<T: Component + Send> Storage for NonSync<SparseSet<T>> {
         other_current: TrackingTimestamp,
     ) {
         if let Some(component) = self.dyn_remove(from, current) {
-            let other_sparse_set = other_all_storages.exclusive_storage_or_insert_non_sync_mut(
+            let other_sparse_set = other_all_storages.exclusive_component_or_insert_non_sync_mut(
                 StorageId::of::<NonSync<SparseSet<T>>>(),
                 || NonSync(SparseSet::<T>::new()),
             );
@@ -151,7 +186,7 @@ impl<T: Component + Send> Storage for NonSync<SparseSet<T>> {
         }
     }
     fn try_clone(&self, other_current: TrackingTimestamp) -> Option<SBoxBuilder> {
-        self.clone.map(|clone| {
+        self.clone.as_ref().map(|clone| {
             let mut sparse_set = SparseSet::<T>::new();
 
             sparse_set.is_tracking_insertion = self.is_tracking_insertion;
@@ -161,7 +196,7 @@ impl<T: Component + Send> Storage for NonSync<SparseSet<T>> {
 
             sparse_set.sparse = self.sparse.clone();
             sparse_set.dense = self.dense.clone();
-            sparse_set.data = self.data.iter().map(clone).collect();
+            sparse_set.data = (clone.clone_storage)(&self.data);
 
             if sparse_set.is_tracking_insertion {
                 sparse_set
@@ -185,29 +220,51 @@ impl<T: Component + Send> Storage for NonSync<SparseSet<T>> {
         to: EntityId,
         other_current: TrackingTimestamp,
     ) {
-        if let Some(clone) = &self.clone {
-            if let Some(component) = self.private_get(from) {
-                let other_sparse_set = other_all_storages.exclusive_storage_or_insert_non_sync_mut(
-                    StorageId::of::<NonSync<SparseSet<T>>>(),
-                    || NonSync(SparseSet::<T>::new()),
-                );
+        if let Some(clone) = &self.clone
+            && let Some(component) = self.private_get(from)
+        {
+            let other_sparse_set = other_all_storages.exclusive_component_or_insert_non_sync_mut(
+                StorageId::of::<NonSync<SparseSet<T>>>(),
+                || NonSync(SparseSet::<T>::new()),
+            );
 
-                let _ = other_sparse_set.insert(to, (clone)(component), other_current);
-            }
+            let _ = other_sparse_set.insert(to, (clone.clone_component)(component), other_current);
         }
+    }
+
+    fn groups(&self) -> Option<&Groups> {
+        Some(&self.groups)
+    }
+
+    fn groups_mut(&mut self) -> Option<&mut Groups> {
+        Some(&mut self.groups)
+    }
+
+    fn dense(&self) -> Option<&[EntityId]> {
+        Some(&self.dense)
+    }
+
+    unsafe fn reorder_ids(&mut self) -> Option<ReorderParts<'_>> {
+        // SAFE: our caller upholds `Storage::reorder_ids`'s requirements, they're the same.
+        Some(unsafe { self.0.private_reorder_ids() })
+    }
+
+    unsafe fn repair_rows(&mut self, domain: Range<usize>) {
+        // SAFE: our caller upholds `Storage::repair_rows`'s requirements, they're the same.
+        unsafe { self.0.private_repair_rows(domain) }
     }
 }
 
 impl<T: Component> Storage for NonSendSync<SparseSet<T>> {
     #[inline]
     fn delete(&mut self, entity: EntityId, current: TrackingTimestamp) {
-        self.dyn_delete(entity, current);
+        self.strip_delete(entity, current);
     }
     #[inline]
     fn clear(&mut self, current: TrackingTimestamp) {
         self.private_clear(current);
     }
-    fn sparse_array(&self) -> Option<&SparseArray<EntityId, BUCKET_SIZE>> {
+    fn sparse_array(&self) -> Option<&SparseArray> {
         Some(&self.sparse)
     }
     fn memory_usage(&self) -> Option<StorageMemoryUsage> {
@@ -215,6 +272,12 @@ impl<T: Component> Storage for NonSendSync<SparseSet<T>> {
     }
     fn is_empty(&self) -> bool {
         self.0.is_empty()
+    }
+    fn clear_all_inserted(&mut self, current: TrackingTimestamp) {
+        self.0.last_insert = current;
+    }
+    fn clear_all_modified(&mut self, current: TrackingTimestamp) {
+        self.0.last_modified = current;
     }
     fn clear_all_removed_and_deleted(&mut self) {
         self.deletion_data.clear();
@@ -238,7 +301,7 @@ impl<T: Component> Storage for NonSendSync<SparseSet<T>> {
     ) {
         if let Some(component) = self.dyn_remove(from, current) {
             let other_sparse_set = other_all_storages
-                .exclusive_storage_or_insert_non_send_sync_mut(
+                .exclusive_component_or_insert_non_send_sync_mut(
                     StorageId::of::<NonSendSync<SparseSet<T>>>(),
                     || NonSendSync(SparseSet::<T>::new()),
                 );
@@ -248,7 +311,7 @@ impl<T: Component> Storage for NonSendSync<SparseSet<T>> {
     }
 
     fn try_clone(&self, other_current: TrackingTimestamp) -> Option<SBoxBuilder> {
-        self.clone.map(|clone| {
+        self.clone.as_ref().map(|clone| {
             let mut sparse_set = SparseSet::<T>::new();
 
             sparse_set.is_tracking_insertion = self.is_tracking_insertion;
@@ -258,7 +321,7 @@ impl<T: Component> Storage for NonSendSync<SparseSet<T>> {
 
             sparse_set.sparse = self.sparse.clone();
             sparse_set.dense = self.dense.clone();
-            sparse_set.data = self.data.iter().map(clone).collect();
+            sparse_set.data = (clone.clone_storage)(&self.data);
 
             if sparse_set.is_tracking_insertion {
                 sparse_set
@@ -282,16 +345,38 @@ impl<T: Component> Storage for NonSendSync<SparseSet<T>> {
         to: EntityId,
         other_current: TrackingTimestamp,
     ) {
-        if let Some(clone) = &self.clone {
-            if let Some(component) = self.private_get(from) {
-                let other_sparse_set = other_all_storages
-                    .exclusive_storage_or_insert_non_send_sync_mut(
-                        StorageId::of::<NonSendSync<SparseSet<T>>>(),
-                        || NonSendSync(SparseSet::<T>::new()),
-                    );
+        if let Some(clone) = &self.clone
+            && let Some(component) = self.private_get(from)
+        {
+            let other_sparse_set = other_all_storages
+                .exclusive_component_or_insert_non_send_sync_mut(
+                    StorageId::of::<NonSendSync<SparseSet<T>>>(),
+                    || NonSendSync(SparseSet::<T>::new()),
+                );
 
-                let _ = other_sparse_set.insert(to, (clone)(component), other_current);
-            }
+            let _ = other_sparse_set.insert(to, (clone.clone_component)(component), other_current);
         }
+    }
+
+    fn groups(&self) -> Option<&Groups> {
+        Some(&self.groups)
+    }
+
+    fn groups_mut(&mut self) -> Option<&mut Groups> {
+        Some(&mut self.groups)
+    }
+
+    fn dense(&self) -> Option<&[EntityId]> {
+        Some(&self.dense)
+    }
+
+    unsafe fn reorder_ids(&mut self) -> Option<ReorderParts<'_>> {
+        // SAFE: our caller upholds `Storage::reorder_ids`'s requirements, they're the same.
+        Some(unsafe { self.0.private_reorder_ids() })
+    }
+
+    unsafe fn repair_rows(&mut self, domain: Range<usize>) {
+        // SAFE: our caller upholds `Storage::repair_rows`'s requirements, they're the same.
+        unsafe { self.0.private_repair_rows(domain) }
     }
 }

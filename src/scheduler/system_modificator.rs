@@ -2,6 +2,7 @@ use crate::borrow::{BorrowInfo, WorldBorrow};
 use crate::component::{Component, Unique};
 use crate::error;
 use crate::scheduler::into_workload_run_if::IntoRunIf;
+use crate::scheduler::system::RunIf;
 use crate::scheduler::{AsLabel, IntoWorkloadSystem, WorkloadSystem};
 use crate::sparse_set::SparseSet;
 use crate::storage::StorageId;
@@ -10,9 +11,18 @@ use crate::views::AllStoragesViewMut;
 use alloc::boxed::Box;
 use core::ops::Not;
 
-/// Modifies a system.
+/// Allows to set if and when a systems runs.
 pub trait SystemModificator<B, R> {
     /// Only run the system if the function evaluates to `true`.
+    ///
+    /// The condition runs right before its system, on the same thread, every time the workload reaches it.\
+    /// When it returns `false`, the system is skipped and the rest of the workload still runs.
+    ///
+    /// ### Scheduling
+    ///
+    /// A condition and its system are placed together, as if the system borrowed what the condition borrows.\
+    /// A condition borrowing `AllStorages`, or a storage that isn't `Send`/`Sync`, keeps its system on the
+    /// calling thread, even when the system alone could run on any thread.
     fn run_if<RunB, Run: IntoRunIf<RunB>>(self, run_if: Run) -> WorkloadSystem;
     /// Only run the system if the `T` storage is empty.
     ///
@@ -44,7 +54,7 @@ pub trait SystemModificator<B, R> {
         use crate::all_storages::CustomStorageAccess;
 
         let run_if = move |all_storages: AllStoragesViewMut<'_>| match all_storages
-            .custom_storage_by_id(storage_id)
+            .custom_storage_by_id(&storage_id)
         {
             Ok(storage) => storage.is_empty(),
             Err(error::GetStorage::MissingStorage { .. }) => true,
@@ -54,6 +64,8 @@ pub trait SystemModificator<B, R> {
         self.run_if(run_if)
     }
     /// Do not run the system if the function evaluates to `true`.
+    ///
+    /// The condition runs and is scheduled like a [`run_if`](SystemModificator::run_if) condition.
     fn skip_if<RunB, Run: IntoRunIf<RunB>>(self, run_if: Run) -> WorkloadSystem;
     /// Do not run the system if the `T` storage is empty.
     ///
@@ -85,7 +97,7 @@ pub trait SystemModificator<B, R> {
         use crate::all_storages::CustomStorageAccess;
 
         let should_skip = move |all_storages: AllStoragesViewMut<'_>| match all_storages
-            .custom_storage_by_id(storage_id)
+            .custom_storage_by_id(&storage_id)
         {
             Ok(storage) => storage.is_empty(),
             Err(error::GetStorage::MissingStorage { .. }) => true,
@@ -119,97 +131,114 @@ pub trait SystemModificator<B, R> {
 
 pub struct Nothing;
 
-impl<F> SystemModificator<Nothing, ()> for F
-where
-    F: 'static + Send + Sync + Fn(),
-{
-    #[track_caller]
-    fn run_if<RunB, Run: IntoRunIf<RunB>>(self, run_if: Run) -> WorkloadSystem {
-        let mut system = self.into_workload_system().unwrap();
-        let run_if = run_if.into_workload_run_if().unwrap();
+/// Implements `SystemModificator` for functions without views returning `$ret`.
+///
+/// It's limited to the return types systems use,
+/// a generic return type would include functions returning a `Workload`, which use `WorkloadModificator`.
+macro_rules! impl_system_modificator_without_views {
+    ($ret: ty) => {
+        // With `()`, the bound reads `Fn() -> ()`.
+        #[allow(clippy::unused_unit)]
+        impl<F> SystemModificator<Nothing, $ret> for F
+        where
+            F: 'static + Send + Sync + Fn() -> $ret,
+        {
+            #[track_caller]
+            fn run_if<RunB, Run: IntoRunIf<RunB>>(self, run_if: Run) -> WorkloadSystem {
+                let system = self.into_workload_system().unwrap();
 
-        system.run_if = Some(run_if.system_fn);
+                system.run_if(run_if)
+            }
+            #[track_caller]
+            fn skip_if<RunB, Run: IntoRunIf<RunB>>(self, run_if: Run) -> WorkloadSystem {
+                let mut run_if = run_if.into_workload_run_if().unwrap();
 
-        system
-    }
-    #[track_caller]
-    fn skip_if<RunB, Run: IntoRunIf<RunB>>(self, run_if: Run) -> WorkloadSystem {
-        let mut run_if = run_if.into_workload_run_if().unwrap();
+                run_if.system_fn = Box::new(move |world| (run_if.system_fn)(world).map(Not::not));
 
-        run_if.system_fn = Box::new(move |world| (run_if.system_fn)(world).map(Not::not));
+                self.run_if(run_if)
+            }
+            #[track_caller]
+            fn before_all<T>(self, other: impl AsLabel<T>) -> WorkloadSystem {
+                let mut system = self.into_workload_system().unwrap();
 
-        self.run_if(run_if)
-    }
-    #[track_caller]
-    fn before_all<T>(self, other: impl AsLabel<T>) -> WorkloadSystem {
-        let mut system = self.into_workload_system().unwrap();
+                system.before_all.add(other);
 
-        system.before_all.add(other);
+                system
+            }
+            #[track_caller]
+            fn after_all<T>(self, other: impl AsLabel<T>) -> WorkloadSystem {
+                let mut system = self.into_workload_system().unwrap();
 
-        system
-    }
-    #[track_caller]
-    fn after_all<T>(self, other: impl AsLabel<T>) -> WorkloadSystem {
-        let mut system = self.into_workload_system().unwrap();
+                system.after_all.add(other);
 
-        system.after_all.add(other);
+                system
+            }
+            #[track_caller]
+            fn display_name<T>(self, name: impl AsLabel<T>) -> WorkloadSystem {
+                let mut system = self.into_workload_system().unwrap();
 
-        system
-    }
-    #[track_caller]
-    fn display_name<T>(self, name: impl AsLabel<T>) -> WorkloadSystem {
-        let mut system = self.into_workload_system().unwrap();
+                system.display_name = name.as_label();
 
-        system.display_name = name.as_label();
+                system
+            }
+            #[track_caller]
+            fn tag<T>(self, tag: impl AsLabel<T>) -> WorkloadSystem {
+                let mut system = self.into_workload_system().unwrap();
 
-        system
-    }
-    #[track_caller]
-    fn tag<T>(self, tag: impl AsLabel<T>) -> WorkloadSystem {
-        let mut system = self.into_workload_system().unwrap();
+                system.tags.push(tag.as_label());
 
-        system.tags.push(tag.as_label());
+                system
+            }
+            #[track_caller]
+            fn require_in_workload<T>(self, other: impl AsLabel<T>) -> WorkloadSystem {
+                let mut system = self.into_workload_system().unwrap();
 
-        system
-    }
-    #[track_caller]
-    fn require_in_workload<T>(self, other: impl AsLabel<T>) -> WorkloadSystem {
-        let mut system = self.into_workload_system().unwrap();
+                system.require_in_workload.add(other);
 
-        system.require_in_workload.add(other);
+                system
+            }
+            #[track_caller]
+            fn require_before<T>(self, other: impl AsLabel<T>) -> WorkloadSystem {
+                let mut system = self.into_workload_system().unwrap();
 
-        system
-    }
-    #[track_caller]
-    fn require_before<T>(self, other: impl AsLabel<T>) -> WorkloadSystem {
-        let mut system = self.into_workload_system().unwrap();
+                system.require_before.add(other);
 
-        system.require_before.add(other);
+                system
+            }
+            #[track_caller]
+            fn require_after<T>(self, other: impl AsLabel<T>) -> WorkloadSystem {
+                let mut system = self.into_workload_system().unwrap();
 
-        system
-    }
-    #[track_caller]
-    fn require_after<T>(self, other: impl AsLabel<T>) -> WorkloadSystem {
-        let mut system = self.into_workload_system().unwrap();
+                system.require_after.add(other);
 
-        system.require_after.add(other);
-
-        system
-    }
+                system
+            }
+        }
+    };
 }
+
+impl_system_modificator_without_views!(());
+impl_system_modificator_without_views!(Result<(), error::SystemError>);
 
 impl SystemModificator<WorkloadSystem, ()> for WorkloadSystem {
     #[track_caller]
     fn run_if<RunB, Run: IntoRunIf<RunB>>(mut self, run_if: Run) -> WorkloadSystem {
-        let run_if = run_if.into_workload_run_if().unwrap();
+        let RunIf {
+            system_fn,
+            mut borrow_constraints,
+            mut tracking_to_enable,
+        } = run_if.into_workload_run_if().unwrap();
 
         self.run_if = if let Some(prev_run_if) = self.run_if {
             Some(Box::new(move |world| {
-                Ok((prev_run_if)(world)? && (run_if.system_fn)(world)?)
+                Ok((prev_run_if)(world)? && (system_fn)(world)?)
             }))
         } else {
-            Some(run_if.system_fn)
+            Some(system_fn)
         };
+        self.run_if_borrow_constraints
+            .append(&mut borrow_constraints);
+        self.tracking_to_enable.append(&mut tracking_to_enable);
 
         self
     }
@@ -275,12 +304,9 @@ macro_rules! impl_into_workload_system {
 
             #[track_caller]
             fn run_if<RunB, Run: IntoRunIf<RunB>>(self, run_if: Run) -> WorkloadSystem {
-                let mut system = IntoWorkloadSystem::<($($type,)+), Ret>::into_workload_system(self).unwrap();
-                let run_if = run_if.into_workload_run_if().unwrap();
+                let system = IntoWorkloadSystem::<($($type,)+), Ret>::into_workload_system(self).unwrap();
 
-                system.run_if = Some(run_if.system_fn);
-
-                system
+                system.run_if(run_if)
             }
             #[track_caller]
             fn skip_if<RunB, Run: IntoRunIf<RunB>>(self, run_if: Run) -> WorkloadSystem {

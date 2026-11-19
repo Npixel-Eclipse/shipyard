@@ -8,15 +8,16 @@ use crate::sparse_set::SparseSet;
 use crate::storage::StorageId;
 use crate::track;
 use crate::tracking::{
-    DeletionTracking, Inserted, InsertedOrModified, InsertionTracking, ModificationTracking,
-    Modified, RemovalTracking, Tracking, TrackingTimestamp,
+    DeletionTracking, Inserted, InsertedOrModified, InsertionOrModificationTracking,
+    InsertionTracking, ModificationTracking, Modified, RemovalTracking, Tracking,
+    TrackingTimestamp,
 };
 use core::fmt;
 use core::marker::PhantomData;
 use core::ops::Deref;
 
 /// Shared view over a component storage.
-pub struct View<'a, T: Component, Track: Tracking = <T as Component>::Tracking> {
+pub struct View<'a, T: Component, Track = <T as Component>::Tracking> {
     pub(crate) sparse_set: &'a SparseSet<T>,
     pub(crate) all_borrow: Option<SharedBorrow<'a>>,
     pub(crate) borrow: SharedBorrow<'a>,
@@ -143,7 +144,7 @@ impl<'a, T: Component> View<'a, T, track::Untracked> {
     /// Creates a new [`View`] for custom [`SparseSet`] storage.
     ///
     /// ```
-    /// use shipyard::{track, Component, sparse_set::SparseSet, StorageId, View, World};
+    /// use shipyard::{track, advanced::StorageId, Component, sparse_set::SparseSet, View, World};
     ///
     /// struct ScriptingComponent(Vec<u8>);
     /// impl Component for ScriptingComponent {
@@ -159,11 +160,11 @@ impl<'a, T: Component> View<'a, T, track::Untracked> {
     ///
     /// let all_storages = world.all_storages().unwrap();
     /// let scripting_storage =
-    ///     View::<ScriptingComponent>::new_for_custom_storage(StorageId::Custom(0), all_storages)
+    ///     View::<ScriptingComponent>::new_for_custom_storage(&StorageId::Custom(0), all_storages)
     ///         .unwrap();
     /// ```
     pub fn new_for_custom_storage(
-        storage_id: StorageId,
+        storage_id: &StorageId,
         all_storages: ARef<'a, &'a AllStorages>,
     ) -> Result<Self, error::CustomStorageView> {
         use crate::all_storages::CustomStorageAccess;
@@ -240,16 +241,17 @@ where
 
 impl<Track, T: Component> View<'_, T, Track>
 where
-    Track: InsertionTracking + ModificationTracking,
+    Track: InsertionOrModificationTracking,
 {
-    /// Wraps this view to be able to iterate *inserted* and *modified* components.
+    /// Wraps this view to iterate components with an enabled insertion or modification event.\
+    /// When both kinds are enabled, each matching component appears once.
     #[inline]
     pub fn inserted_or_modified(&self) -> InsertedOrModified<&Self> {
         InsertedOrModified(self)
     }
 
     /// Inside a workload returns `true` if `entity`'s component was inserted or modified since the last run of this system.\
-    /// Outside workloads returns `true` if `entity`'s component was inserted or modified since the last call to [`clear_all_inserted`](crate::ViewMut::clear_all_inserted).\
+    /// Outside workloads returns `true` if `entity`'s component was inserted or modified since the last clear call.\
     /// Returns `false` if `entity` does not have a component in this storage.
     #[inline]
     pub fn is_inserted_or_modified(&self, entity: EntityId) -> bool {

@@ -10,7 +10,7 @@
 //! - **serde1** &mdash; adds (de)serialization support with [serde](https://github.com/serde-rs/serde)
 //! - **std** *(default)* &mdash; lets Shipyard use the standard library
 //! - **thread_local** &mdash; adds methods and types required to work with `!Send` and `!Sync` components
-//! - **tracing** &mdash; reports workload and system execution
+//! - **tracing** &mdash; reports workload, system and regroup execution, and the steps a workload skips
 
 #![warn(elided_lifetimes_in_paths)]
 #![warn(trivial_casts)]
@@ -30,6 +30,8 @@
 #![allow(clippy::needless_lifetimes)]
 // The question mark operator can damage performance
 #![allow(clippy::question_mark)]
+// Map can throw the compiler off
+#![allow(clippy::manual_map)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![warn(missing_docs)]
 #![no_std]
@@ -42,12 +44,13 @@ extern crate alloc;
 mod add_component;
 mod add_distinct_component;
 mod add_entity;
-#[allow(clippy::empty_docs)]
+/// Items that do not need to be present in lib.rs.
 ///
-// We can't allow(missing_docs) without allowing it for everything inside
+/// Don't feel bad for importing items from this module.\
+/// It's only to keep lib.rs simple and not scare people.
+pub mod advanced;
+/// Contains all storages present in the [`World`].
 pub mod all_storages;
-/// Inner lock similar to `RwLock`.
-pub mod atomic_refcell;
 /// Allows access to helper types needed to implement [`Borrow`](borrow::Borrow).
 pub mod borrow;
 mod component;
@@ -57,18 +60,10 @@ mod entities;
 mod entity_id;
 pub mod error;
 mod get;
-/// Trait bound for [`AllStorages::get`] and [`World::get`].
-pub mod get_component;
-/// Trait bound for [`AllStorages::get_unique`] and [`World::get_unique`].
-pub mod get_unique;
-#[allow(clippy::empty_docs)]
-///
-// We can't allow(missing_docs) without allowing it for everything inside
+/// Contains all items related to storage iteration.
 pub mod iter;
-#[allow(clippy::empty_docs)]
-///
-// We can't allow(missing_docs) without allowing it for everything inside
-pub mod iter_component;
+/// Trait used as bound for [`World::iter`](crate::world::World::iter) and [`AllStorages::iter`](crate::all_storages::AllStorages::iter).
+mod iter_component;
 /// Module describing internal memory usage.
 pub mod memory_usage;
 mod r#mut;
@@ -77,81 +72,50 @@ mod optional;
 mod or;
 mod public_transport;
 mod remove;
-#[allow(clippy::empty_docs)]
-///
-// We can't allow(missing_docs) without allowing it for everything inside
-pub mod reserve;
-#[allow(clippy::empty_docs)]
-///
-// We can't allow(missing_docs) without allowing it for everything inside
+/// Stores systems from all workloads and their scheduling.
 pub mod scheduler;
+mod scratch;
 mod seal;
 /// Default component storage.
 pub mod sparse_set;
 mod storage;
-#[allow(clippy::empty_docs)]
-///
-// We can't allow(missing_docs) without allowing it for everything inside
-pub mod system;
 /// Module related to storage tracking, like insertion or modification.
 pub mod track;
-#[allow(clippy::empty_docs)]
-///
-// We can't allow(missing_docs) without allowing it for everything inside
-pub mod tracking;
-mod type_id;
 mod unique;
-mod views;
-#[allow(clippy::empty_docs)]
-///
-// We can't allow(missing_docs) without allowing it for everything inside
+/// Contains all view types used to borrow components in a [`World`].
+pub mod views;
+/// Contains all data this library will manipulate.
 pub mod world;
 
-#[cfg(feature = "thread_local")]
-#[cfg_attr(docsrs, doc(cfg(feature = "thread_local")))]
-pub use crate::borrow::NonSend;
-#[cfg(feature = "thread_local")]
-#[cfg_attr(docsrs, doc(cfg(feature = "thread_local")))]
-pub use crate::borrow::NonSendSync;
-#[cfg(feature = "thread_local")]
-#[cfg_attr(docsrs, doc(cfg(feature = "thread_local")))]
-pub use crate::borrow::NonSync;
 pub use add_component::AddComponent;
 pub use add_distinct_component::AddDistinctComponent;
 pub use add_entity::AddEntity;
 #[doc(inline)]
-pub use all_storages::AllStorages;
 pub use component::{Component, Unique};
 pub use contains::Contains;
 pub use delete::Delete;
-pub use entities::Entities;
 pub use entity_id::EntityId;
 pub use get::Get;
 #[doc(inline)]
 pub use iter::IntoIter;
-pub use not::Not;
-pub use optional::Optional;
-pub use or::{OneOfTwo, Or};
-pub use r#mut::Mut;
 pub use remove::Remove;
 #[doc(inline)]
-pub use scheduler::{
-    IntoWorkload, IntoWorkloadSystem, IntoWorkloadTrySystem, SystemModificator, Workload,
-    WorkloadModificator,
-};
+pub use scheduler::{IntoSequentialWorkload, IntoWorkload, Workload};
 #[cfg(feature = "proc")]
 pub use shipyard_proc::{Borrow, BorrowInfo, Component, IntoIter, Label, Unique, WorldBorrow};
-pub use storage::{SBoxBuilder, Storage, StorageId};
-#[doc(inline)]
-pub use tracking::{Inserted, InsertedOrModified, Modified};
 pub use unique::UniqueStorage;
+#[doc(inline)]
 pub use views::{
-    AllStoragesView, AllStoragesViewMut, EntitiesView, EntitiesViewMut, UniqueOrDefaultView,
-    UniqueOrDefaultViewMut, UniqueOrInitView, UniqueOrInitViewMut, UniqueView, UniqueViewMut, View,
-    ViewMut,
+    AllStoragesView, AllStoragesViewMut, EntitiesView, EntitiesViewMut, UniqueView, UniqueViewMut,
+    View, ViewMut,
 };
 #[doc(inline)]
 pub use world::World;
+
+// These modules are exported in the advanced module.
+//
+// There is no simpler way to only re-export modules in advanced.
+use advanced::{atomic_refcell, get_component, get_unique, reserve, system, tracking};
 
 type ShipHashMap<K, V> = hashbrown::HashMap<K, V>;
 #[doc(hidden)]

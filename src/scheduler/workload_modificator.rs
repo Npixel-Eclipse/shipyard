@@ -1,22 +1,30 @@
 use crate::component::{Component, Unique};
 use crate::error;
+use crate::scheduler::AsLabel;
 use crate::scheduler::into_workload_run_if::IntoWorkloadRunIf;
 use crate::scheduler::label::WorkloadLabel;
 use crate::scheduler::workload::Workload;
-use crate::scheduler::AsLabel;
 use crate::sparse_set::SparseSet;
 use crate::storage::StorageId;
-use crate::type_id::TypeId;
 use crate::unique::UniqueStorage;
 use crate::views::AllStoragesViewMut;
 use crate::world::World;
 use alloc::boxed::Box;
+use core::any::TypeId;
 use core::any::type_name;
 use core::ops::Not;
 
-/// Modifies a workload.
+/// Allows to set if and when a workload runs.
 pub trait WorkloadModificator {
     /// Only run the workload if the function evaluates to `true`.
+    ///
+    /// When the workload runs by itself, the condition runs once on the calling thread, before any of
+    /// its systems.
+    ///
+    /// When the workload is part of another one, its condition is added to each of its systems' conditions
+    /// instead. It then runs right before each system and is scheduled with it, see
+    /// [`SystemModificator::run_if`](crate::scheduler::SystemModificator::run_if).
+    /// A condition that has to run on the calling thread keeps every system of the workload there.
     fn run_if<RunB, Run: IntoWorkloadRunIf<RunB>>(self, run_if: Run) -> Workload;
     /// Only run the workload if the `T` storage is empty.
     ///
@@ -48,7 +56,7 @@ pub trait WorkloadModificator {
         use crate::all_storages::CustomStorageAccess;
 
         let run_if = move |all_storages: AllStoragesViewMut<'_>| match all_storages
-            .custom_storage_by_id(storage_id)
+            .custom_storage_by_id(&storage_id)
         {
             Ok(storage) => storage.is_empty(),
             Err(error::GetStorage::MissingStorage { .. }) => true,
@@ -58,6 +66,8 @@ pub trait WorkloadModificator {
         self.run_if(run_if)
     }
     /// Do not run the workload if the function evaluates to `true`.
+    ///
+    /// The condition runs and is scheduled like a [`run_if`](WorkloadModificator::run_if) condition.
     fn skip_if<RunB, Run: IntoWorkloadRunIf<RunB>>(self, run_if: Run) -> Workload;
     /// Do not run the workload if the `T` storage is empty.
     ///
@@ -89,7 +99,7 @@ pub trait WorkloadModificator {
         use crate::all_storages::CustomStorageAccess;
 
         let should_skip = move |all_storages: AllStoragesViewMut<'_>| match all_storages
-            .custom_storage_by_id(storage_id)
+            .custom_storage_by_id(&storage_id)
         {
             Ok(storage) => storage.is_empty(),
             Err(error::GetStorage::MissingStorage { .. }) => true,
@@ -113,12 +123,9 @@ impl WorkloadModificator for Workload {
     fn run_if<RunB, Run: IntoWorkloadRunIf<RunB>>(mut self, run_if: Run) -> Workload {
         let run_if = run_if.into_workload_run_if().unwrap();
 
-        self.run_if = if let Some(prev_run_if) = self.run_if.take() {
-            Some(Box::new(move |world: &World| {
-                Ok(prev_run_if.run(world)? && run_if.run(world)?)
-            }))
-        } else {
-            Some(run_if)
+        self.run_if = match self.run_if.take() {
+            Some(prev_run_if) => Some(prev_run_if.and(run_if)),
+            None => Some(run_if),
         };
 
         self
@@ -135,7 +142,7 @@ impl WorkloadModificator for Workload {
         use crate::all_storages::CustomStorageAccess;
 
         let run_if = move |all_storages: AllStoragesViewMut<'_>| match all_storages
-            .custom_storage_by_id(storage_id)
+            .custom_storage_by_id(&storage_id)
         {
             Ok(storage) => storage.is_empty(),
             Err(error::GetStorage::MissingStorage { .. }) => true,
@@ -147,14 +154,12 @@ impl WorkloadModificator for Workload {
     fn skip_if<RunB, Run: IntoWorkloadRunIf<RunB>>(mut self, should_skip: Run) -> Self {
         let mut should_skip = should_skip.into_workload_run_if().unwrap();
 
-        should_skip = Box::new(move |world: &World| should_skip.run(world).map(Not::not));
+        let skip = should_skip.system_fn;
+        should_skip.system_fn = Box::new(move |world: &World| skip.run(world).map(Not::not));
 
-        self.run_if = if let Some(prev_run_if) = self.run_if.take() {
-            Some(Box::new(move |world: &World| {
-                Ok(prev_run_if.run(world)? && should_skip.run(world)?)
-            }))
-        } else {
-            Some(should_skip)
+        self.run_if = match self.run_if.take() {
+            Some(prev_run_if) => Some(prev_run_if.and(should_skip)),
+            None => Some(should_skip),
         };
 
         self
@@ -171,7 +176,7 @@ impl WorkloadModificator for Workload {
         use crate::all_storages::CustomStorageAccess;
 
         let should_skip = move |all_storages: AllStoragesViewMut<'_>| match all_storages
-            .custom_storage_by_id(storage_id)
+            .custom_storage_by_id(&storage_id)
         {
             Ok(storage) => storage.is_empty(),
             Err(error::GetStorage::MissingStorage { .. }) => true,

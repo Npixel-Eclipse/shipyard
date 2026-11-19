@@ -7,6 +7,7 @@ use syn::{
 
 pub(crate) fn expand_into_iter(
     name: syn::Ident,
+    vis: syn::Visibility,
     mut generics: syn::Generics,
     data: syn::Data,
     attrs: Vec<syn::Attribute>,
@@ -140,6 +141,7 @@ pub(crate) fn expand_into_iter(
 
                         let tracking_ty = tys.next();
 
+                        let field_vis = field.vis.clone();
                         let field_name = field.ident.clone().unwrap();
                         let trimmed_field_name = field_name_override.unwrap_or_else(|| {
                             let field_name = field.ident.as_ref().unwrap();
@@ -155,7 +157,7 @@ pub(crate) fn expand_into_iter(
                                 field_name.span(),
                             )
                         });
-                        let item_ty = parse_quote!(#trimmed_field_name: <<&'__tmp shipyard::View<'__view, #comp_ty, #tracking_ty> as shipyard::iter::IntoShiperator>::Shiperator as shipyard::iter::ShiperatorOutput>::Out);
+                        let item_ty = parse_quote!(#field_vis #trimmed_field_name: <<&'__tmp shipyard::View<'__view, #comp_ty, #tracking_ty> as shipyard::iter::IntoShiperator>::Shiperator as shipyard::iter::Shiperator>::Out);
                         item_fields.push(item_ty);
 
                         let abstract_view_ty =
@@ -193,6 +195,7 @@ pub(crate) fn expand_into_iter(
 
                         let tracking_ty = tys.next();
 
+                        let field_vis = field.vis.clone();
                         let field_name = field.ident.clone().unwrap();
                         let trimmed_field_name = field_name_override.unwrap_or_else(|| {
                             let field_name = field.ident.as_ref().unwrap();
@@ -208,7 +211,7 @@ pub(crate) fn expand_into_iter(
                                 field_name.span(),
                             )
                         });
-                        let item_ty = parse_quote!(#trimmed_field_name: <<&'__tmp mut shipyard::ViewMut<'__view, #comp_ty, #tracking_ty> as shipyard::iter::IntoShiperator>::Shiperator as shipyard::iter::ShiperatorOutput>::Out);
+                        let item_ty = parse_quote!(#field_vis #trimmed_field_name: <<&'__tmp mut shipyard::ViewMut<'__view, #comp_ty, #tracking_ty> as shipyard::iter::IntoShiperator>::Shiperator as shipyard::iter::Shiperator>::Out);
                         item_fields.push(item_ty);
 
                         let abtract_view_ty = parse_quote!(&'__tmp mut shipyard::ViewMut<'__view, #comp_ty, #tracking_ty>);
@@ -236,24 +239,26 @@ pub(crate) fn expand_into_iter(
             };
 
             Ok(quote!(
-                struct #item_name #iter_generics {
+                #vis struct #item_name #iter_generics {
                     #item_fields
                 }
 
                 #[derive(Clone)]
-                struct #iter_name #iter_generics (
+                #vis struct #iter_name #iter_generics (
                     <(#iter_fields) as shipyard::iter::IntoShiperator>::Shiperator
                 );
 
-                impl #iter_impl_generics shipyard::iter::IntoShiperator for &'__tmp #r#mut #name #ty_generics #where_clause {
+                // SAFE: We return the tuple of our views' results, only wrapping its Shiperator in
+                // a newtype forwarding every method. The tuple's implementation upholds the contract.
+                unsafe impl #iter_impl_generics shipyard::iter::IntoShiperator for &'__tmp #r#mut #name #ty_generics #where_clause {
                     type Shiperator = #iter_name #iter_ty_generics;
 
                     #[inline]
                     #[track_caller]
-                    fn into_shiperator(self, storage_ids: &mut shipyard::ShipHashSet<shipyard::StorageId>) -> (Self::Shiperator, usize, shipyard::iter::RawEntityIdAccess) {
-                        let (shiperator, end, entities) = (#iter_fields_access).into_shiperator(storage_ids);
+                    fn into_shiperator(self) -> (Self::Shiperator, shipyard::iter::RawEntityIdAccess, shipyard::iter::ConstructionMetadata) {
+                        let (shiperator, entities, metadata) = (#iter_fields_access).into_shiperator();
 
-                        (#iter_name (shiperator), end, entities)
+                        (#iter_name (shiperator), entities, metadata)
                     }
 
                     #[inline]
@@ -267,21 +272,24 @@ pub(crate) fn expand_into_iter(
                     }
                 }
 
-                impl #iter_impl_generics shipyard::iter::ShiperatorOutput for #iter_name #iter_ty_generics #iter_where_clause {
+                impl #iter_impl_generics shipyard::iter::Shiperator for #iter_name #iter_ty_generics #iter_where_clause {
                     type Out = #item_name #iter_ty_generics;
-                }
+                    type Index = <<(#iter_fields) as shipyard::iter::IntoShiperator>::Shiperator as shipyard::iter::Shiperator>::Index;
 
-                impl #iter_impl_generics shipyard::iter::ShiperatorCaptain for #iter_name #iter_ty_generics #iter_where_clause {
                     #[inline]
-                    unsafe fn get_captain_data(&self, index: usize) -> Self::Out {
-                        let (#iter_fields_variable) = self.0.get_captain_data(index);
-
-                        #item_name { #iter_fields_variable }
+                    fn node_count() -> usize {
+                        <<(#iter_fields) as shipyard::iter::IntoShiperator>::Shiperator as shipyard::iter::Shiperator>::node_count()
                     }
 
                     #[inline]
-                    fn next_slice(&mut self) {
-                        self.0.next_slice()
+                    fn describe(&self, active: bool, row: &mut shipyard::iter::SegmentRow) {
+                        self.0.describe(active, row)
+                    }
+
+                    #[inline]
+                    unsafe fn enter_segment(&mut self, entry: &mut shipyard::iter::SegmentEntry<'_>) {
+                        // SAFE: We're a newtype around our inner Shiperator, our caller's guarantees are its own.
+                        unsafe { self.0.enter_segment(entry) }
                     }
 
                     #[inline]
@@ -295,29 +303,50 @@ pub(crate) fn expand_into_iter(
                     }
 
                     #[inline]
-                    fn unpick(&mut self) {
-                        self.0.unpick()
+                    unsafe fn captain_indices_of(&self, entities: &shipyard::iter::EntityCursor, index: usize) -> Option<Self::Index> {
+                        // SAFE: We're a newtype around our inner Shiperator, our caller's guarantees are its own.
+                        unsafe { self.0.captain_indices_of(entities, index) }
                     }
-                }
-
-                impl #iter_impl_generics shipyard::iter::ShiperatorSailor for #iter_name #iter_ty_generics #iter_where_clause {
-                    type Index = <<(#iter_fields) as shipyard::iter::IntoShiperator>::Shiperator as shipyard::iter::ShiperatorSailor>::Index;
 
                     #[inline]
-                    unsafe fn get_sailor_data(&self, index: Self::Index) -> Self::Out {
-                        let (#iter_fields_variable) = self.0.get_sailor_data(index);
+                    fn sailor_indices_of(&self, entity_id: shipyard::EntityId) -> Option<Self::Index> {
+                        self.0.sailor_indices_of(entity_id)
+                    }
+
+                    #[inline]
+                    fn storage_index(index: &Self::Index) -> Option<usize> {
+                        <<(#iter_fields) as shipyard::iter::IntoShiperator>::Shiperator as shipyard::iter::Shiperator>::storage_index(index)
+                    }
+
+                    #[inline]
+                    unsafe fn get_data(&self, index: Self::Index) -> Self::Out {
+                        // SAFE: Our indices are our inner Shiperator's, our caller's guarantees are its own.
+                        let (#iter_fields_variable) = unsafe { self.0.get_data(index) };
 
                         #item_name { #iter_fields_variable }
                     }
 
                     #[inline]
-                    fn indices_of(&self, entity_id: shipyard::EntityId, index: usize) -> Option<Self::Index> {
-                        self.0.indices_of(entity_id, index)
-                    }
-
-                    #[inline]
-                    fn index_from_usize(index: usize) -> Self::Index {
-                        <<(#iter_fields) as shipyard::iter::IntoShiperator>::Shiperator as shipyard::iter::ShiperatorSailor>::index_from_usize(index)
+                    unsafe fn fold_segment<const __WITH_ID: bool, __B, __F>(
+                        &self,
+                        entities: &mut shipyard::iter::EntityCursor,
+                        init: __B,
+                        mut __f: __F,
+                    ) -> __B
+                    where
+                        __F: FnMut(__B, Option<shipyard::EntityId>, Self::Out) -> __B,
+                    {
+                        // The adapter owns `__f` with `move`, a borrowed callback can keep bulk loops from vectorizing.
+                        // SAFE: We're a newtype around our inner Shiperator, our caller's guarantees are its own.
+                        unsafe {
+                            self.0.fold_segment::<__WITH_ID, __B, _>(
+                                entities,
+                                init,
+                                move |__acc, __entity_id, (#iter_fields_variable)| {
+                                    __f(__acc, __entity_id, #item_name { #iter_fields_variable })
+                                },
+                            )
+                        }
                     }
                 }
             ))
@@ -385,13 +414,15 @@ pub(crate) fn expand_into_iter(
             };
 
             Ok(quote!(
-                impl #iter_impl_generics shipyard::iter::IntoShiperator for &'__tmp #r#mut #name #ty_generics #where_clause {
+                // SAFE: We return the tuple of our views' results unchanged,
+                // the tuple's implementation upholds the contract.
+                unsafe impl #iter_impl_generics shipyard::iter::IntoShiperator for &'__tmp #r#mut #name #ty_generics #where_clause {
                     type Shiperator = <#tuple_ty as shipyard::iter::IntoShiperator>::Shiperator;
 
                     #[inline]
                     #[track_caller]
-                    fn into_shiperator(self, storage_ids: &mut shipyard::ShipHashSet<shipyard::StorageId>) -> (Self::Shiperator, usize, shipyard::iter::RawEntityIdAccess) {
-                        #tuple.into_shiperator(storage_ids)
+                    fn into_shiperator(self) -> (Self::Shiperator, shipyard::iter::RawEntityIdAccess, shipyard::iter::ConstructionMetadata) {
+                        #tuple.into_shiperator()
                     }
 
                     fn can_captain() -> bool {

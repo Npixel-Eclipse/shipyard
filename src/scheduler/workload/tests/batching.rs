@@ -1,0 +1,957 @@
+use super::*;
+
+#[test]
+fn single_immutable() {
+    fn system1(_: View<'_, Usize>) {}
+
+    let world = World::new_for_test();
+
+    Workload::new("System1")
+        .with_system(system1)
+        .add_to_world(&world)
+        .unwrap();
+
+    let scheduler = world.scheduler.borrow_mut().unwrap();
+    let label: Box<dyn Label> = Box::new("System1");
+    assert_eq!(scheduler.systems.len(), 1);
+    assert_eq!(scheduler.workloads.len(), 1);
+    assert_eq!(
+        scheduler.workloads.get(&label),
+        Some(&Batches {
+            parallel: vec![(None, vec![System(0)])],
+            parallel_run_if: Vec::new(),
+            parallel_occurrences: Vec::new(),
+            sequential: vec![System(0)],
+            sequential_run_if: Vec::new(),
+            sequential_occurrences: Vec::new(),
+            workload_run_if: None,
+            systems_run_if: Vec::new(),
+            regroups: Vec::new(),
+        })
+    );
+    assert_eq!(&scheduler.default, &label);
+}
+
+#[test]
+fn single_mutable() {
+    fn system1(_: ViewMut<'_, Usize>) {}
+
+    let world = World::new_for_test();
+
+    Workload::new("System1")
+        .with_system(system1)
+        .add_to_world(&world)
+        .unwrap();
+
+    let scheduler = world.scheduler.borrow_mut().unwrap();
+    let label: Box<dyn Label> = Box::new("System1");
+    assert_eq!(scheduler.systems.len(), 1);
+    assert_eq!(scheduler.workloads.len(), 1);
+    assert_eq!(
+        scheduler.workloads.get(&label),
+        Some(&Batches {
+            parallel: vec![(None, vec![System(0)])],
+            parallel_run_if: Vec::new(),
+            parallel_occurrences: Vec::new(),
+            sequential: vec![System(0)],
+            sequential_run_if: Vec::new(),
+            sequential_occurrences: Vec::new(),
+            workload_run_if: None,
+            systems_run_if: Vec::new(),
+            regroups: Vec::new(),
+        })
+    );
+    assert_eq!(&scheduler.default, &label);
+}
+
+#[test]
+fn multiple_immutable() {
+    fn system1(_: View<'_, Usize>) {}
+    fn system2(_: View<'_, Usize>) {}
+
+    let world = World::new_for_test();
+
+    Workload::new("Systems")
+        .with_system(system1)
+        .with_system(system2.into_workload_system().unwrap())
+        .add_to_world(&world)
+        .unwrap();
+
+    let scheduler = world.scheduler.borrow_mut().unwrap();
+    let label: Box<dyn Label> = Box::new("Systems");
+    assert_eq!(scheduler.systems.len(), 2);
+    assert_eq!(scheduler.workloads.len(), 1);
+    assert_eq!(
+        scheduler.workloads.get(&label),
+        Some(&Batches {
+            parallel: vec![(None, vec![System(0), System(1)])],
+            parallel_run_if: Vec::new(),
+            parallel_occurrences: Vec::new(),
+            sequential: vec![System(0), System(1)],
+            sequential_run_if: Vec::new(),
+            sequential_occurrences: Vec::new(),
+            workload_run_if: None,
+            systems_run_if: Vec::new(),
+            regroups: Vec::new(),
+        })
+    );
+    assert_eq!(&scheduler.default, &label);
+}
+
+#[test]
+fn multiple_mutable() {
+    fn system1(_: ViewMut<'_, Usize>) {}
+    fn system2(_: ViewMut<'_, Usize>) {}
+
+    let world = World::new_for_test();
+
+    Workload::new("Systems")
+        .with_system(system1)
+        .with_system(system2)
+        .add_to_world(&world)
+        .unwrap();
+
+    let scheduler = world.scheduler.borrow_mut().unwrap();
+    let label: Box<dyn Label> = Box::new("Systems");
+    assert_eq!(scheduler.systems.len(), 2);
+    assert_eq!(scheduler.workloads.len(), 1);
+    assert_eq!(
+        scheduler.workloads.get(&label),
+        Some(&Batches {
+            parallel: vec![(None, vec![System(0)]), (None, vec![System(1)])],
+            parallel_run_if: Vec::new(),
+            parallel_occurrences: Vec::new(),
+            sequential: vec![System(0), System(1)],
+            sequential_run_if: Vec::new(),
+            sequential_occurrences: Vec::new(),
+            workload_run_if: None,
+            systems_run_if: Vec::new(),
+            regroups: Vec::new(),
+        })
+    );
+    assert_eq!(&scheduler.default, &label);
+}
+
+#[test]
+fn multiple_mixed() {
+    fn system1(_: ViewMut<'_, Usize>) {}
+    fn system2(_: View<'_, Usize>) {}
+
+    let world = World::new_for_test();
+
+    Workload::new("Systems")
+        .with_system(system1)
+        .with_system(system2)
+        .add_to_world(&world)
+        .unwrap();
+
+    let scheduler = world.scheduler.borrow_mut().unwrap();
+    let label: Box<dyn Label> = Box::new("Systems");
+    assert_eq!(scheduler.systems.len(), 2);
+    assert_eq!(scheduler.workloads.len(), 1);
+    assert_eq!(
+        scheduler.workloads.get(&label),
+        Some(&Batches {
+            parallel: vec![(None, vec![System(0)]), (None, vec![System(1)])],
+            parallel_run_if: Vec::new(),
+            parallel_occurrences: Vec::new(),
+            sequential: vec![System(0), System(1)],
+            sequential_run_if: Vec::new(),
+            sequential_occurrences: Vec::new(),
+            workload_run_if: None,
+            systems_run_if: Vec::new(),
+            regroups: Vec::new(),
+        })
+    );
+    assert_eq!(&scheduler.default, &label);
+
+    let world = World::new_for_test();
+
+    Workload::new("Systems")
+        .with_system(system2)
+        .with_system(system1)
+        .add_to_world(&world)
+        .unwrap();
+
+    let scheduler = world.scheduler.borrow_mut().unwrap();
+    let label: Box<dyn Label> = Box::new("Systems");
+    assert_eq!(scheduler.systems.len(), 2);
+    assert_eq!(scheduler.workloads.len(), 1);
+    assert_eq!(
+        scheduler.workloads.get(&label),
+        Some(&Batches {
+            parallel: vec![(None, vec![System(0)]), (None, vec![System(1)])],
+            parallel_run_if: Vec::new(),
+            parallel_occurrences: Vec::new(),
+            sequential: vec![System(0), System(1)],
+            sequential_run_if: Vec::new(),
+            sequential_occurrences: Vec::new(),
+            workload_run_if: None,
+            systems_run_if: Vec::new(),
+            regroups: Vec::new(),
+        })
+    );
+    assert_eq!(&scheduler.default, &label);
+}
+
+#[test]
+fn append_optimizes_batches() {
+    fn system_a1(_: View<'_, Usize>, _: ViewMut<'_, U32>) {}
+    fn system_a2(_: View<'_, Usize>, _: ViewMut<'_, U32>) {}
+    fn system_b1(_: View<'_, Usize>) {}
+
+    let world = World::new_for_test();
+
+    let mut group_a = Workload::new("Group A")
+        .with_system(system_a1)
+        .with_system(system_a2);
+
+    let mut group_b = Workload::new("Group B").with_system(system_b1);
+
+    Workload::new("Combined")
+        .append(&mut group_a)
+        .append(&mut group_b)
+        .add_to_world(&world)
+        .unwrap();
+
+    let scheduler = world.scheduler.borrow_mut().unwrap();
+    let label: Box<dyn Label> = Box::new("Combined");
+    assert_eq!(scheduler.systems.len(), 3);
+    assert_eq!(scheduler.workloads.len(), 1);
+    assert_eq!(
+        scheduler.workloads.get(&label),
+        Some(&Batches {
+            parallel: vec![(None, vec![System(0)]), (None, vec![System(1), System(2)])],
+            parallel_run_if: Vec::new(),
+            parallel_occurrences: Vec::new(),
+            sequential: vec![System(0), System(1), System(2)],
+            sequential_run_if: Vec::new(),
+            sequential_occurrences: Vec::new(),
+            workload_run_if: None,
+            systems_run_if: Vec::new(),
+            regroups: Vec::new(),
+        })
+    );
+    assert_eq!(&scheduler.default, &label);
+}
+
+#[test]
+fn all_storages() {
+    fn system1(_: View<'_, Usize>) {}
+    fn system2(_: AllStoragesViewMut<'_>) {}
+
+    let world = World::new_for_test();
+
+    Workload::new("Systems")
+        .with_system(system2)
+        .add_to_world(&world)
+        .unwrap();
+
+    let scheduler = world.scheduler.borrow_mut().unwrap();
+    let label: Box<dyn Label> = Box::new("Systems");
+    assert_eq!(scheduler.systems.len(), 1);
+    assert_eq!(scheduler.workloads.len(), 1);
+    assert_eq!(
+        scheduler.workloads.get(&label),
+        Some(&Batches {
+            parallel: vec![(Some(System(0)), Vec::new())],
+            parallel_run_if: Vec::new(),
+            parallel_occurrences: Vec::new(),
+            sequential: vec![System(0)],
+            sequential_run_if: Vec::new(),
+            sequential_occurrences: Vec::new(),
+            workload_run_if: None,
+            systems_run_if: Vec::new(),
+            regroups: Vec::new(),
+        })
+    );
+    assert_eq!(&scheduler.default, &label);
+
+    let world = World::new_for_test();
+
+    Workload::new("Systems")
+        .with_system(system2)
+        .with_system(system2)
+        .add_to_world(&world)
+        .unwrap();
+
+    let scheduler = world.scheduler.borrow_mut().unwrap();
+    assert_eq!(scheduler.systems.len(), 1);
+    assert_eq!(scheduler.workloads.len(), 1);
+    assert_eq!(
+        scheduler.workloads.get(&label),
+        Some(&Batches {
+            parallel: vec![(Some(System(0)), Vec::new()), (Some(System(0)), Vec::new())],
+            parallel_run_if: Vec::new(),
+            parallel_occurrences: Vec::new(),
+            sequential: vec![System(0), System(0)],
+            sequential_run_if: Vec::new(),
+            sequential_occurrences: Vec::new(),
+            workload_run_if: None,
+            systems_run_if: Vec::new(),
+            regroups: Vec::new(),
+        })
+    );
+    assert_eq!(&scheduler.default, &label);
+
+    let world = World::new_for_test();
+
+    Workload::new("Systems")
+        .with_system(system1)
+        .with_system(system2)
+        .add_to_world(&world)
+        .unwrap();
+
+    let scheduler = world.scheduler.borrow_mut().unwrap();
+    let label: Box<dyn Label> = Box::new("Systems");
+    assert_eq!(scheduler.systems.len(), 2);
+    assert_eq!(scheduler.workloads.len(), 1);
+    assert_eq!(
+        scheduler.workloads.get(&label),
+        Some(&Batches {
+            parallel: vec![(None, vec![System(0)]), (Some(System(1)), Vec::new())],
+            parallel_run_if: Vec::new(),
+            parallel_occurrences: Vec::new(),
+            sequential: vec![System(0), System(1)],
+            sequential_run_if: Vec::new(),
+            sequential_occurrences: Vec::new(),
+            workload_run_if: None,
+            systems_run_if: Vec::new(),
+            regroups: Vec::new(),
+        })
+    );
+    assert_eq!(&scheduler.default, &label);
+
+    let world = World::new_for_test();
+
+    Workload::new("Systems")
+        .with_system(system2)
+        .with_system(system1)
+        .add_to_world(&world)
+        .unwrap();
+
+    let scheduler = world.scheduler.borrow_mut().unwrap();
+    assert_eq!(scheduler.systems.len(), 2);
+    assert_eq!(scheduler.workloads.len(), 1);
+    assert_eq!(
+        scheduler.workloads.get(&label),
+        Some(&Batches {
+            parallel: vec![(Some(System(0)), Vec::new()), (None, vec![System(1)])],
+            parallel_run_if: Vec::new(),
+            parallel_occurrences: Vec::new(),
+            sequential: vec![System(0), System(1)],
+            sequential_run_if: Vec::new(),
+            sequential_occurrences: Vec::new(),
+            workload_run_if: None,
+            systems_run_if: Vec::new(),
+            regroups: Vec::new(),
+        })
+    );
+    assert_eq!(&scheduler.default, &label);
+}
+
+#[cfg(feature = "thread_local")]
+#[test]
+fn non_send() {
+    use crate::borrow::NonSend;
+
+    #[allow(unused)]
+    struct NotSend(*const ());
+    unsafe impl Sync for NotSend {}
+    impl Component for NotSend {
+        type Tracking = crate::track::Untracked;
+    }
+
+    fn sys1(_: NonSend<View<'_, NotSend>>) {}
+    fn sys2(_: NonSend<ViewMut<'_, NotSend>>) {}
+    fn sys3(_: View<'_, Usize>) {}
+    fn sys4(_: ViewMut<'_, Usize>) {}
+
+    let world = World::new_for_test();
+
+    Workload::new("Test")
+        .with_system(sys1)
+        .with_system(sys1)
+        .add_to_world(&world)
+        .unwrap();
+
+    let scheduler = world.scheduler.borrow_mut().unwrap();
+    let label: Box<dyn Label> = Box::new("Test");
+    assert_eq!(scheduler.systems.len(), 1);
+    assert_eq!(scheduler.workloads.len(), 1);
+    assert_eq!(
+        scheduler.workloads.get(&label),
+        Some(&Batches {
+            parallel: vec![(None, vec![System(0), System(0)])],
+            parallel_run_if: Vec::new(),
+            parallel_occurrences: Vec::new(),
+            sequential: vec![System(0), System(0)],
+            sequential_run_if: Vec::new(),
+            sequential_occurrences: Vec::new(),
+            workload_run_if: None,
+            systems_run_if: Vec::new(),
+            regroups: Vec::new(),
+        })
+    );
+    assert_eq!(&scheduler.default, &label);
+    assert!(
+        scheduler.workloads_info[&label].batches_info[0].systems.1[0]
+            .conflict
+            .is_none()
+    );
+
+    let world = World::new_for_test();
+
+    Workload::new("Test")
+        .with_system(sys1)
+        .with_system(sys2)
+        .add_to_world(&world)
+        .unwrap();
+
+    let scheduler = world.scheduler.borrow_mut().unwrap();
+    assert_eq!(scheduler.systems.len(), 2);
+    assert_eq!(scheduler.workloads.len(), 1);
+    assert_eq!(
+        scheduler.workloads.get(&label),
+        Some(&Batches {
+            parallel: vec![(None, vec![System(0)]), (Some(System(1)), Vec::new())],
+            parallel_run_if: Vec::new(),
+            parallel_occurrences: Vec::new(),
+            sequential: vec![System(0), System(1)],
+            sequential_run_if: Vec::new(),
+            sequential_occurrences: Vec::new(),
+            workload_run_if: None,
+            systems_run_if: Vec::new(),
+            regroups: Vec::new(),
+        })
+    );
+    assert_eq!(&scheduler.default, &label);
+
+    let world = World::new_for_test();
+
+    Workload::new("Test")
+        .with_system(sys2)
+        .with_system(sys1)
+        .add_to_world(&world)
+        .unwrap();
+
+    let scheduler = world.scheduler.borrow_mut().unwrap();
+    assert_eq!(scheduler.systems.len(), 2);
+    assert_eq!(scheduler.workloads.len(), 1);
+    assert_eq!(
+        scheduler.workloads.get(&label),
+        Some(&Batches {
+            parallel: vec![(Some(System(0)), Vec::new()), (None, vec![System(1)])],
+            parallel_run_if: Vec::new(),
+            parallel_occurrences: Vec::new(),
+            sequential: vec![System(0), System(1)],
+            sequential_run_if: Vec::new(),
+            sequential_occurrences: Vec::new(),
+            workload_run_if: None,
+            systems_run_if: Vec::new(),
+            regroups: Vec::new(),
+        })
+    );
+    assert_eq!(&scheduler.default, &label);
+
+    let world = World::new_for_test();
+
+    Workload::new("Test")
+        .with_system(sys1)
+        .with_system(sys3)
+        .add_to_world(&world)
+        .unwrap();
+
+    let scheduler = world.scheduler.borrow_mut().unwrap();
+    assert_eq!(scheduler.systems.len(), 2);
+    assert_eq!(scheduler.workloads.len(), 1);
+    assert_eq!(
+        scheduler.workloads.get(&label),
+        Some(&Batches {
+            parallel: vec![(None, vec![System(0), System(1)])],
+            parallel_run_if: Vec::new(),
+            parallel_occurrences: Vec::new(),
+            sequential: vec![System(0), System(1)],
+            sequential_run_if: Vec::new(),
+            sequential_occurrences: Vec::new(),
+            workload_run_if: None,
+            systems_run_if: Vec::new(),
+            regroups: Vec::new(),
+        })
+    );
+    assert_eq!(&scheduler.default, &label);
+    assert!(
+        scheduler.workloads_info[&label].batches_info[0].systems.1[0]
+            .conflict
+            .is_none()
+    );
+
+    let world = World::new_for_test();
+
+    Workload::new("Test")
+        .with_system(sys1)
+        .with_system(sys4)
+        .add_to_world(&world)
+        .unwrap();
+
+    let scheduler = world.scheduler.borrow_mut().unwrap();
+    assert_eq!(scheduler.systems.len(), 2);
+    assert_eq!(scheduler.workloads.len(), 1);
+    assert_eq!(
+        scheduler.workloads.get(&label),
+        Some(&Batches {
+            parallel: vec![(None, vec![System(0), System(1)])],
+            parallel_run_if: Vec::new(),
+            parallel_occurrences: Vec::new(),
+            sequential: vec![System(0), System(1)],
+            sequential_run_if: Vec::new(),
+            sequential_occurrences: Vec::new(),
+            workload_run_if: None,
+            systems_run_if: Vec::new(),
+            regroups: Vec::new(),
+        })
+    );
+    assert_eq!(&scheduler.default, &label);
+}
+
+#[test]
+fn unique_and_non_unique() {
+    fn system1(_: ViewMut<'_, Usize>) {}
+    fn system2(_: UniqueViewMut<'_, Usize>) {}
+
+    let world = World::new_for_test();
+
+    Workload::new("Systems")
+        .with_system(system1)
+        .with_system(system2)
+        .add_to_world(&world)
+        .unwrap();
+
+    let scheduler = world.scheduler.borrow_mut().unwrap();
+    let label: Box<dyn Label> = Box::new("Systems");
+    assert_eq!(scheduler.systems.len(), 2);
+    assert_eq!(scheduler.workloads.len(), 1);
+    assert_eq!(
+        scheduler.workloads.get(&label),
+        Some(&Batches {
+            parallel: vec![(None, vec![System(0), System(1)])],
+            parallel_run_if: Vec::new(),
+            parallel_occurrences: Vec::new(),
+            sequential: vec![System(0), System(1)],
+            sequential_run_if: Vec::new(),
+            sequential_occurrences: Vec::new(),
+            workload_run_if: None,
+            systems_run_if: Vec::new(),
+            regroups: Vec::new(),
+        })
+    );
+    assert_eq!(&scheduler.default, &label);
+}
+
+#[test]
+fn empty_workload() {
+    let world = World::new_for_test();
+
+    Workload::new("Systems").add_to_world(&world).unwrap();
+
+    let scheduler = world.scheduler.borrow_mut().unwrap();
+    let label: Box<dyn Label> = Box::new("Systems");
+    assert_eq!(scheduler.systems.len(), 0);
+    assert_eq!(scheduler.workloads.len(), 1);
+    assert_eq!(
+        scheduler.workloads.get(&label),
+        Some(&Batches {
+            parallel: vec![],
+            parallel_run_if: Vec::new(),
+            parallel_occurrences: Vec::new(),
+            sequential: vec![],
+            sequential_run_if: Vec::new(),
+            sequential_occurrences: Vec::new(),
+            workload_run_if: None,
+            systems_run_if: Vec::new(),
+            regroups: Vec::new(),
+        })
+    );
+    assert_eq!(&scheduler.default, &label);
+}
+
+#[test]
+fn append_ensures_multiple_batches_can_be_optimized_over() {
+    fn sys_a1(_: ViewMut<'_, Usize>, _: ViewMut<'_, U32>) {}
+    fn sys_a2(_: View<'_, Usize>, _: ViewMut<'_, U32>) {}
+    fn sys_b1(_: View<'_, Usize>) {}
+    fn sys_c1(_: View<'_, U16>) {}
+
+    let world = World::new_for_test();
+
+    let mut group_a = Workload::new("Group A")
+        .with_system(sys_a1)
+        .with_system(sys_a2);
+    let mut group_b = Workload::new("Group B").with_system(sys_b1);
+    let mut group_c = Workload::new("Group C").with_system(sys_c1);
+
+    Workload::new("Combined")
+        .append(&mut group_a)
+        .append(&mut group_b)
+        .append(&mut group_c)
+        .add_to_world(&world)
+        .unwrap();
+
+    let scheduler = world.scheduler.borrow_mut().unwrap();
+    let label: Box<dyn Label> = Box::new("Combined");
+    assert_eq!(scheduler.systems.len(), 4);
+    assert_eq!(scheduler.workloads.len(), 1);
+    assert_eq!(
+        scheduler.workloads.get(&label),
+        Some(&Batches {
+            parallel: vec![
+                (None, vec![System(0)]),
+                (None, vec![System(1), System(2), System(3)])
+            ],
+            parallel_run_if: Vec::new(),
+            parallel_occurrences: Vec::new(),
+            sequential: vec![System(0), System(1), System(2), System(3)],
+            sequential_run_if: Vec::new(),
+            sequential_occurrences: Vec::new(),
+            workload_run_if: None,
+            systems_run_if: Vec::new(),
+            regroups: Vec::new(),
+        })
+    );
+    assert_eq!(&scheduler.default, &label);
+}
+
+#[test]
+fn with_system_return_type() {
+    Workload::new("").with_system(|| 0usize).build().unwrap();
+}
+
+/// Asserts that a system borrowing `T` exclusively and one borrowing `NonSend<T>` exclusively
+/// share a batch, since they are different storages.
+#[cfg(feature = "thread_local")]
+#[test]
+fn non_send_distinct_storage() {
+    use crate::borrow::NonSend;
+
+    fn sys1(_: ViewMut<'_, Usize>) {}
+    fn sys2(_: NonSend<ViewMut<'_, Usize>>) {}
+
+    let world = World::new_for_test();
+
+    Workload::new("Test")
+        .with_system(sys1)
+        .with_system(sys2)
+        .add_to_world(&world)
+        .unwrap();
+
+    let scheduler = world.scheduler.borrow_mut().unwrap();
+    let label: Box<dyn Label> = Box::new("Test");
+    assert_eq!(
+        scheduler.workloads.get(&label),
+        Some(&Batches {
+            parallel: vec![(Some(System(1)), vec![System(0)])],
+            parallel_run_if: Vec::new(),
+            parallel_occurrences: Vec::new(),
+            sequential: vec![System(0), System(1)],
+            sequential_run_if: Vec::new(),
+            sequential_occurrences: Vec::new(),
+            workload_run_if: None,
+            systems_run_if: Vec::new(),
+            regroups: Vec::new(),
+        })
+    );
+}
+
+/// Asserts that `Schedule` shows a workload's real batches by system name,
+/// counting a repeated system once per occurrence.
+///
+/// The world registers an unrelated system first, so callable indices don't start at zero
+/// and a name lookup by occurrence position would show the wrong systems.
+#[test]
+fn schedule_names() {
+    fn unrelated(_: View<'_, U16>) {}
+    fn write_usize(_: ViewMut<'_, Usize>) {}
+    fn read_u32(_: View<'_, U32>) {}
+
+    let world = World::new_for_test();
+    Workload::new("Unrelated")
+        .with_system(unrelated)
+        .add_to_world(&world)
+        .unwrap();
+
+    let workload = || {
+        Workload::new("Probe")
+            .with_system(write_usize)
+            .with_system(read_u32)
+            .with_system(write_usize)
+    };
+    workload().add_to_world(&world).unwrap();
+
+    let expected = Schedule {
+        parallel: vec![
+            vec!["write_usize".into(), "read_u32".into()],
+            vec!["write_usize".into()],
+        ],
+        sequential: vec![
+            "write_usize".into(),
+            "read_u32".into(),
+            "write_usize".into(),
+        ],
+    };
+    assert_eq!(Schedule::registered(&world, "Probe"), expected);
+    assert_eq!(Schedule::built(workload()), expected);
+    assert_eq!(expected.batch("read_u32"), 0);
+    assert_eq!(expected.count("write_usize"), (2, 2));
+}
+
+/// Asserts that a reader following both writers stays strictly after the second one,
+/// even though it borrows an unrelated storage.
+#[test]
+fn release_after_both() {
+    fn start() {}
+    fn write_x1(_: ViewMut<'_, Usize>) {}
+    fn write_x2(_: ViewMut<'_, Usize>) {}
+    fn read_y(_: View<'_, U32>) {}
+
+    let workload = Workload::new("")
+        .with_system(start)
+        .with_system(write_x1.after_all(start))
+        .with_system(write_x2.after_all(start))
+        .with_system(read_y.after_all(write_x1).after_all(write_x2));
+
+    let schedule = Schedule::built(workload);
+
+    assert_eq!(
+        schedule.parallel,
+        vec![
+            steps(&["start"]),
+            steps(&["write_x1"]),
+            steps(&["write_x2"]),
+            steps(&["read_y"]),
+        ]
+    );
+}
+
+/// Asserts that a diamond keeps its join strictly after both branches,
+/// and the branches share a batch since they borrow different storages.
+#[test]
+fn release_diamond() {
+    fn start() {}
+    fn left(_: ViewMut<'_, Usize>) {}
+    fn right(_: ViewMut<'_, U32>) {}
+    fn join(_: View<'_, U16>) {}
+
+    let workload = Workload::new("")
+        .with_system(start)
+        .with_system(left.after_all(start))
+        .with_system(right.after_all(start))
+        .with_system(join.after_all(left).after_all(right));
+
+    let schedule = Schedule::built(workload);
+
+    assert_eq!(
+        schedule.parallel,
+        vec![
+            steps(&["start"]),
+            steps(&["left", "right"]),
+            steps(&["join"]),
+        ]
+    );
+}
+
+/// Asserts that a barrier keeps a reader of an unrelated storage after the second writer,
+/// even though the reader only names the first writer.
+#[test]
+fn release_barrier() {
+    fn start() {}
+    fn write_x1(_: ViewMut<'_, Usize>) {}
+    fn write_x2(_: ViewMut<'_, Usize>) {}
+    fn read_y(_: View<'_, U32>) {}
+
+    let workload = Workload::new("")
+        .with_system(start)
+        .with_system(write_x1.after_all(start))
+        .with_system(write_x2.after_all(start))
+        .with_barrier()
+        .with_system(read_y.after_all(write_x1));
+
+    let schedule = Schedule::built(workload);
+
+    assert!(schedule.batch("read_y") > schedule.batch("write_x2"));
+}
+
+/// Asserts that a ready reader declared before the conflicting writers joins the first batch.
+#[test]
+fn ready_reader_first() {
+    fn start() {}
+    fn write_x1(_: ViewMut<'_, Usize>) {}
+    fn write_x2(_: ViewMut<'_, Usize>) {}
+    fn read_y(_: View<'_, U32>) {}
+
+    let workload = Workload::new("")
+        .with_system(start)
+        .with_system(read_y.after_all(start))
+        .with_system(write_x1.after_all(start))
+        .with_system(write_x2.after_all(start));
+
+    let schedule = Schedule::built(workload);
+
+    assert_eq!(
+        schedule.parallel,
+        vec![
+            steps(&["start"]),
+            steps(&["read_y", "write_x1"]),
+            steps(&["write_x2"]),
+        ]
+    );
+}
+
+/// Asserts that a ready reader declared between the conflicting writers joins the first batch.
+#[test]
+fn ready_reader_middle() {
+    fn start() {}
+    fn write_x1(_: ViewMut<'_, Usize>) {}
+    fn write_x2(_: ViewMut<'_, Usize>) {}
+    fn read_y(_: View<'_, U32>) {}
+
+    let workload = Workload::new("")
+        .with_system(start)
+        .with_system(write_x1.after_all(start))
+        .with_system(read_y.after_all(start))
+        .with_system(write_x2.after_all(start));
+
+    let schedule = Schedule::built(workload);
+
+    assert_eq!(
+        schedule.parallel,
+        vec![
+            steps(&["start"]),
+            steps(&["write_x1", "read_y"]),
+            steps(&["write_x2"]),
+        ]
+    );
+}
+
+/// Asserts that a ready reader of the writers' storage never shares a batch with either writer.
+#[test]
+fn ready_reader_conflicting() {
+    fn start() {}
+    fn write_x1(_: ViewMut<'_, Usize>) {}
+    fn write_x2(_: ViewMut<'_, Usize>) {}
+    fn read_x(_: View<'_, Usize>) {}
+
+    let workload = Workload::new("")
+        .with_system(start)
+        .with_system(write_x1.after_all(start))
+        .with_system(write_x2.after_all(start))
+        .with_system(read_x.after_all(start));
+
+    let schedule = Schedule::built(workload);
+
+    assert_ne!(schedule.batch("read_x"), schedule.batch("write_x1"));
+    assert_ne!(schedule.batch("read_x"), schedule.batch("write_x2"));
+}
+
+/// Asserts that a reader following the second writer stays strictly after it,
+/// even though it borrows an unrelated storage.
+#[test]
+fn ready_reader_after_second() {
+    fn start() {}
+    fn write_x1(_: ViewMut<'_, Usize>) {}
+    fn write_x2(_: ViewMut<'_, Usize>) {}
+    fn read_y(_: View<'_, U32>) {}
+
+    let workload = Workload::new("")
+        .with_system(start)
+        .with_system(write_x1.after_all(start))
+        .with_system(write_x2.after_all(start))
+        .with_system(read_y.after_all(write_x2));
+
+    let schedule = Schedule::built(workload);
+
+    assert!(schedule.batch("read_y") > schedule.batch("write_x2"));
+}
+
+/// Asserts that implicit ordering keeps a later unrelated reader after both writers
+/// in the sequential order, and never in an earlier batch than the second writer.
+///
+/// Without `after_all` the reader gets an `order_after` edge to `write_x2`: it may share its batch,
+/// but moving it next to `write_x1` would run it before its sequential predecessor.
+#[test]
+fn ready_reader_implicit() {
+    fn write_x1(_: ViewMut<'_, Usize>) {}
+    fn write_x2(_: ViewMut<'_, Usize>) {}
+    fn read_y(_: View<'_, U32>) {}
+
+    let workload = Workload::new("")
+        .with_system(write_x1)
+        .with_system(write_x2)
+        .with_system(read_y);
+
+    let schedule = Schedule::built(workload);
+
+    assert_eq!(
+        schedule.sequential,
+        steps(&["write_x1", "write_x2", "read_y"])
+    );
+    assert!(schedule.batch("read_y") >= schedule.batch("write_x2"));
+}
+
+/// Asserts that a reader waiting only on the first of two conflicting writers
+/// joins the second writer's batch.
+///
+/// The reader borrows an unrelated storage and has no edge to the second writer,
+/// so once the first writer's batch is done nothing keeps it out of the next one.
+#[test]
+fn release_after_writer() {
+    fn start() {}
+    fn write_x1(_: ViewMut<'_, Usize>) {}
+    fn write_x2(_: ViewMut<'_, Usize>) {}
+    fn read_y(_: View<'_, U32>) {}
+
+    let workload = Workload::new("")
+        .with_system(start)
+        .with_system(write_x1.after_all(start))
+        .with_system(write_x2.after_all(start))
+        .with_system(read_y.after_all(write_x1));
+
+    let schedule = Schedule::built(workload);
+
+    assert_eq!(
+        schedule.parallel,
+        vec![
+            steps(&["start"]),
+            steps(&["write_x1"]),
+            steps(&["write_x2", "read_y"]),
+        ]
+    );
+}
+
+/// Asserts that a reader ready alongside two conflicting writers joins the first writer's batch,
+/// rather than waiting for the second writer's.
+///
+/// All three only follow `start`, and the reader borrows an unrelated storage.
+#[test]
+fn ready_reader_last() {
+    fn start() {}
+    fn write_x1(_: ViewMut<'_, Usize>) {}
+    fn write_x2(_: ViewMut<'_, Usize>) {}
+    fn read_y(_: View<'_, U32>) {}
+
+    let workload = Workload::new("")
+        .with_system(start)
+        .with_system(write_x1.after_all(start))
+        .with_system(write_x2.after_all(start))
+        .with_system(read_y.after_all(start));
+
+    let schedule = Schedule::built(workload);
+
+    assert_eq!(
+        schedule.parallel,
+        vec![
+            steps(&["start"]),
+            steps(&["write_x1", "read_y"]),
+            steps(&["write_x2"]),
+        ]
+    );
+}

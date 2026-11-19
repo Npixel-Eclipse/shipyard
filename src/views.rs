@@ -1,3 +1,7 @@
+/// Serialization implementations for all view types.
+#[cfg(feature = "serde1")]
+pub mod serde;
+
 mod all_storages;
 mod entities;
 mod unique_or_default;

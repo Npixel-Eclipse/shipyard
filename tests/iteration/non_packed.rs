@@ -1,3 +1,5 @@
+use shipyard::advanced::StorageId;
+use shipyard::iter::OneOfTwo;
 use shipyard::sparse_set::SparseSet;
 use shipyard::*;
 
@@ -157,6 +159,7 @@ fn with_id() {
     assert_eq!(iter.next().unwrap(), (id2, (&U32(2), &I16(12))));
     assert_eq!(iter.next().unwrap(), (id4, (&U32(4), &I16(14))));
     assert!(iter.next().is_none());
+
     let mut iter = (&mut u32s, &mut i16s).iter().with_id();
     assert_eq!(
         iter.next().map(|(id, (x, y))| (id, (*x, *y))).unwrap(),
@@ -246,7 +249,6 @@ fn or() {
 
     let mut iter = (&u32s | &i16s, &usizes).iter();
     assert_eq!(iter.next().unwrap(), (OneOfTwo::One(&U32(4)), &USIZE(24)));
-    dbg!("now");
     assert_eq!(iter.next().unwrap(), (OneOfTwo::Two(&I16(15)), &USIZE(25)));
     assert!(iter.next().is_none());
 }
@@ -274,6 +276,36 @@ fn world_iter_correct_borrow() {
     for u in us {
         dbg!(u);
     }
+}
+
+/// Asserts that `World::iter` over shared views yields an entity living past the first sparse page
+/// even when the storages hold fewer components than they have sparse pages.
+#[test]
+fn world_iter_far_entity() {
+    let mut world = World::new();
+
+    // 512 entities fill the first sparse page, even without `memory_constrained`,
+    // so the next entity lands on a later page.
+    world.bulk_add_entity((0..512).map(|_| ()));
+    world.add_entity((USIZE(0), U32(0)));
+
+    let mut iter = world.iter::<(&USIZE, &U32)>();
+    assert_eq!(iter.into_iter().count(), 1);
+}
+
+/// Asserts that `World::iter` over exclusive views yields an entity living past the first sparse page
+/// even when the storages hold fewer components than they have sparse pages.
+#[test]
+fn world_iter_mut_far_entity() {
+    let mut world = World::new();
+
+    // 512 entities fill the first sparse page, even without `memory_constrained`,
+    // so the next entity lands on a later page.
+    world.bulk_add_entity((0..512).map(|_| ()));
+    world.add_entity((USIZE(0), U32(0)));
+
+    let mut iter = world.iter::<(&mut USIZE, &mut U32)>();
+    assert_eq!(iter.into_iter().count(), 1);
 }
 
 // #[test]

@@ -1,16 +1,17 @@
 use crate::{
     component::Component,
+    iter::plan::OrBranch,
     tracking::{Inserted, Tracking},
     views::{View, ViewMut},
 };
 use core::ops::BitOr;
 
-/// Yield the entities that have a component or another.
+/// Yields the entities that have at least one of two components.
 ///
 /// # Example
 ///
 /// ```rust
-/// use shipyard::{track, Component, IntoIter, OneOfTwo, View, ViewMut, World};
+/// use shipyard::{track, iter::OneOfTwo, Component, IntoIter, View, ViewMut, World};
 ///
 /// #[derive(Component, PartialEq, Eq, Debug)]
 /// struct A(u32);
@@ -66,7 +67,7 @@ impl<'a, T: Component, Track: Tracking, U> BitOr<U> for &'a ViewMut<'a, T, Track
     }
 }
 
-impl<'a, T: Component, Track: Tracking, U> BitOr<U> for &'a mut ViewMut<'a, T, Track> {
+impl<'a, 'v, T: Component, Track: Tracking, U> BitOr<U> for &'a mut ViewMut<'v, T, Track> {
     type Output = Or<(Self, U)>;
 
     fn bitor(self, rhs: U) -> Self::Output {
@@ -74,7 +75,7 @@ impl<'a, T: Component, Track: Tracking, U> BitOr<U> for &'a mut ViewMut<'a, T, T
     }
 }
 
-/// Returned when iterating with [`Or`](crate::Or) filter.
+/// Returned when iterating with [`Or`](crate::iter::Or) filter.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum OneOfTwo<T, U> {
     #[allow(missing_docs)]
@@ -89,8 +90,9 @@ impl From<usize> for OneOfTwo<usize, usize> {
     }
 }
 
+#[derive(Clone)]
 pub struct OrWindow<T> {
     pub(crate) storages: T,
-    pub(crate) is_captain: bool,
-    pub(crate) is_past_first_storage: bool,
+    /// Branch driving the current segment.
+    pub(crate) branch: OrBranch,
 }

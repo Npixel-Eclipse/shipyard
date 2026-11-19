@@ -1,11 +1,11 @@
+use super::Mutability;
 #[cfg(feature = "thread_local")]
 use super::non_send::NonSend;
 #[cfg(feature = "thread_local")]
 use super::non_send_sync::NonSendSync;
 #[cfg(feature = "thread_local")]
 use super::non_sync::NonSync;
-use super::Mutability;
-use crate::all_storages::{AllStorages, CustomStorageAccess};
+use crate::all_storages::AllStorages;
 use crate::component::{Component, Unique};
 use crate::entities::Entities;
 use crate::error;
@@ -52,7 +52,7 @@ use core::any::type_name;
 ///     }
 ///     fn enable_tracking(
 ///         _: &mut Vec<
-///             for<'a> fn(&'a shipyard::AllStorages) -> Result<(), shipyard::error::GetStorage>,
+///             for<'a> fn(&'a shipyard::all_storages::AllStorages) -> Result<(), shipyard::error::GetStorage>,
 ///         >,
 ///     ) {}
 /// }
@@ -151,7 +151,7 @@ where
     ) {
         enable_tracking_fn.push(|all_storages| {
             all_storages
-                .custom_storage_or_insert_mut(SparseSet::<T>::new)?
+                .component_storage_or_insert_mut(SparseSet::<T>::new)?
                 .enable_tracking::<Track>();
 
             Ok(())
@@ -166,9 +166,9 @@ where
 {
     fn borrow_info(info: &mut Vec<TypeInfo>) {
         info.push(TypeInfo {
-            name: type_name::<SparseSet<T>>().into(),
+            name: type_name::<NonSend<SparseSet<T>>>().into(),
             mutability: Mutability::Shared,
-            storage_id: StorageId::of::<SparseSet<T>>(),
+            storage_id: StorageId::of::<NonSend<SparseSet<T>>>(),
             thread_safe: true,
         });
     }
@@ -178,7 +178,7 @@ where
     ) {
         enable_tracking_fn.push(|all_storages| {
             all_storages
-                .custom_storage_or_insert_non_send_mut(|| NonSend(SparseSet::<T>::new()))?
+                .component_storage_or_insert_non_send_mut(|| NonSend(SparseSet::<T>::new()))?
                 .enable_tracking::<Track>();
 
             Ok(())
@@ -193,9 +193,9 @@ where
 {
     fn borrow_info(info: &mut Vec<TypeInfo>) {
         info.push(TypeInfo {
-            name: type_name::<SparseSet<T>>().into(),
+            name: type_name::<NonSync<SparseSet<T>>>().into(),
             mutability: Mutability::Shared,
-            storage_id: StorageId::of::<SparseSet<T>>(),
+            storage_id: StorageId::of::<NonSync<SparseSet<T>>>(),
             thread_safe: false,
         });
     }
@@ -205,7 +205,7 @@ where
     ) {
         enable_tracking_fn.push(|all_storages| {
             all_storages
-                .custom_storage_or_insert_non_sync_mut(|| NonSync(SparseSet::<T>::new()))?
+                .component_storage_or_insert_non_sync_mut(|| NonSync(SparseSet::<T>::new()))?
                 .enable_tracking::<Track>();
 
             Ok(())
@@ -220,9 +220,9 @@ where
 {
     fn borrow_info(info: &mut Vec<TypeInfo>) {
         info.push(TypeInfo {
-            name: type_name::<SparseSet<T>>().into(),
+            name: type_name::<NonSendSync<SparseSet<T>>>().into(),
             mutability: Mutability::Shared,
-            storage_id: StorageId::of::<SparseSet<T>>(),
+            storage_id: StorageId::of::<NonSendSync<SparseSet<T>>>(),
             thread_safe: false,
         });
     }
@@ -232,7 +232,9 @@ where
     ) {
         enable_tracking_fn.push(|all_storages| {
             all_storages
-                .custom_storage_or_insert_non_send_sync_mut(|| NonSendSync(SparseSet::<T>::new()))?
+                .component_storage_or_insert_non_send_sync_mut(|| {
+                    NonSendSync(SparseSet::<T>::new())
+                })?
                 .enable_tracking::<Track>();
 
             Ok(())
@@ -257,7 +259,7 @@ where
     ) {
         enable_tracking_fn.push(|all_storages| {
             all_storages
-                .custom_storage_or_insert_mut(SparseSet::<T>::new)?
+                .component_storage_or_insert_mut(SparseSet::<T>::new)?
                 .enable_tracking::<Track>();
 
             Ok(())
@@ -272,9 +274,9 @@ where
 {
     fn borrow_info(info: &mut Vec<TypeInfo>) {
         info.push(TypeInfo {
-            name: type_name::<SparseSet<T>>().into(),
+            name: type_name::<NonSend<SparseSet<T>>>().into(),
             mutability: Mutability::Exclusive,
-            storage_id: StorageId::of::<SparseSet<T>>(),
+            storage_id: StorageId::of::<NonSend<SparseSet<T>>>(),
             thread_safe: false,
         });
     }
@@ -284,7 +286,7 @@ where
     ) {
         enable_tracking_fn.push(|all_storages| {
             all_storages
-                .custom_storage_or_insert_non_send_mut(|| NonSend(SparseSet::<T>::new()))?
+                .component_storage_or_insert_non_send_mut(|| NonSend(SparseSet::<T>::new()))?
                 .enable_tracking::<Track>();
 
             Ok(())
@@ -299,9 +301,9 @@ where
 {
     fn borrow_info(info: &mut Vec<TypeInfo>) {
         info.push(TypeInfo {
-            name: type_name::<SparseSet<T>>().into(),
+            name: type_name::<NonSync<SparseSet<T>>>().into(),
             mutability: Mutability::Exclusive,
-            storage_id: StorageId::of::<SparseSet<T>>(),
+            storage_id: StorageId::of::<NonSync<SparseSet<T>>>(),
             thread_safe: true,
         });
     }
@@ -311,7 +313,7 @@ where
     ) {
         enable_tracking_fn.push(|all_storages| {
             all_storages
-                .custom_storage_or_insert_non_sync_mut(|| NonSync(SparseSet::<T>::new()))?
+                .component_storage_or_insert_non_sync_mut(|| NonSync(SparseSet::<T>::new()))?
                 .enable_tracking::<Track>();
 
             Ok(())
@@ -326,9 +328,9 @@ where
 {
     fn borrow_info(info: &mut Vec<TypeInfo>) {
         info.push(TypeInfo {
-            name: type_name::<SparseSet<T>>().into(),
+            name: type_name::<NonSendSync<SparseSet<T>>>().into(),
             mutability: Mutability::Exclusive,
-            storage_id: StorageId::of::<SparseSet<T>>(),
+            storage_id: StorageId::of::<NonSendSync<SparseSet<T>>>(),
             thread_safe: false,
         });
     }
@@ -338,7 +340,9 @@ where
     ) {
         enable_tracking_fn.push(|all_storages| {
             all_storages
-                .custom_storage_or_insert_non_send_sync_mut(|| NonSendSync(SparseSet::<T>::new()))?
+                .component_storage_or_insert_non_send_sync_mut(|| {
+                    NonSendSync(SparseSet::<T>::new())
+                })?
                 .enable_tracking::<Track>();
 
             Ok(())

@@ -1,9 +1,12 @@
 #[cfg(feature = "serde1")]
 mod serde;
+#[cfg(test)]
+mod tests;
 
 use core::num::NonZeroU64;
 
-/// Handle to an entity.
+/// Entity handle.
+//
 // the id is 64 bits long
 // <- 46 index -> <- 16 gen -> <- 2 meta ->
 // a generation of !0 is used as a dead entity
@@ -28,13 +31,13 @@ impl EntityId {
     const GEN_MASK: u64 = !(!0 >> Self::GEN_LEN);
     const MAX_GEN: u16 = u16::MAX - 1;
 
-    /// Returns the index part of the `EntityId`.  
+    /// Returns the index part of the `EntityId`.\
     /// ⚠️ You shouldn't use it to index a storage.
     #[inline]
     pub fn index(self) -> u64 {
         (self.0.get() & Self::INDEX_MASK) - 1
     }
-    /// Returns the index part of the `EntityId` as an usize.  
+    /// Returns the index part of the `EntityId` as an usize.\
     /// ⚠️ You shouldn't use it to index a storage.
     #[inline]
     pub fn uindex(self) -> usize {
@@ -50,18 +53,18 @@ impl EntityId {
     }
     /// Returns the generation part of the `EntityId`.
     #[inline]
-    pub fn gen(self) -> u16 {
+    pub fn generation(self) -> u16 {
         ((self.0.get() & Self::GEN_MASK) >> Self::INDEX_LEN) as u16
     }
     /// Increments the generation, returns Err if gen + 1 == gen::MAX().
     #[inline]
     pub(super) fn bump_gen(&mut self) -> Result<(), ()> {
-        if self.gen() < Self::MAX_GEN - 1 {
+        if self.generation() < Self::MAX_GEN - 1 {
             // SAFE never zero
             self.0 = unsafe {
                 NonZeroU64::new_unchecked(
                     (self.0.get() & !Self::GEN_MASK)
-                        | (((self.gen() + 1) as u64) << Self::INDEX_LEN),
+                        | (((self.generation() + 1) as u64) << Self::INDEX_LEN),
                 )
             };
             Ok(())
@@ -77,17 +80,17 @@ impl EntityId {
         EntityId(unsafe { NonZeroU64::new_unchecked(index + 1) })
     }
     #[inline]
-    pub(crate) const fn new_from_parts(index: u64, gen: u16) -> Self {
+    pub(crate) const fn new_from_parts(index: u64, generation: u16) -> Self {
         assert!(index < Self::INDEX_MASK);
 
         EntityId(unsafe {
-            NonZeroU64::new_unchecked((index + 1) | ((gen as u64) << Self::INDEX_LEN))
+            NonZeroU64::new_unchecked((index + 1) | ((generation as u64) << Self::INDEX_LEN))
         })
     }
     /// Build a new `EntityId` with the given index and generation.
     #[inline]
-    pub const fn new_from_index_and_gen(index: u64, gen: u16) -> Self {
-        EntityId::new_from_parts(index, gen)
+    pub const fn new_from_index_and_gen(index: u64, generation: u16) -> Self {
+        EntityId::new_from_parts(index, generation)
     }
     #[cfg(test)]
     pub(crate) fn zero() -> Self {
@@ -100,18 +103,18 @@ impl EntityId {
         EntityId(unsafe { NonZeroU64::new_unchecked(!0) })
     }
     #[inline]
-    pub(crate) fn bucket(self) -> usize {
-        self.uindex() / crate::sparse_set::BUCKET_SIZE
+    pub(crate) fn page_index(self) -> usize {
+        self.uindex() / crate::sparse_set::PAGE_LEN
     }
     #[inline]
-    pub(crate) fn bucket_index(self) -> usize {
-        self.uindex() % crate::sparse_set::BUCKET_SIZE
+    pub(crate) fn page_offset(self) -> usize {
+        self.uindex() % crate::sparse_set::PAGE_LEN
     }
     #[inline]
     pub(crate) fn max_index() -> u64 {
         Self::INDEX_MASK - 1
     }
-    /// Maximum generation of a valid [`EntityId`].
+    /// Maximum generation of a valid [`EntityId`].\
     /// A dead id will be above that.
     #[inline]
     pub(crate) const fn max_gen() -> u16 {
@@ -120,14 +123,6 @@ impl EntityId {
     #[inline]
     pub(crate) fn is_dead(&self) -> bool {
         (self.0.get() & Self::GEN_MASK) == Self::GEN_MASK
-    }
-    #[inline]
-    pub(crate) fn copy_index(&mut self, other: EntityId) {
-        unsafe {
-            self.0 = NonZeroU64::new_unchecked(
-                (self.0.get() & !Self::INDEX_MASK) | (other.0.get() & Self::INDEX_MASK),
-            );
-        }
     }
     #[inline]
     pub(crate) fn copy_gen(&mut self, other: EntityId) {
@@ -139,9 +134,7 @@ impl EntityId {
     }
     #[inline]
     pub(crate) fn copy_index_gen(&mut self, other: EntityId) {
-        unsafe {
-            self.0 = NonZeroU64::new_unchecked(self.0.get() | other.0.get());
-        }
+        self.0 = other.0;
     }
     /// Returns `EntityId`'s inner representation.
     #[inline]
@@ -160,25 +153,7 @@ impl core::fmt::Debug for EntityId {
         if *self == EntityId::dead() {
             f.write_str("EId(dead)")
         } else {
-            write!(f, "EId({}.{})", self.index(), self.gen())
+            write!(f, "EId({}.{})", self.index(), self.generation())
         }
     }
-}
-
-#[test]
-fn entity_id() {
-    let mut entity_id = EntityId::new(0);
-    assert_eq!(entity_id.index(), 0);
-    assert_eq!(entity_id.gen(), 0);
-    entity_id.set_index(701);
-    assert_eq!(entity_id.index(), 701);
-    assert_eq!(entity_id.gen(), 0);
-    entity_id.bump_gen().unwrap();
-    entity_id.bump_gen().unwrap();
-    entity_id.bump_gen().unwrap();
-    assert_eq!(entity_id.index(), 701);
-    assert_eq!(entity_id.gen(), 3);
-    entity_id.set_index(554);
-    assert_eq!(entity_id.index(), 554);
-    assert_eq!(entity_id.gen(), 3);
 }

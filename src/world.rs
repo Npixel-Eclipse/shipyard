@@ -1,21 +1,22 @@
 mod builder;
 mod run_batches;
+#[cfg(test)]
+mod tests;
 
 pub use builder::WorldBuilder;
 
 use crate::all_storages::{
-    AllStorages, CustomStorageAccess, TupleClone, TupleDeleteAny, TupleRetainStorage,
+    AllStorages, CustomStorageAccess, GroupMember, TupleClone, TupleDeleteAny, TupleRetainStorage,
 };
 use crate::atomic_refcell::{ARef, ARefMut, AtomicRefCell};
 use crate::borrow::WorldBorrow;
 use crate::component::{Component, Unique};
-use crate::entities::Entities;
 use crate::entity_id::EntityId;
 use crate::error;
 use crate::get_component::GetComponent;
 use crate::get_unique::GetUnique;
-use crate::iter::{ShiperatorCaptain, ShiperatorSailor};
-use crate::iter_component::{into_iter, IntoIterRef, IterComponent};
+use crate::iter::Shiperator;
+use crate::iter_component::{IntoIterRef, IterComponent, into_iter};
 use crate::memory_usage::WorldMemoryUsage;
 use crate::r#mut::Mut;
 use crate::reserve::BulkEntityIter;
@@ -63,16 +64,21 @@ impl Default for World {
 
 #[cfg(feature = "std")]
 impl Clone for World {
+    /// Clones the storages with a registered clone function, see [`World::register_clone`].
+    ///
+    /// The clone has the same groups, including the storages whose components aren't cloned.\
+    /// Copied components only move to their group at the next regroup.
     #[track_caller]
     fn clone(&self) -> Self {
         let mut other = World::new();
 
+        let all_storages = self.all_storages.borrow().unwrap();
         let other_all_storages = other.all_storages.get_mut();
 
-        self.all_storages
-            .borrow()
-            .unwrap()
-            .clone_storages_to(other_all_storages);
+        // We declare the groups first, so every member exists with its ranges before any data
+        // comes in. Cloned members then keep these ranges, see `clone_storages_to`.
+        all_storages.grouping.clone().install(other_all_storages);
+        all_storages.clone_storages_to(other_all_storages);
 
         other
     }
@@ -92,13 +98,22 @@ impl World {
     /// Adds a new unique storage, unique storages store a single value.
     /// To access a unique storage value, use [`UniqueView`] or [`UniqueViewMut`].
     ///
+    /// If `T`'s unique storage already exists, `component` replaces its value instead.\
+    /// The replacement is tracked as a modification, not an insertion.\
+    /// Everything else about the storage is preserved: its insertion tracking, its registered
+    /// clone function, and the wrapper and thread restrictions it was first inserted with.
+    ///
     /// ### Borrows
     ///
     /// - [`AllStorages`] (shared)
+    /// - `T` storage (exclusive), only if it already exists
     ///
     /// ### Panics
     ///
     /// - [`AllStorages`] borrow failed.
+    /// - `T` storage borrow failed, only if it already exists.
+    ///   This happens when the storage is already borrowed, or when it was inserted as `!Send`
+    ///   and we're not on the thread it was inserted on.
     ///
     /// ### Example
     ///
@@ -111,12 +126,13 @@ impl World {
     /// let world = World::new();
     ///
     /// world.add_unique(U32(0));
+    /// world.add_unique(U32(1));
     ///
     /// let i = world.borrow::<UniqueView<U32>>().unwrap();
-    /// assert_eq!(i.0, 0);
+    /// assert_eq!(i.0, 1);
     /// ```
     ///
-    /// [`AllStorages`]: crate::AllStorages
+    /// [`AllStorages`]: crate::all_storages::AllStorages
     /// [`UniqueView`]: crate::UniqueView
     /// [`UniqueViewMut`]: crate::UniqueViewMut
     #[track_caller]
@@ -125,20 +141,31 @@ impl World {
     }
     /// Adds a new unique storage, unique storages store a single value.
     /// To access a `!Send` unique storage value, use [`NonSend`] with [`UniqueView`] or [`UniqueViewMut`].
-    /// Does nothing if the storage already exists.
+    ///
+    /// If `T`'s unique storage already exists, `component` replaces its value instead.
+    /// The replacement is tracked as a modification, not an insertion.
+    /// Everything else about the storage is preserved: its insertion tracking, its registered
+    /// clone function, and the wrapper and thread restrictions it was first inserted with.
+    ///
+    /// The first insertion decides which wrapper views have to use, whichever `add_unique*` method
+    /// replaces the value later. A unique added with this method is always borrowed with
+    /// [`NonSend`], even after [`add_unique`](World::add_unique) replaces its value.
     ///
     /// ### Borrows
     ///
     /// - [`AllStorages`] (shared)
+    /// - `T` storage (exclusive), only if it already exists
     ///
     /// ### Panics
     ///
     /// - [`AllStorages`] borrow failed.
+    /// - Not called from the [`World`]'s thread.
+    /// - `T` storage borrow failed, only if it already exists.
     ///
     /// ### Example
     ///
     /// ```
-    /// use shipyard::{NonSend, Unique, UniqueView, World};
+    /// use shipyard::{borrow::NonSend, Unique, UniqueView, World};
     ///
     /// #[derive(Unique)]
     /// struct U32(u32);
@@ -147,15 +174,17 @@ impl World {
     ///
     /// // I'm using `u32` here but imagine it's a `!Send` type
     /// world.add_unique_non_send(U32(0));
+    /// world.add_unique(U32(1));
     ///
+    /// // The storage is still `NonSend`, it was first inserted with `add_unique_non_send`.
     /// let i = world.borrow::<NonSend<UniqueView<U32>>>().unwrap();
-    /// assert_eq!(i.0, 0);
+    /// assert_eq!(i.0, 1);
     /// ```
     ///
-    /// [`AllStorages`]: crate::AllStorages
+    /// [`AllStorages`]: crate::all_storages::AllStorages
     /// [`UniqueView`]: crate::UniqueView
     /// [`UniqueViewMut`]: crate::UniqueViewMut
-    /// [`NonSend`]: crate::NonSend
+    /// [`NonSend`]: crate::borrow::NonSend
     #[cfg(feature = "thread_local")]
     #[cfg_attr(docsrs, doc(cfg(feature = "thread_local")))]
     #[track_caller]
@@ -167,20 +196,32 @@ impl World {
     }
     /// Adds a new unique storage, unique storages store a single value.
     /// To access a `!Sync` unique storage value, use [`NonSync`] with [`UniqueView`] or [`UniqueViewMut`].
-    /// Does nothing if the storage already exists.
+    ///
+    /// If `T`'s unique storage already exists, `component` replaces its value instead.
+    /// The replacement is tracked as a modification, not an insertion.
+    /// Everything else about the storage is preserved: its insertion tracking, its registered
+    /// clone function, and the wrapper and thread restrictions it was first inserted with.
+    ///
+    /// The first insertion decides which wrapper views have to use, whichever `add_unique*` method
+    /// replaces the value later. See [`add_unique_non_send`](World::add_unique_non_send) for an
+    /// example.
     ///
     /// ### Borrows
     ///
     /// - [`AllStorages`] (shared)
+    /// - `T` storage (exclusive), only if it already exists
     ///
     /// ### Panics
     ///
     /// - [`AllStorages`] borrow failed.
+    /// - `T` storage borrow failed, only if it already exists.
+    ///   This happens when the storage is already borrowed, or when it was inserted as `!Send`
+    ///   and we're not on the thread it was inserted on.
     ///
     /// ### Example
     ///
     /// ```
-    /// use shipyard::{NonSync, Unique, UniqueView, World};
+    /// use shipyard::{borrow::NonSync, Unique, UniqueView, World};
     ///
     /// #[derive(Unique)]
     /// struct U32(u32);
@@ -194,10 +235,10 @@ impl World {
     /// assert_eq!(i.0, 0);
     /// ```
     ///
-    /// [`AllStorages`]: crate::AllStorages
+    /// [`AllStorages`]: crate::all_storages::AllStorages
     /// [`UniqueView`]: crate::UniqueView
     /// [`UniqueViewMut`]: crate::UniqueViewMut
-    /// [`NonSync`]: crate::NonSync
+    /// [`NonSync`]: crate::borrow::NonSync
     #[cfg(feature = "thread_local")]
     #[cfg_attr(docsrs, doc(cfg(feature = "thread_local")))]
     #[track_caller]
@@ -209,20 +250,31 @@ impl World {
     }
     /// Adds a new unique storage, unique storages store a single value.
     /// To access a `!Send + !Sync` unique storage value, use [`NonSendSync`] with [`UniqueView`] or [`UniqueViewMut`].
-    /// Does nothing if the storage already exists.
+    ///
+    /// If `T`'s unique storage already exists, `component` replaces its value instead.
+    /// The replacement is tracked as a modification, not an insertion.
+    /// Everything else about the storage is preserved: its insertion tracking, its registered
+    /// clone function, and the wrapper and thread restrictions it was first inserted with.
+    ///
+    /// The first insertion decides which wrapper views have to use, whichever `add_unique*` method
+    /// replaces the value later. See [`add_unique_non_send`](World::add_unique_non_send) for an
+    /// example.
     ///
     /// ### Borrows
     ///
     /// - [`AllStorages`] (shared)
+    /// - `T` storage (exclusive), only if it already exists
     ///
     /// ### Panics
     ///
     /// - [`AllStorages`] borrow failed.
+    /// - Not called from the [`World`]'s thread.
+    /// - `T` storage borrow failed, only if it already exists.
     ///
     /// ### Example
     ///
     /// ```
-    /// use shipyard::{NonSendSync, Unique, UniqueView, World};
+    /// use shipyard::{borrow::NonSendSync, Unique, UniqueView, World};
     ///
     /// let world = World::new();
     ///
@@ -236,10 +288,10 @@ impl World {
     /// assert_eq!(i.0, 0);
     /// ```
     ///
-    /// [`AllStorages`]: crate::AllStorages
+    /// [`AllStorages`]: crate::all_storages::AllStorages
     /// [`UniqueView`]: crate::UniqueView
     /// [`UniqueViewMut`]: crate::UniqueViewMut
-    /// [`NonSendSync`]: crate::NonSync
+    /// [`NonSendSync`]: crate::borrow::NonSendSync
     #[cfg(feature = "thread_local")]
     #[cfg_attr(docsrs, doc(cfg(feature = "thread_local")))]
     #[track_caller]
@@ -260,7 +312,7 @@ impl World {
     ///
     /// - [`AllStorages`] borrow failed.
     /// - `Unique<T>` storage borrow failed.
-    /// - `Unique<T>` storage did not exist.
+    /// - `Unique<T>` storage did not exist, or was registered as a custom storage.
     ///
     /// ### Example
     ///
@@ -278,7 +330,7 @@ impl World {
     /// assert_eq!(i.0, 0);
     /// ```
     ///
-    /// [`AllStorages`]: crate::AllStorages
+    /// [`AllStorages`]: crate::all_storages::AllStorages
     pub fn remove_unique<T: Unique>(&self) -> Result<T, error::UniqueRemove> {
         self.all_storages
             .borrow()
@@ -378,18 +430,21 @@ let (entities, mut usizes) = world
     .borrow::<(EntitiesView, ViewMut<USIZE>)>()
     .unwrap();
 ```
-[AllStorages]: crate::AllStorages
-[EntitiesView]: crate::Entities
-[EntitiesViewMut]: crate::Entities
-[AllStoragesViewMut]: crate::AllStorages
+[AllStorages]: crate::all_storages::AllStorages
+[EntitiesView]: crate::EntitiesView
+[EntitiesViewMut]: crate::EntitiesViewMut
+[AllStoragesViewMut]: crate::AllStoragesViewMut
 [World]: crate::World
 [View]: crate::View
 [ViewMut]: crate::ViewMut
 [UniqueView]: crate::UniqueView
 [UniqueViewMut]: crate::UniqueViewMut"]
-    #[cfg_attr(feature = "thread_local", doc = "[NonSend]: crate::NonSend")]
-    #[cfg_attr(feature = "thread_local", doc = "[NonSync]: crate::NonSync")]
-    #[cfg_attr(feature = "thread_local", doc = "[NonSendSync]: crate::NonSendSync")]
+    #[cfg_attr(feature = "thread_local", doc = "[NonSend]: crate::borrow::NonSend")]
+    #[cfg_attr(feature = "thread_local", doc = "[NonSync]: crate::borrow::NonSync")]
+    #[cfg_attr(
+        feature = "thread_local",
+        doc = "[NonSendSync]: crate::borrow::NonSendSync"
+    )]
     pub fn borrow<V: WorldBorrow>(&self) -> Result<V::WorldView<'_>, error::GetStorage> {
         let current = self.get_current();
 
@@ -489,18 +544,21 @@ let world = World::new();
 
 world.run_with_data(sys1, (EntityId::dead(), [0., 0.]));
 ```
-[AllStorages]: crate::AllStorages
-[EntitiesView]: crate::Entities
-[EntitiesViewMut]: crate::Entities
-[AllStoragesViewMut]: crate::AllStorages
+[AllStorages]: crate::all_storages::AllStorages
+[EntitiesView]: crate::EntitiesView
+[EntitiesViewMut]: crate::EntitiesViewMut
+[AllStoragesViewMut]: crate::AllStoragesViewMut
 [World]: crate::World
 [View]: crate::View
 [ViewMut]: crate::ViewMut
 [UniqueView]: crate::UniqueView
 [UniqueViewMut]: crate::UniqueViewMut"]
-    #[cfg_attr(feature = "thread_local", doc = "[NonSend]: crate::NonSend")]
-    #[cfg_attr(feature = "thread_local", doc = "[NonSync]: crate::NonSync")]
-    #[cfg_attr(feature = "thread_local", doc = "[NonSendSync]: crate::NonSendSync")]
+    #[cfg_attr(feature = "thread_local", doc = "[NonSend]: crate::borrow::NonSend")]
+    #[cfg_attr(feature = "thread_local", doc = "[NonSync]: crate::borrow::NonSync")]
+    #[cfg_attr(
+        feature = "thread_local",
+        doc = "[NonSendSync]: crate::borrow::NonSendSync"
+    )]
     #[track_caller]
     pub fn run_with_data<Data, B, S: System<(Data,), B>>(
         &self,
@@ -619,18 +677,21 @@ world
 
 let i = world.run(sys1);
 ```
-[AllStorages]: crate::AllStorages
-[EntitiesView]: crate::Entities
-[EntitiesViewMut]: crate::Entities
-[AllStoragesViewMut]: crate::AllStorages
+[AllStorages]: crate::all_storages::AllStorages
+[EntitiesView]: crate::EntitiesView
+[EntitiesViewMut]: crate::EntitiesViewMut
+[AllStoragesViewMut]: crate::AllStoragesViewMut
 [World]: crate::World
 [View]: crate::View
 [ViewMut]: crate::ViewMut
 [UniqueView]: crate::UniqueView
 [UniqueViewMut]: crate::UniqueViewMut"]
-    #[cfg_attr(feature = "thread_local", doc = "[NonSend]: crate::NonSend")]
-    #[cfg_attr(feature = "thread_local", doc = "[NonSync]: crate::NonSync")]
-    #[cfg_attr(feature = "thread_local", doc = "[NonSendSync]: crate::NonSendSync")]
+    #[cfg_attr(feature = "thread_local", doc = "[NonSend]: crate::borrow::NonSend")]
+    #[cfg_attr(feature = "thread_local", doc = "[NonSync]: crate::borrow::NonSync")]
+    #[cfg_attr(
+        feature = "thread_local",
+        doc = "[NonSendSync]: crate::borrow::NonSendSync"
+    )]
     #[track_caller]
     pub fn run<B, S: System<(), B>>(&self, system: S) -> S::Return {
         #[cfg(feature = "tracing")]
@@ -687,12 +748,14 @@ let i = world.run(sys1);
     ///
     /// - Scheduler (shared)
     /// - Systems' borrow as they are executed
+    /// - Connected sets regrouped by the workload (exclusive), as they are regrouped
     ///
     /// ### Errors
     ///
     /// - Scheduler borrow failed.
     /// - Workload did not exist.
     /// - Storage borrow failed.
+    /// - Regroup borrow failed.
     /// - User error returned by system.
     pub fn run_workload<T>(&self, label: impl AsLabel<T>) -> Result<(), error::RunWorkload> {
         let scheduler = self
@@ -745,13 +808,12 @@ let i = world.run(sys1);
         batches: &Batches,
         workload_name: &dyn Label,
     ) -> Result<(), error::RunWorkload> {
-        if let Some(run_if) = &batches.run_if {
-            if !run_if
+        if let Some(run_if) = &batches.workload_run_if
+            && !run_if
                 .run(self)
                 .map_err(|err| error::RunWorkload::Run((workload_name.dyn_clone(), err)))?
-            {
-                return Ok(());
-            }
+        {
+            return Ok(());
         }
 
         #[cfg(feature = "parallel")]
@@ -770,11 +832,13 @@ let i = world.run(sys1);
     ///
     /// - Scheduler (shared)
     /// - Systems' borrow as they are executed
+    /// - Connected sets regrouped by the workload (exclusive), as they are regrouped
     ///
     /// ### Errors
     ///
     /// - Scheduler borrow failed.
     /// - Storage borrow failed.
+    /// - Regroup borrow failed.
     /// - User error returned by system.
     pub fn run_default_workload(&self) -> Result<(), error::RunWorkload> {
         let scheduler = self
@@ -1023,6 +1087,76 @@ impl World {
     pub fn strip(&mut self, entity: EntityId) {
         self.all_storages.get_mut().strip(entity);
     }
+
+    /// Deletes all components of multiple entities without deleting them.
+    ///
+    /// ### Example
+    ///
+    /// ```
+    /// use shipyard::{Component, View, World};
+    ///
+    /// #[derive(Component)]
+    /// struct U32(u32);
+    ///
+    /// #[derive(Component)]
+    /// struct USIZE(usize);
+    ///
+    /// let mut world = World::new();
+    ///
+    /// let eid0 = world.add_entity((U32(0), USIZE(1)));
+    /// let eid1 = world.add_entity(USIZE(10));
+    /// let eid2 = world.add_entity(U32(30));
+    ///
+    /// world.bulk_strip([eid0, eid1, eid2]);
+    ///
+    /// let (v_u32, v_usize) = world.borrow::<(View<U32>, View<USIZE>)>().unwrap();
+    /// assert_eq!(v_u32.len(), 0);
+    /// assert_eq!(v_usize.len(), 0);
+    /// ```
+    #[inline]
+    #[track_caller]
+    pub fn bulk_strip<I: IntoIterator<Item = EntityId>>(&mut self, entities: I)
+    where
+        I::IntoIter: Clone,
+    {
+        self.all_storages.get_mut().bulk_strip(entities);
+    }
+
+    /// Deletes in parallel all components of multiple entities without deleting them.
+    ///
+    /// ### Example
+    ///
+    /// ```
+    /// use shipyard::{Component, View, World};
+    ///
+    /// #[derive(Component)]
+    /// struct U32(u32);
+    ///
+    /// #[derive(Component)]
+    /// struct USIZE(usize);
+    ///
+    /// let mut world = World::new();
+    ///
+    /// let eid0 = world.add_entity((U32(0), USIZE(1)));
+    /// let eid1 = world.add_entity(USIZE(10));
+    /// let eid2 = world.add_entity(U32(30));
+    ///
+    /// world.par_strip([eid0, eid1, eid2]);
+    ///
+    /// let (v_u32, v_usize) = world.borrow::<(View<U32>, View<USIZE>)>().unwrap();
+    /// assert_eq!(v_u32.len(), 0);
+    /// assert_eq!(v_usize.len(), 0);
+    /// ```
+    #[inline]
+    #[track_caller]
+    #[cfg(all(feature = "parallel", not(feature = "thread_local")))]
+    pub fn par_strip<I: IntoIterator<Item = EntityId>>(&mut self, entities: I)
+    where
+        I::IntoIter: Clone + Sync,
+    {
+        self.all_storages.get_mut().par_strip(entities);
+    }
+
     /// Deletes all entities with any of the given components.
     /// The storage's type has to be used and not the component.
     /// `SparseSet` is the default storage.
@@ -1176,6 +1310,7 @@ impl World {
     pub fn memory_usage(&self) -> WorldMemoryUsage<'_> {
         WorldMemoryUsage(self)
     }
+
     /// Returns a list of workloads and all information related to them.
     ///
     /// ### Borrows
@@ -1230,6 +1365,69 @@ impl World {
     #[track_caller]
     pub fn track_all<T: TupleTrack>(&mut self) {
         self.all_storages.get_mut().track_all::<T>();
+    }
+
+    /// Moves components to the groups they belong to, to speed up iteration.
+    ///
+    /// Groups are declared with [`WorldBuilder::with_group`].\
+    /// Components only move to their group during a regroup.\
+    /// Iteration stays correct between regroups, but adding or removing components slows it down.
+    ///
+    /// Workloads added to the world regroup storages they use automatically.\
+    /// This is for the rest, like iterating in [`World::run`].
+    pub fn regroup(&mut self) {
+        self.all_storages.get_mut().regroup();
+    }
+
+    /// Regroups the [connected set] holding `T`'s storage, leaving the rest of the world alone.
+    ///
+    /// Like [`World::borrow`], it only needs a shared reference to the world.\
+    /// Every storage of the set is borrowed exclusively until the regroup ends, the other storages
+    /// can stay borrowed meanwhile.\
+    /// `T` can be any member of the set, all of them give the same result.
+    ///
+    /// ### Errors
+    ///
+    /// - [`NotGrouped`] when `T`'s storage isn't part of any group.
+    /// - [`Storage`] when `AllStorages` is borrowed mutably, or a storage of the set is already
+    ///   borrowed, or is `!Send` and this isn't the world's thread.\
+    ///   It can be a member other than `T`. Nothing moves in that case.
+    ///
+    /// ### Example
+    ///
+    /// ```
+    /// use shipyard::{error, Component, World};
+    ///
+    /// #[derive(Component)]
+    /// struct Pos(f32);
+    ///
+    /// #[derive(Component)]
+    /// struct Vel(f32);
+    ///
+    /// #[derive(Component)]
+    /// struct Health(u32);
+    ///
+    /// let mut world = World::builder().with_group::<(Pos, Vel)>().build();
+    /// world.add_entity((Pos(0.0), Vel(1.0)));
+    ///
+    /// world.regroup_set::<Pos>().unwrap();
+    ///
+    /// // Health isn't part of any group.
+    /// assert!(matches!(
+    ///     world.regroup_set::<Health>(),
+    ///     Err(error::RegroupSet::NotGrouped { .. })
+    /// ));
+    /// ```
+    ///
+    /// [connected set]: crate::world::WorldBuilder::with_group
+    /// [`NotGrouped`]: error::RegroupSet::NotGrouped
+    /// [`Storage`]: error::RegroupSet::Storage
+    pub fn regroup_set<T: GroupMember>(&self) -> Result<(), error::RegroupSet> {
+        let all_storages = self.all_storages.borrow().map_err(|borrow| {
+            error::RegroupSet::Storage(error::GetStorage::AllStoragesBorrow(borrow))
+        })?;
+
+        all_storages.regroup_set::<T>()
     }
 
     #[doc = "Retrieve components of `entity`.
@@ -1290,9 +1488,9 @@ assert!(*j == &U32(1));
 ```"]
     #[cfg_attr(
         feature = "thread_local",
-        doc = "[NonSend]: crate::NonSend
-[NonSync]: crate::NonSync
-[NonSendSync]: crate::NonSendSync"
+        doc = "[NonSend]: crate::borrow::NonSend
+[NonSync]: crate::borrow::NonSync
+[NonSendSync]: crate::borrow::NonSendSync"
     )]
     #[inline]
     pub fn get<T: GetComponent>(
@@ -1300,11 +1498,14 @@ assert!(*j == &U32(1));
         entity: EntityId,
     ) -> Result<T::Out<'_>, error::GetComponent> {
         let (all_storages, all_borrow) = unsafe {
-            ARef::destructure(
-                self.all_storages
-                    .borrow()
-                    .map_err(error::GetStorage::AllStoragesBorrow)?,
-            )
+            ARef::destructure(match self.all_storages.borrow() {
+                Ok(all_storages) => all_storages,
+                Err(err) => {
+                    return Err(error::GetComponent::StorageBorrow(
+                        error::GetStorage::AllStoragesBorrow(err),
+                    ));
+                }
+            })
         };
 
         let current = self.get_current();
@@ -1363,18 +1564,17 @@ assert!(*i == U32(0));
 ```"]
     #[cfg_attr(
         feature = "thread_local",
-        doc = "[NonSend]: crate::NonSend
-[NonSync]: crate::NonSync
-[NonSendSync]: crate::NonSendSync"
+        doc = "[NonSend]: crate::borrow::NonSend
+[NonSync]: crate::borrow::NonSync
+[NonSendSync]: crate::borrow::NonSendSync"
     )]
     #[inline]
     pub fn get_unique<T: GetUnique>(&self) -> Result<T::Out<'_>, error::GetStorage> {
         let (all_storages, all_borrow) = unsafe {
-            ARef::destructure(
-                self.all_storages
-                    .borrow()
-                    .map_err(error::GetStorage::AllStoragesBorrow)?,
-            )
+            ARef::destructure(match self.all_storages.borrow() {
+                Ok(all_storages) => all_storages,
+                Err(err) => return Err(error::GetStorage::AllStoragesBorrow(err)),
+            })
         };
 
         T::get_unique(all_storages, Some(all_borrow))
@@ -1437,15 +1637,15 @@ for (i, j) in &mut iter {
 ```"]
     #[cfg_attr(
         feature = "thread_local",
-        doc = "[NonSend]: crate::NonSend
-[NonSync]: crate::NonSync
-[NonSendSync]: crate::NonSendSync"
+        doc = "[NonSend]: crate::borrow::NonSend
+[NonSync]: crate::borrow::NonSync
+[NonSendSync]: crate::borrow::NonSendSync"
     )]
     #[inline]
     #[track_caller]
     pub fn iter<'a, T: IterComponent>(&'a self) -> IntoIterRef<'a, T>
     where
-        <T as IterComponent>::Shiperator<'a>: ShiperatorCaptain + ShiperatorSailor,
+        <T as IterComponent>::Shiperator<'a>: Shiperator,
     {
         let (all_storages, all_borrow) = unsafe {
             ARef::destructure(
@@ -1480,11 +1680,12 @@ for (i, j) in &mut iter {
     }
 
     /// Returns true if entity matches a living entity.
+    #[inline]
     pub fn is_entity_alive(&mut self, entity: EntityId) -> bool {
         self.all_storages
             .get_mut()
-            .exclusive_storage_mut::<Entities>()
-            .unwrap()
+            .entities
+            .get_mut()
             .is_alive(entity)
     }
 
@@ -1699,6 +1900,97 @@ impl core::fmt::Debug for WorldMemoryUsage<'_> {
             all_storages.memory_usage().fmt(f)
         } else {
             f.write_str("Could not borrow AllStorages")
+        }
+    }
+}
+
+#[cfg(feature = "serde1")]
+impl World {
+    /// Serializes the view using the provided serializer.
+    ///
+    /// ### Example
+    ///
+    /// ```
+    /// use shipyard::{Component, View, World};
+    ///
+    /// #[derive(Component, serde::Serialize)]
+    /// struct Name(String);
+    ///
+    /// let mut world = World::new();
+    ///
+    /// let eid1 = world.add_entity(Name("Alice".to_string()));
+    ///
+    /// let mut serialized = Vec::new();
+    /// world
+    ///     .serialize::<_, View<Name>>(&mut serde_json::ser::Serializer::new(&mut serialized))
+    ///     .unwrap_or_else(|_| panic!());
+    ///
+    /// let serialized_str = String::from_utf8(serialized).unwrap();
+    /// assert_eq!(serialized_str, r#"[[{"index":0,"gen":0},"Alice"]]"#);
+    /// ```
+    pub fn serialize<'w, S: serde::Serializer, V: WorldBorrow>(
+        &'w self,
+        serializer: S,
+    ) -> Result<S::Ok, error::Serialize<S>>
+    where
+        V::WorldView<'w>: serde::Serialize,
+    {
+        use serde::Serialize;
+
+        match self.borrow::<V>() {
+            Ok(view) => match view.serialize(serializer) {
+                Ok(ok) => Ok(ok),
+                Err(err) => Err(error::Serialize::Serialization(err)),
+            },
+            Err(err) => Err(error::Serialize::Borrow(err)),
+        }
+    }
+
+    /// Deserializes the view using the provided deserializer.
+    ///
+    /// ### Example
+    ///
+    /// ```
+    /// use shipyard::{Component, EntityId, ViewMut, World};
+    ///
+    /// #[derive(Component, serde::Deserialize)]
+    /// struct Name(String);
+    ///
+    /// let mut world = World::new();
+    ///
+    /// let mut serialized = r#"[[{"index":0,"gen":0},"Alice"]]"#;
+    /// world
+    ///     .deserialize::<_, ViewMut<Name>>(&mut serde_json::de::Deserializer::from_str(serialized))
+    ///     .unwrap_or_else(|_| panic!());
+    ///
+    /// let alice_eid = EntityId::new_from_index_and_gen(0, 0);
+    /// assert_eq!(world.get::<&Name>(alice_eid).unwrap().0, "Alice");
+    ///
+    /// // Careful here, the World is not in a stable state
+    ///
+    /// assert_eq!(world.is_entity_alive(alice_eid), false);
+    ///
+    /// // We can use World::spawn for example to fix the problem
+    /// // another solution would be to serialize EntitiesViewMut
+    ///
+    /// world.spawn(alice_eid);
+    ///
+    /// assert_eq!(world.is_entity_alive(alice_eid), true);
+    /// ```
+    pub fn deserialize<'w, 'de, D: serde::Deserializer<'de>, V: WorldBorrow>(
+        &'w self,
+        deserializer: D,
+    ) -> Result<(), error::Deserialize<'de, D>>
+    where
+        V::WorldView<'w>: serde::Deserialize<'de>,
+    {
+        match self.borrow::<V>() {
+            Ok(mut view) => match serde::Deserialize::deserialize_in_place(deserializer, &mut view)
+            {
+                Ok(ok) => Ok(ok),
+                Err(err) => Err(error::Deserialize::Deserialization(err)),
+            },
+            Err(err) => Err(error::Deserialize::Borrow(err)),
         }
     }
 }

@@ -6,18 +6,20 @@ use crate::scheduler::label::{SystemLabel, WorkloadLabel};
 use crate::scheduler::{AsLabel, Label, TypeInfo, Workload, WorkloadSystem};
 use crate::storage::StorageId;
 use crate::tracking::TrackingTimestamp;
-use crate::type_id::TypeId;
 use crate::world::World;
 use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
-use core::any::type_name;
+use core::any::{Any, TypeId, type_name};
 use core::sync::atomic::{AtomicU64, Ordering};
 
-/// Trait used to add systems to a workload.
+/// Validates a function can become a system.
 ///
 /// Usually you don't have to use it directly except if you want to handle the error.\
-/// To modify the system execution see [SystemModificator](crate::SystemModificator).
+/// To modify the system execution see [SystemModificator](crate::scheduler::SystemModificator).
+///
+/// A system returning exactly `Result<(), SystemError>` stops its workload when it returns an error,
+/// any other return value is dropped. See [`Workload::with_system`].
 pub trait IntoWorkloadSystem<B, R> {
     /// Wraps a function in a struct containing all information required by a workload.
     fn into_workload_system(self) -> Result<WorkloadSystem, error::InvalidSystem>;
@@ -28,6 +30,24 @@ pub trait IntoWorkloadSystem<B, R> {
     fn call(&self) -> R;
 }
 
+/// Turns a system's return value into its workload result.
+///
+/// `Result<(), SystemError>`'s error is returned, any other value is dropped.
+fn workload_result<R: 'static>(output: R) -> Result<(), error::Run> {
+    // We can't name `R`'s concrete type, `Any` tells us if it's the one we propagate.
+    // We wrap the value in an `Option` to be able to move it out of the `&mut dyn Any`.
+    let mut output = Some(output);
+    let output: &mut dyn Any = &mut output;
+
+    match output
+        .downcast_mut::<Option<Result<(), error::SystemError>>>()
+        .and_then(Option::take)
+    {
+        Some(Err(error)) => Err(error::Run::Custom(error)),
+        Some(Ok(())) | None => Ok(()),
+    }
+}
+
 pub struct Nothing;
 
 impl<R, F> IntoWorkloadSystem<Nothing, R> for F
@@ -36,25 +56,21 @@ where
     F: 'static + Send + Sync + Fn() -> R,
 {
     fn into_workload_system(self) -> Result<WorkloadSystem, error::InvalidSystem> {
-        let system_type_name = type_name::<F>();
-
         Ok(WorkloadSystem {
             borrow_constraints: Vec::new(),
             tracking_to_enable: Vec::new(),
-            system_fn: Box::new(move |_: &World| {
-                (self)();
-                Ok(())
-            }),
+            display_name: self.label(),
+            tags: vec![self.label()],
+            system_fn: Box::new(move |_: &World| workload_result((self)())),
             type_id: TypeId::of::<F>(),
-            display_name: Box::new(system_type_name),
             generator: Box::new(|_| TypeId::of::<F>()),
             before_all: DedupedLabels::new(),
             after_all: DedupedLabels::new(),
-            tags: vec![Box::new(SystemLabel {
-                type_id: TypeId::of::<F>(),
-                name: type_name::<F>().as_label(),
-            })],
+            after: Vec::new(),
+            before: Vec::new(),
+            unique_id: 0,
             run_if: None,
+            run_if_borrow_constraints: Vec::new(),
             require_in_workload: DedupedLabels::new(),
             require_before: DedupedLabels::new(),
             require_after: DedupedLabels::new(),
@@ -149,19 +165,19 @@ macro_rules! impl_into_workload_system {
                 Ok(WorkloadSystem {
                     borrow_constraints: borrows,
                     tracking_to_enable,
+                    display_name: <Func as IntoWorkloadSystem<($($type,)+), Ret>>::label(&self),
+                    tags: vec![<Func as IntoWorkloadSystem<($($type,)+), Ret>>::label(&self)],
                     system_fn: Box::new(move |world: &World| {
                         let current = world.get_current();
                         let last_run = TrackingTimestamp::new(last_run.swap(current.get(), Ordering::Acquire));
-                        Ok(drop((&&self)($($type::world_borrow(&world, Some(last_run), current)?),+)))
+                        workload_result((&&self)($($type::world_borrow(&world, Some(last_run), current)?),+))
                     }),
                     type_id: TypeId::of::<Func>(),
-                    display_name: Box::new(type_name::<Func>()),
                     before_all: DedupedLabels::new(),
                     after_all: DedupedLabels::new(),
-                    tags: vec![Box::new(SystemLabel {
-                        type_id: TypeId::of::<Func>(),
-                        name: type_name::<Func>().as_label(),
-                    })],
+                    after: Vec::new(),
+                    before: Vec::new(),
+                    unique_id: 0,
                     generator: Box::new(|constraints| {
                         $(
                             $type::borrow_info(constraints);
@@ -170,6 +186,7 @@ macro_rules! impl_into_workload_system {
                         TypeId::of::<Func>()
                     }),
                     run_if: None,
+                    run_if_borrow_constraints: Vec::new(),
                     require_in_workload: DedupedLabels::new(),
                     require_before: DedupedLabels::new(),
                     require_after: DedupedLabels::new(),

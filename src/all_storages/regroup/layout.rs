@@ -1,0 +1,926 @@
+//! Builds every storage's final layout by moving entity ids only.
+//!
+//! Components and timestamps don't move and sparse arrays stay frozen until [`finish`] repairs
+//! each storage. With the counts of the [`Plan`], each storage goes through four stages:
+//!
+//! 1. Gathering: every entity leaving a kept prefix is swapped to the logical end of the prefix,
+//!    the same way in every member of the group, and every ungrouped component joining a group
+//!    is swapped to the start of the ungrouped region. What remains of each prefix is its
+//!    settled part, it keeps its logical order.
+//! 2. Fitting: each range gets its final position and length. Its rotation keeps as much of its
+//!    settled part where it is as it can, the rest of the settled part moves to its final slots.
+//! 3. Partition: every other entity goes to a free slot of its final region.
+//!    Entities already in their final region don't move.
+//! 4. Copy: the members of each group copy the order of one of them, its reference.
+//!
+//! Gathering only reaches what it moves through the unevaluated regions, so trusted prefixes and
+//! ungrouped regions are never scanned. Scratch buffers hold storage and range metadata,
+//! learned classification trees, and exception partition queues. The trees grow with component
+//! combinations, and the queues can grow with the free rows being partitioned.
+
+#[cfg(test)]
+#[path = "tests/partition_observer.rs"]
+pub(super) mod test_observer;
+
+use super::analysis::{Discovery, Membership, Memberships, Plan};
+use super::{Selected, original_row};
+use crate::entity_id::EntityId;
+use crate::sparse_set::Ring;
+use crate::storage::StorageId;
+use alloc::vec::Vec;
+use core::ops::Range;
+
+/// What regroup leaves in a grouped storage.
+pub(super) struct Layout {
+    pub(super) storage_id: StorageId,
+    /// The final position and rotation of each range, in range order.
+    pub(super) rings: Vec<Ring>,
+    /// The smallest range of rows containing every row whose id changed, `None` when none did.
+    pub(super) envelope: Option<Range<usize>>,
+}
+
+/// Reorders the ids of every selected grouped storage into the layout `plan` decided,
+/// and returns what [`finish`] needs to complete it.
+///
+/// ### Safety
+///
+/// - `plan` has to come from `analyze` over the same `selected` storages, and they can't have
+///   changed since.
+/// - Every selected grouped storage's ids are reordered without their components and timestamps.
+///   Before a storage is used in any other way than reading its ids, sparse array and groups,
+///   it has to be completed with [`finish`].
+pub(super) unsafe fn build(selected: &mut Selected<'_>, plan: &Plan) -> Vec<Layout> {
+    // SAFE: our caller completes every storage with `finish` before using it otherwise,
+    // which repairs every row we reorder.
+    let mut builder = unsafe { Builder::open(selected, plan) };
+
+    builder.gather();
+
+    let placements: Vec<Vec<Placement>> = (0..builder.dense.len())
+        .map(|index| {
+            let placements = builder.placements(index);
+            builder.move_settled(index, &placements);
+            builder.partition(index, &placements);
+
+            placements
+        })
+        .collect();
+
+    builder.copy_references(&placements);
+
+    builder.layouts(placements)
+}
+
+/// Moves every storage's components and timestamps to follow their ids,
+/// then makes each storage's ranges the ones of its layout, fully trusted.
+///
+/// ### Safety
+///
+/// `layouts` have to come from [`build`] over the same `selected` storages, and they can't have
+/// changed since.
+pub(super) unsafe fn finish(selected: &mut Selected<'_>, layouts: &[Layout]) {
+    for layout in layouts {
+        let storage = selected.get_mut(&layout.storage_id);
+
+        if let Some(envelope) = layout.envelope.clone() {
+            // SAFE: `build` only permuted the storage's ids, and its envelope holds every row
+            // whose id changed, so `envelope` holds the same ids it did. Nothing touched the
+            // sparse array since, each of these ids still points at its own row, inside `envelope`.
+            unsafe { storage.repair_rows(envelope) };
+        }
+
+        let len = storage.dense().expect("group members are SparseSet").len();
+        let groups = storage.groups_mut().expect("group members are SparseSet");
+        for (range, ring) in groups.ranges.iter_mut().zip(&layout.rings) {
+            range.start = ring.start;
+            range.len = ring.len;
+            range.shift = ring.shift;
+            range.trust = ring.len;
+        }
+        groups.unevaluated_start = len;
+    }
+}
+
+/// Where a range goes.
+struct Placement {
+    /// The range as regroup found it.
+    old: Ring,
+    /// The range as regroup leaves it.
+    new: Ring,
+    /// Length of the settled part, logical `0..settled` keeps its order.
+    settled: usize,
+    /// Position of the group's plan.
+    group_index: usize,
+}
+
+impl Placement {
+    /// Returns `true` when the settled entity at `logical` has to change slot.
+    fn moves(&self, logical: usize) -> bool {
+        logical < self.settled && self.old.physical_of(logical) != self.new.physical_of(logical)
+    }
+
+    /// Returns the logical positions of the settled entities that can have to change slot,
+    /// as up to four ranges. Only the ones [`moves`](Self::moves) accepts do.
+    ///
+    /// The settled part is at most two physical pieces, from the old wrap point to the old end,
+    /// then from the old start. The new rotation keeps a piece in place over the slots it shares
+    /// with the new range, or none of it, so we skip that shared part without looking at it.
+    fn movable(&self) -> [Range<usize>; 4] {
+        let mut movable: [Range<usize>; 4] = Default::default();
+        if self.settled == 0 {
+            return movable;
+        }
+
+        let first_len = self.settled.min(self.old.len - self.old.wrap_offset());
+        let pieces = [
+            (0..first_len, self.old.physical_of(0)),
+            (first_len..self.settled, self.old.start),
+        ];
+
+        for (position, (logical, start)) in pieces.into_iter().enumerate() {
+            // The piece's slots run from `start`, these are the positions whose slot is in the new range.
+            let first_shared = logical.start + self.new.start.saturating_sub(start);
+            let past_shared = logical.start + self.new.end().saturating_sub(start);
+            let shared = first_shared.min(logical.end)..past_shared.min(logical.end);
+
+            // Every position of a piece moves by the same offset, so one of them tells for all.
+            if !shared.is_empty() && !self.moves(shared.start) {
+                movable[2 * position] = logical.start..shared.start;
+                movable[2 * position + 1] = shared.end..logical.end;
+            } else {
+                movable[2 * position] = logical;
+            }
+        }
+
+        movable
+    }
+}
+
+/// Returns the ring of `len` slots at `start` keeping the most of `old`'s settled part,
+/// its first `settled` logical positions, where it is.
+///
+/// The settled part is at most two physical pieces: from `old`'s wrap point to its end,
+/// then from its start. A rotation keeps a piece in place over the slots both rings share.
+/// It keeps both only if the length didn't change, otherwise the other piece moves.
+fn new_ring(old: Ring, settled: usize, start: usize, len: usize) -> Ring {
+    let ring = |wrap_offset: usize| Ring {
+        start,
+        len,
+        shift: isize::try_from(wrap_offset).expect("range lengths fit in an isize"),
+    };
+    if len == 0 || old.len == 0 {
+        return ring(0);
+    }
+
+    let new_slots = start..start + len;
+    let old_wrap = old.wrap_offset();
+    let first_len = settled.min(old.len - old_wrap);
+    let first = old.start + old_wrap..old.start + old_wrap + first_len;
+    let second = old.start..old.start + (settled - first_len);
+
+    let both = len == old.len;
+    let keep_first = overlap(&first, &new_slots)
+        + if both {
+            overlap(&second, &new_slots)
+        } else {
+            0
+        };
+    let keep_second =
+        overlap(&second, &new_slots) + if both { overlap(&first, &new_slots) } else { 0 };
+
+    // Logical 0 has to land where the kept piece puts it, possibly outside both rings.
+    let logical_zero = if keep_second > keep_first {
+        to_isize(old.start) - to_isize(old.len - old_wrap)
+    } else {
+        to_isize(old.start + old_wrap)
+    };
+    let wrap_offset = (logical_zero - to_isize(start)).rem_euclid(to_isize(len));
+
+    ring(usize::try_from(wrap_offset).expect("the remainder is positive"))
+}
+
+/// Returns the number of slots `a` and `b` share.
+fn overlap(a: &Range<usize>, b: &Range<usize>) -> usize {
+    a.end.min(b.end).saturating_sub(a.start.max(b.start))
+}
+
+fn to_isize(value: usize) -> isize {
+    isize::try_from(value).expect("dense lengths fit in an isize")
+}
+
+/// The free slots of a final region, as up to two physical ranges, with a cursor.
+struct Free {
+    parts: [Range<usize>; 2],
+    /// Number of slots already holding an entity of the region.
+    filled: usize,
+}
+
+impl Free {
+    fn len(&self) -> usize {
+        self.parts[0].len() + self.parts[1].len()
+    }
+
+    /// Returns the slot at `position`, counting over both parts.
+    fn slot(&self, position: usize) -> usize {
+        if position < self.parts[0].len() {
+            self.parts[0].start + position
+        } else {
+            self.parts[1].start + position - self.parts[0].len()
+        }
+    }
+}
+
+/// Every grouped storage opened for reordering, and what laying them out needs.
+struct Builder<'a, 'p> {
+    /// Sorted by storage id.
+    memberships: Memberships<'a>,
+    /// The ids of each storage of `memberships`, at the same position.
+    dense: Vec<&'a mut [EntityId]>,
+    plan: &'p Plan,
+    discovery: Discovery,
+    /// The first and last row whose id changed, for each storage.
+    touched: Vec<Option<(usize, usize)>>,
+}
+
+impl<'a, 'p> Builder<'a, 'p> {
+    /// Lends the ids of every selected storage that has at least one range.
+    ///
+    /// ### Safety
+    ///
+    /// The ids are lent with `Storage::reorder_ids`. They can only be permuted, and every storage
+    /// has to be repaired over its reordered rows before it's used in any other way than reading
+    /// its ids, sparse array and groups.
+    unsafe fn open(selected: &'a mut Selected<'_>, plan: &'p Plan) -> Builder<'a, 'p> {
+        let mut memberships = Vec::new();
+        let mut dense = Vec::new();
+
+        for (storage_id, storage) in selected.iter_mut() {
+            if !storage.groups().is_some_and(|groups| groups.has_ranges()) {
+                continue;
+            }
+
+            // SAFE: our caller upholds `reorder_ids`'s requirements, they're the same.
+            let parts = unsafe { storage.reorder_ids() }.expect("group members are SparseSet");
+            memberships.push(Membership {
+                storage_id,
+                groups: parts.groups,
+                sparse: parts.sparse,
+            });
+            dense.push(parts.dense);
+        }
+
+        Builder {
+            touched: alloc::vec![None; dense.len()],
+            memberships: Memberships::new(memberships),
+            dense,
+            plan,
+            discovery: Discovery::default(),
+        }
+    }
+
+    /// Returns the position of the storage with id `storage_id`.
+    fn index_of(&self, storage_id: &StorageId) -> usize {
+        self.memberships.position(storage_id)
+    }
+
+    /// Returns the position of the plan of the group `entity`'s component in the storage at
+    /// `index` goes to, `None` when it goes to the ungrouped region.
+    fn classify(&mut self, index: usize, entity: EntityId) -> Option<usize> {
+        let plan = self.plan;
+
+        self.discovery
+            .classify(&self.memberships, index, entity, |members| {
+                plan.find(members)
+                    .expect("analysis attached every group an entity needs")
+            })
+    }
+
+    /// Swaps the ids at rows `a` and `b` of the storage at `index`.
+    fn swap(&mut self, index: usize, a: usize, b: usize) {
+        if a == b {
+            return;
+        }
+
+        self.dense[index].swap(a, b);
+        self.touch(index, a);
+        self.touch(index, b);
+    }
+
+    /// Records that the id at `row` of the storage at `index` changed.
+    fn touch(&mut self, index: usize, row: usize) {
+        let touched = &mut self.touched[index];
+
+        *touched = Some(match *touched {
+            Some((first, last)) => (first.min(row), last.max(row)),
+            None => (row, row),
+        });
+    }
+
+    /// Returns the range of `group_index`'s group in the storage at `index`, as regroup found it.
+    fn ring(&self, index: usize, group_index: usize) -> Ring {
+        self.memberships.storages[index]
+            .groups
+            .range(&self.plan.groups[group_index].group)
+            .expect("every member holds a range for its group")
+            .ring()
+    }
+
+    /// Gathers every component leaving a kept prefix or an ungrouped region.
+    ///
+    /// They're the ones analysis counted, reached the same way through the unevaluated regions.
+    fn gather(&mut self) {
+        let plan = self.plan;
+        let mut gathered = alloc::vec![0; plan.groups.len()];
+        let mut promoted = alloc::vec![0; self.dense.len()];
+
+        // Analysis counted everything we have to gather, we stop once it's all there.
+        // Often that's nothing, then we don't walk at all.
+        let mut left = plan
+            .groups
+            .iter()
+            .map(|group_plan| group_plan.leaving)
+            .chain(
+                plan.storages
+                    .iter()
+                    .map(|storage_plan| storage_plan.promoted),
+            )
+            .sum::<usize>();
+
+        'walk: for index in 0..self.dense.len() {
+            let membership = self.memberships.storages[index];
+
+            // Gathering never touches the unevaluated regions, we can read them as we go.
+            for row in membership.groups.unevaluated_start..self.dense[index].len() {
+                if left == 0 {
+                    break 'walk;
+                }
+
+                let entity = self.dense[index][row];
+                let Some(group_index) = self.classify(index, entity) else {
+                    continue;
+                };
+                if !plan.is_first_unevaluated(
+                    &self.memberships,
+                    group_index,
+                    &membership.storage_id,
+                    entity,
+                ) {
+                    continue;
+                }
+
+                for member_id in plan.groups[group_index].group.iter() {
+                    if member_id == &membership.storage_id {
+                        continue;
+                    }
+
+                    let member_index = self.index_of(member_id);
+                    let member = self.memberships.storages[member_index];
+                    let row = original_row(member.sparse, entity).expect(
+                        "the entity satisfies the group, it owns a component in each member",
+                    );
+
+                    if let Some(range_index) = member.groups.range_index_of(row) {
+                        let range = &member.groups.ranges[range_index];
+                        let source_index = plan.group_index(&range.group);
+                        let logical = range.ring().logical_of(row);
+
+                        // The entity sits in the kept prefix of every member of the source,
+                        // we gather it once for all of them, from the first.
+                        if logical < plan.groups[source_index].kept && member_id == &range.group[0]
+                        {
+                            let before = gathered[source_index];
+                            self.gather_kept(
+                                source_index,
+                                logical,
+                                entity,
+                                &mut gathered[source_index],
+                            );
+                            left -= gathered[source_index] - before;
+                        }
+                    } else if row < member.groups.unevaluated_start {
+                        let before = promoted[member_index];
+                        self.gather_promoted(
+                            member_index,
+                            row,
+                            entity,
+                            &mut promoted[member_index],
+                        );
+                        left -= promoted[member_index] - before;
+                    }
+                }
+            }
+        }
+
+        debug_assert!(
+            plan.groups
+                .iter()
+                .zip(&gathered)
+                .all(|(group_plan, &gathered)| gathered == group_plan.leaving)
+        );
+        debug_assert!(self.memberships.storages.iter().zip(&promoted).all(
+            |(membership, &promoted)| { promoted == plan.storage(&membership.storage_id).promoted }
+        ));
+    }
+
+    /// Moves `entity`, at `logical` in the kept prefix of the group of `group_index` when regroup
+    /// started, to the logical end of the prefix in every member.
+    ///
+    /// The `gathered` last positions of the prefix already hold leaving entities.
+    fn gather_kept(
+        &mut self,
+        group_index: usize,
+        logical: usize,
+        entity: EntityId,
+        gathered: &mut usize,
+    ) {
+        let plan = self.plan;
+        let group = &plan.groups[group_index].group;
+        let kept = plan.groups[group_index].kept;
+        let first = self.index_of(&group[0]);
+        let first_ring = self.ring(first, group_index);
+
+        // Entities only enter the gathered area from their own starting position, and nothing
+        // leaves it. So a starting position inside it means the entity is there, and one outside
+        // holding another id means the entity moved there.
+        if logical >= kept - *gathered
+            || self.dense[first][first_ring.physical_of(logical)] != entity
+        {
+            return;
+        }
+
+        loop {
+            let edge = kept - *gathered - 1;
+            *gathered += 1;
+
+            if edge == logical {
+                return;
+            }
+
+            // An entity at the edge that leaves too joins the area where it is.
+            let edge_entity = self.dense[first][first_ring.physical_of(edge)];
+            if self.classify(first, edge_entity) != Some(group_index) {
+                continue;
+            }
+
+            // Kept prefixes are aligned, the same swap keeps every member aligned.
+            for member_id in group.iter() {
+                let member = self.index_of(member_id);
+                let ring = self.ring(member, group_index);
+
+                self.swap(member, ring.physical_of(logical), ring.physical_of(edge));
+            }
+
+            return;
+        }
+    }
+
+    /// Moves `entity`, at `row` in the ungrouped region of the storage at `index` when regroup
+    /// started, to the start of the region.
+    ///
+    /// The `promoted` first rows of the region already hold components joining a group.
+    fn gather_promoted(
+        &mut self,
+        index: usize,
+        row: usize,
+        entity: EntityId,
+        promoted: &mut usize,
+    ) {
+        let start = self.memberships.storages[index].groups.grouped_end();
+
+        // See `gather_kept`, the area works the same way.
+        if row < start + *promoted || self.dense[index][row] != entity {
+            return;
+        }
+
+        loop {
+            let edge = start + *promoted;
+            *promoted += 1;
+
+            if edge == row {
+                return;
+            }
+
+            let edge_entity = self.dense[index][edge];
+            if self.classify(index, edge_entity).is_some() {
+                continue;
+            }
+
+            self.swap(index, row, edge);
+
+            return;
+        }
+    }
+
+    /// Returns where each range of the storage at `index` goes.
+    fn placements(&self, index: usize) -> Vec<Placement> {
+        let mut start = 0;
+
+        self.memberships.storages[index]
+            .groups
+            .ranges
+            .iter()
+            .map(|range| {
+                let group_index = self.plan.group_index(&range.group);
+                let group_plan = &self.plan.groups[group_index];
+                let settled = group_plan.kept - group_plan.leaving;
+                let len = settled + group_plan.incoming;
+                let old = range.ring();
+                let new = new_ring(old, settled, start, len);
+                start += len;
+
+                Placement {
+                    old,
+                    new,
+                    settled,
+                    group_index,
+                }
+            })
+            .collect()
+    }
+
+    /// Moves every settled entity of the storage at `index` that its range's new ring doesn't
+    /// keep in place to its new slot.
+    ///
+    /// Each one's target slot either holds an entity that isn't settled, or a settled one that
+    /// moves too. These form chains, which we follow from their end, the move whose target holds
+    /// no settled entity, back to their start. Each swap then puts a settled entity in its slot and
+    /// leaves an entity that isn't settled where it was, for the next one up the chain to take.
+    fn move_settled(&mut self, index: usize, placements: &[Placement]) {
+        let mut expected = 0;
+        let mut moved = 0;
+
+        for placement in placements {
+            for logical in placement.movable().into_iter().flatten() {
+                if !placement.moves(logical) {
+                    continue;
+                }
+                expected += 1;
+
+                let target = placement.new.physical_of(logical);
+                if moving_from(placements, target).is_some() {
+                    continue;
+                }
+
+                let mut current = (placement, logical);
+                loop {
+                    let (placement, logical) = current;
+                    let source = placement.old.physical_of(logical);
+                    self.swap(index, source, placement.new.physical_of(logical));
+                    moved += 1;
+
+                    match moving_to(placements, source) {
+                        Some(previous) => current = previous,
+                        None => break,
+                    }
+                }
+            }
+        }
+
+        // Ranges keep their order and each keeps a piece of its settled part in place,
+        // so these moves never go around in a cycle.
+        debug_assert_eq!(moved, expected);
+    }
+
+    /// Moves every entity that isn't settled to a free slot of its final region,
+    /// in the storage at `index`.
+    ///
+    /// Ranges' free slots are their logical positions past the settled part. The ungrouped
+    /// region's are all its slots, except the ones still holding the ungrouped components
+    /// that stay. We never look at those.
+    fn partition(&mut self, index: usize, placements: &[Placement]) {
+        let membership = self.memberships.storages[index];
+        let len = self.dense[index].len();
+
+        let mut regions: Vec<Free> = placements
+            .iter()
+            .map(|placement| {
+                let free = placement.new.len - placement.settled;
+                if free == 0 {
+                    return Free {
+                        parts: [0..0, 0..0],
+                        filled: 0,
+                    };
+                }
+
+                let first = placement.new.physical_of(placement.settled);
+                let first_len = placement.new.contiguous_len(placement.settled);
+
+                Free {
+                    parts: [
+                        first..first + first_len,
+                        placement.new.start..placement.new.start + (free - first_len),
+                    ],
+                    filled: 0,
+                }
+            })
+            .collect();
+
+        let ungrouped_start = placements.last().map_or(0, |placement| placement.new.end());
+        let staying_start =
+            membership.groups.grouped_end() + self.plan.storage(&membership.storage_id).promoted;
+        let staying = staying_start.clamp(ungrouped_start, len)
+            ..membership
+                .groups
+                .unevaluated_start
+                .clamp(ungrouped_start, len);
+        regions.push(Free {
+            parts: [ungrouped_start..staying.start, staying.end..len],
+            filled: 0,
+        });
+
+        // Classification gives a group; this maps it to a region without another search.
+        let mut range_regions = alloc::vec![None; self.plan.groups.len()];
+        for (region, placement) in placements.iter().enumerate() {
+            range_regions[placement.group_index] = Some(region);
+        }
+        let ungrouped = placements.len();
+
+        if self.exceptions_cover(index, placements) {
+            #[cfg(test)]
+            self.observe_partition(index, placements, true);
+            self.partition_exceptions(index, placements, &regions, &range_regions);
+            return;
+        }
+
+        #[cfg(test)]
+        self.observe_partition(index, placements, false);
+
+        for region in 0..regions.len() {
+            while regions[region].filled < regions[region].len() {
+                let slot = regions[region].slot(regions[region].filled);
+                let entity = self.dense[index][slot];
+                let destination = self.region_of(index, entity, &range_regions, ungrouped);
+
+                if destination == region {
+                    regions[region].filled += 1;
+                    continue;
+                }
+
+                // The destination's next slot holding an entity that belongs elsewhere.
+                // Earlier regions are complete, the entity can only belong to a later one.
+                let target = loop {
+                    let free = &regions[destination];
+                    assert!(
+                        free.filled < free.len(),
+                        "the plan counts every entity of a region"
+                    );
+                    let target = free.slot(free.filled);
+
+                    let entity = self.dense[index][target];
+                    if self.region_of(index, entity, &range_regions, ungrouped) != destination {
+                        break target;
+                    }
+                    regions[destination].filled += 1;
+                };
+
+                self.swap(index, slot, target);
+                regions[destination].filled += 1;
+            }
+        }
+    }
+
+    /// Returns `true` when the exceptions analysis recorded for the storage at `index` tell where
+    /// every row partition can meet goes.
+    ///
+    /// That's when every id is still in the row analysis read it from, nothing is promoted and
+    /// no group of its ranges has entities leaving, and the storage either has no unevaluated row
+    /// or is alone. Then a row goes where its exception says, and without one:
+    /// - a row of an old range goes to its range's group, kept prefixes included,
+    /// - a row of the old ungrouped region stays ungrouped,
+    /// - an unevaluated row goes to the alone storage's single group.
+    fn exceptions_cover(&self, index: usize, placements: &[Placement]) -> bool {
+        let membership = self.memberships.storages[index];
+        let plan = self.plan;
+
+        (membership.groups.unevaluated_start == self.dense[index].len()
+            || self.memberships.alone[index])
+            && self.touched[index].is_none()
+            && plan.storage(&membership.storage_id).promoted == 0
+            && placements
+                .iter()
+                .all(|placement| plan.groups[placement.group_index].leaving == 0)
+    }
+
+    /// Does what `partition`'s loop does to the storage at `index`, the same swaps in the same
+    /// order, without classifying anything. [`exceptions_cover`](Self::exceptions_cover) has to
+    /// accept the storage.
+    ///
+    /// The loop only swaps the occupants of free slots that go to another region, so we list
+    /// those up front, each with its destination, in the order the loop meets them. Free slots
+    /// whose occupant stays are the ones it skips.
+    fn partition_exceptions(
+        &mut self,
+        index: usize,
+        placements: &[Placement],
+        regions: &[Free],
+        range_regions: &[Option<usize>],
+    ) {
+        let plan = self.plan;
+        let membership = self.memberships.storages[index];
+        let exceptions = &plan.storage(&membership.storage_id).exceptions;
+        let ungrouped = placements.len();
+        let region_of = |destination: Option<usize>| match destination {
+            Some(group_index) => {
+                range_regions[group_index].expect("every member holds a range for its group")
+            }
+            None => ungrouped,
+        };
+
+        // Every row as regroup found it, with the region it goes to without an exception.
+        // A range's region is at its position. Only an alone storage has unevaluated rows here,
+        // they go to its single range.
+        let len = self.dense[index].len();
+        let unevaluated_start = membership.groups.unevaluated_start;
+        debug_assert!(unevaluated_start == len || self.memberships.alone[index]);
+        let mut sources: Vec<(Range<usize>, usize)> = placements
+            .iter()
+            .enumerate()
+            .map(|(region, placement)| (placement.old.start..placement.old.end(), region))
+            .collect();
+        sources.push((
+            membership.groups.grouped_end()..unevaluated_start,
+            ungrouped,
+        ));
+        sources.push((unevaluated_start..len, 0));
+
+        let mut queues: Vec<Vec<(usize, usize)>> = Vec::with_capacity(regions.len());
+        for (region, free) in regions.iter().enumerate() {
+            let mut queue = Vec::new();
+            let mut covered = 0;
+
+            for part in &free.parts {
+                for (source, default) in &sources {
+                    let rows = part.start.max(source.start)..part.end.min(source.end);
+                    if rows.is_empty() {
+                        continue;
+                    }
+                    covered += rows.len();
+                    let end = rows.end;
+
+                    let first = exceptions.partition_point(|&(row, _)| row < rows.start);
+                    let mut listed = exceptions[first..]
+                        .iter()
+                        .take_while(|&&(row, _)| row < end)
+                        .peekable();
+
+                    // Where rows go to this region by default, only the exceptions leave.
+                    if *default == region {
+                        queue.extend(
+                            listed.map(|&(row, destination)| (row, region_of(destination))),
+                        );
+                        continue;
+                    }
+
+                    for row in rows {
+                        let destination = match listed.next_if(|&&(listed, _)| listed == row) {
+                            Some(&(_, destination)) => region_of(destination),
+                            None => *default,
+                        };
+
+                        if destination != region {
+                            queue.push((row, destination));
+                        }
+                    }
+                }
+            }
+
+            debug_assert_eq!(covered, free.len());
+            queues.push(queue);
+        }
+
+        // The loop of `partition`, where a free slot whose occupant stays isn't listed.
+        // Only the slots at the cursors change, the entries past them stay right.
+        let mut cursors = alloc::vec![0; queues.len()];
+        for region in 0..queues.len() {
+            while let Some(&(slot, destination)) = queues[region].get(cursors[region]) {
+                if destination == region {
+                    cursors[region] += 1;
+                    continue;
+                }
+
+                // Earlier regions are complete, the entity can only belong to a later one.
+                let &(target, next) = queues[destination]
+                    .get(cursors[destination])
+                    .expect("the plan counts every entity of a region");
+
+                self.swap(index, slot, target);
+                cursors[destination] += 1;
+                queues[region][cursors[region]].1 = next;
+            }
+        }
+    }
+
+    /// Returns the destination region of `entity`'s component in the storage at `index`.
+    ///
+    /// `range_regions` maps plan group indices to regions in this storage. Groups the storage
+    /// doesn't belong to have no region. `ungrouped` is the position of the ungrouped region.
+    fn region_of(
+        &mut self,
+        index: usize,
+        entity: EntityId,
+        range_regions: &[Option<usize>],
+        ungrouped: usize,
+    ) -> usize {
+        let Some(group_index) = self.classify(index, entity) else {
+            return ungrouped;
+        };
+
+        range_regions[group_index].expect("every member holds a range for its group")
+    }
+
+    /// Makes every member of each group copy the order of its reference,
+    /// past the settled part they share.
+    ///
+    /// The reference is the member that trusted the most of its range, the first one on ties.
+    /// Every member holds the same entities, so each copy only reorders them.
+    fn copy_references(&mut self, placements: &[Vec<Placement>]) {
+        let plan = self.plan;
+
+        for (group_index, group_plan) in plan.groups.iter().enumerate() {
+            let placement_of = |member: usize| {
+                placements[member]
+                    .iter()
+                    .find(|placement| placement.group_index == group_index)
+                    .expect("every member holds a range for its group")
+            };
+
+            let mut reference = self.index_of(&group_plan.group[0]);
+            let mut reference_trust = 0;
+            for member_id in group_plan.group.iter() {
+                let member = self.index_of(member_id);
+                let trust = self.memberships.storages[member]
+                    .groups
+                    .range(&group_plan.group)
+                    .expect("every member holds a range for its group")
+                    .trust;
+
+                if trust > reference_trust {
+                    reference = member;
+                    reference_trust = trust;
+                }
+            }
+
+            let source = placement_of(reference);
+            for member_id in group_plan.group.iter() {
+                let member = self.index_of(member_id);
+                if member == reference {
+                    continue;
+                }
+
+                let target = placement_of(member);
+                debug_assert_eq!(target.settled, source.settled);
+                debug_assert_eq!(target.new.len, source.new.len);
+
+                for logical in source.settled..source.new.len {
+                    let entity = self.dense[reference][source.new.physical_of(logical)];
+                    let row = target.new.physical_of(logical);
+
+                    if self.dense[member][row] != entity {
+                        self.dense[member][row] = entity;
+                        self.touch(member, row);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Returns each storage's layout.
+    fn layouts(self, placements: Vec<Vec<Placement>>) -> Vec<Layout> {
+        self.memberships
+            .storages
+            .iter()
+            .zip(placements)
+            .zip(self.touched)
+            .map(|((membership, placements), touched)| Layout {
+                storage_id: membership.storage_id,
+                rings: placements
+                    .into_iter()
+                    .map(|placement| placement.new)
+                    .collect(),
+                envelope: touched.map(|(first, last)| first..last + 1),
+            })
+            .collect()
+    }
+}
+
+/// Returns the settled entity that has to leave `slot`, as its range's placement and its logical
+/// position, if any.
+fn moving_from(placements: &[Placement], slot: usize) -> Option<(&Placement, usize)> {
+    let placement = placements
+        .iter()
+        .find(|placement| placement.old.contains(slot))?;
+    let logical = placement.old.logical_of(slot);
+
+    placement.moves(logical).then_some((placement, logical))
+}
+
+/// Returns the settled entity that has to move to `slot`, as its range's placement and its logical
+/// position, if any.
+fn moving_to(placements: &[Placement], slot: usize) -> Option<(&Placement, usize)> {
+    let placement = placements
+        .iter()
+        .find(|placement| placement.new.contains(slot))?;
+    let logical = placement.new.logical_of(slot);
+
+    placement.moves(logical).then_some((placement, logical))
+}

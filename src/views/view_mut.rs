@@ -9,8 +9,9 @@ use crate::sparse_set::{SparseSet, SparseSetDrain};
 use crate::storage::StorageId;
 use crate::track;
 use crate::tracking::{
-    DeletionTracking, Inserted, InsertedOrModified, InsertionTracking, ModificationTracking,
-    Modified, RemovalOrDeletionTracking, RemovalTracking, Tracking, TrackingTimestamp,
+    DeletionTracking, Inserted, InsertedOrModified, InsertionOrModificationTracking,
+    InsertionTracking, ModificationTracking, Modified, RemovalOrDeletionTracking, RemovalTracking,
+    Tracking, TrackingTimestamp,
 };
 use crate::views::view::View;
 use core::fmt;
@@ -135,7 +136,7 @@ impl<'a, T: Component> ViewMut<'a, T, track::Untracked> {
     /// Creates a new [`ViewMut`] for custom [`SparseSet`] storage.
     ///
     /// ```
-    /// use shipyard::{track, Component, sparse_set::SparseSet, StorageId, ViewMut, World};
+    /// use shipyard::{track, advanced::StorageId, Component, sparse_set::SparseSet, ViewMut, World};
     ///
     /// struct ScriptingComponent(Vec<u8>);
     /// impl Component for ScriptingComponent {
@@ -151,11 +152,11 @@ impl<'a, T: Component> ViewMut<'a, T, track::Untracked> {
     ///
     /// let all_storages = world.all_storages().unwrap();
     /// let scripting_storage =
-    ///     ViewMut::<ScriptingComponent>::new_for_custom_storage(StorageId::Custom(0), all_storages)
+    ///     ViewMut::<ScriptingComponent>::new_for_custom_storage(&StorageId::Custom(0), all_storages)
     ///         .unwrap();
     /// ```
     pub fn new_for_custom_storage(
-        storage_id: StorageId,
+        storage_id: &StorageId,
         all_storages: ARef<'a, &'a AllStorages>,
     ) -> Result<Self, error::CustomStorageView> {
         use crate::all_storages::CustomStorageAccess;
@@ -333,6 +334,42 @@ where
     }
 }
 
+#[cfg(feature = "thread_local")]
+impl<Track, T: Component + Sync> crate::borrow::NonSend<ViewMut<'_, T, Track>>
+where
+    Track: InsertionTracking,
+{
+    /// Removes the *inserted* flag on all components of this storage.
+    #[inline]
+    pub fn clear_all_inserted(self) {
+        self.0.sparse_set.private_clear_all_inserted(self.0.current);
+    }
+}
+
+#[cfg(feature = "thread_local")]
+impl<Track, T: Component + Send> crate::borrow::NonSync<ViewMut<'_, T, Track>>
+where
+    Track: InsertionTracking,
+{
+    /// Removes the *inserted* flag on all components of this storage.
+    #[inline]
+    pub fn clear_all_inserted(self) {
+        self.0.sparse_set.private_clear_all_inserted(self.0.current);
+    }
+}
+
+#[cfg(feature = "thread_local")]
+impl<Track, T: Component> crate::borrow::NonSendSync<ViewMut<'_, T, Track>>
+where
+    Track: InsertionTracking,
+{
+    /// Removes the *inserted* flag on all components of this storage.
+    #[inline]
+    pub fn clear_all_inserted(self) {
+        self.0.sparse_set.private_clear_all_inserted(self.0.current);
+    }
+}
+
 impl<Track, T: Component> ViewMut<'_, T, Track>
 where
     Track: ModificationTracking,
@@ -366,23 +403,67 @@ where
     }
 }
 
+#[cfg(feature = "thread_local")]
+impl<Track, T: Component + Sync> crate::borrow::NonSend<ViewMut<'_, T, Track>>
+where
+    Track: ModificationTracking,
+{
+    /// Removes the *modified* flag on all components of this storage.
+    #[inline]
+    pub fn clear_all_modified(self) {
+        self.0.sparse_set.private_clear_all_modified(self.0.current);
+    }
+}
+
+#[cfg(feature = "thread_local")]
+impl<Track, T: Component + Send> crate::borrow::NonSync<ViewMut<'_, T, Track>>
+where
+    Track: ModificationTracking,
+{
+    /// Removes the *modified* flag on all components of this storage.
+    #[inline]
+    pub fn clear_all_modified(self) {
+        self.0.sparse_set.private_clear_all_modified(self.0.current);
+    }
+}
+
+#[cfg(feature = "thread_local")]
+impl<Track, T: Component> crate::borrow::NonSendSync<ViewMut<'_, T, Track>>
+where
+    Track: ModificationTracking,
+{
+    /// Removes the *modified* flag on all components of this storage.
+    #[inline]
+    pub fn clear_all_modified(self) {
+        self.0.sparse_set.private_clear_all_modified(self.0.current);
+    }
+}
+
 impl<Track, T: Component> ViewMut<'_, T, Track>
 where
-    Track: InsertionTracking + ModificationTracking,
+    Track: InsertionOrModificationTracking,
 {
     /// Inside a workload returns `true` if `entity`'s component was inserted or modified since the last run of this system.\
-    /// Outside workloads returns `true` if `entity`'s component was inserted or modified since the last call to [`clear_all_inserted`](ViewMut::clear_all_inserted).\
+    /// Outside workloads returns `true` if `entity`'s component was inserted or modified since the last clear call.\
     /// Returns `false` if `entity` does not have a component in this storage.
     #[inline]
     pub fn is_inserted_or_modified(&self, entity: EntityId) -> bool {
-        self.is_inserted(entity) || self.is_modified(entity)
+        Track::is_inserted(self.sparse_set, entity, self.last_insertion, self.current)
+            || Track::is_modified(
+                self.sparse_set,
+                entity,
+                self.last_modification,
+                self.current,
+            )
     }
-    /// Wraps this view to be able to iterate *inserted* and *modified* components.
+    /// Wraps this view to iterate components with an enabled insertion or modification event.\
+    /// When both kinds are enabled, each matching component appears once.
     #[inline]
     pub fn inserted_or_modified(&self) -> InsertedOrModified<&Self> {
         InsertedOrModified(self)
     }
-    /// Wraps this view to be able to iterate *inserted* and *modified* components.
+    /// Wraps this view to mutably iterate components with an enabled insertion or modification event.\
+    /// When both kinds are enabled, each matching component appears once.
     #[inline]
     pub fn inserted_or_modified_mut(&mut self) -> InsertedOrModified<&mut Self> {
         InsertedOrModified(self)
@@ -392,6 +473,48 @@ where
     pub fn clear_all_inserted_and_modified(self) {
         self.sparse_set
             .private_clear_all_inserted_and_modified(self.current);
+    }
+}
+
+#[cfg(feature = "thread_local")]
+impl<Track, T: Component + Sync> crate::borrow::NonSend<ViewMut<'_, T, Track>>
+where
+    Track: InsertionOrModificationTracking,
+{
+    /// Removes the *inserted* and *modified* flags on all components of this storage.
+    #[inline]
+    pub fn clear_all_inserted_and_modified(self) {
+        self.0
+            .sparse_set
+            .private_clear_all_inserted_and_modified(self.0.current);
+    }
+}
+
+#[cfg(feature = "thread_local")]
+impl<Track, T: Component + Send> crate::borrow::NonSync<ViewMut<'_, T, Track>>
+where
+    Track: InsertionOrModificationTracking,
+{
+    /// Removes the *inserted* and *modified* flags on all components of this storage.
+    #[inline]
+    pub fn clear_all_inserted_and_modified(self) {
+        self.0
+            .sparse_set
+            .private_clear_all_inserted_and_modified(self.0.current);
+    }
+}
+
+#[cfg(feature = "thread_local")]
+impl<Track, T: Component> crate::borrow::NonSendSync<ViewMut<'_, T, Track>>
+where
+    Track: InsertionOrModificationTracking,
+{
+    /// Removes the *inserted* and *modified* flags on all components of this storage.
+    #[inline]
+    pub fn clear_all_inserted_and_modified(self) {
+        self.0
+            .sparse_set
+            .private_clear_all_inserted_and_modified(self.0.current);
     }
 }
 

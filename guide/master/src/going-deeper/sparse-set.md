@@ -5,7 +5,7 @@ of how it works, the actual implementation is more optimized both in term of spe
 
 ### Overview
 
-To understand how Shipyard uses sparse sets, we must first understand how sparse sets work.
+To understand how Shipyard uses sparse sets, we must first understand how sparse sets work.\
 A basic sparse set is a data structure for storing integers. It is comprised of two
 arrays: `sparse` and `dense`.
 
@@ -23,7 +23,7 @@ To add `3` to our sparse set, we first append it to `dense` and then set `sparse
 
 - Sparse Array: `[U, U, U, 0]`
 - Dense Array: `[3]`
-  `U` is short for uninitialised.
+  `U` is short for uninitialized.
 
 If we then add `0`, the sparse set will look like so:
 
@@ -74,11 +74,11 @@ SparseSet<SecondComponent>:
     data:   [SecondComponent(17), SecondComponent(3154)]
 ```
 
-`U` is short for uninitialised.
+`U` is short for uninitialized.
 
 ### Iteration
 
-To iterate over a single sparse set, we can simply iterate over the `data` array.
+To iterate over a single sparse set, we can simply iterate over the `data` array.\
 However, Shipyard also lets us iterate over multiple sparse sets.
 
 To iterate over multiple sparse sets, we first pick the shortest set (comparing the lengths
@@ -99,7 +99,7 @@ The first entity ID is `1`. Since we are iterating over `SecondComponent`, we al
 that entity `1` has a `SecondComponent`; we just need to check if the entity has a
 `FirstComponent`. As described above, to check whether an entity has a component, we have
 to check if `dense[sparse[id]] == id` in the sparse set of the component. `sparse[1]` in
-`SparseSet<FirstComponent>` is uninitialised and so we know that entity `1` does not have
+`SparseSet<FirstComponent>` is uninitialized and so we know that entity `1` does not have
 a `FirstComponent`.
 
 The next entity that contains a `SecondComponent` is `2`. However, this time, `sparse[2]`
@@ -127,7 +127,7 @@ dense: [2, 3]
 data: [FirstComponent(5050), FirstComponent(958)]
 ```
 
-`dense` and `data` shifted to the left, the first element in sparse is now uninitialised,
+`dense` and `data` shifted to the left, the first element in sparse is now uninitialized,
 and the indexes at `sparse[2]` and `sparse[3]` were updated.
 
 ### Additional Resources
@@ -137,5 +137,5 @@ with archetypes, another common way of representing data in ECS libraries. The b
 part of a larger series about the design and internals of ECS systems.
 
 [entityid docs]: https://docs.rs/shipyard/latest/shipyard/struct.EntityId.html
-[sparseset docs]: https://docs.rs/shipyard/latest/shipyard/struct.SparseSet.html
+[sparseset docs]: https://docs.rs/shipyard/latest/shipyard/sparse_set/struct.SparseSet.html
 [skypjack blog post]: https://skypjack.github.io/2019-03-07-ecs-baf-part-2/

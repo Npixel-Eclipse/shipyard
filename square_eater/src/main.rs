@@ -5,8 +5,8 @@ use macroquad::{
     ui::{root_ui, widgets::Button},
 };
 use shipyard::{
-    iter::IntoIter, sparse_set::SparseSet, AddComponent, AllStorages, AllStoragesViewMut,
-    Component, EntitiesViewMut, IntoWorkload, IntoWorkloadTrySystem, Unique, UniqueView,
+    all_storages::AllStorages, error::SystemError, iter::IntoIter, sparse_set::SparseSet,
+    AddComponent, AllStoragesViewMut, Component, EntitiesViewMut, IntoWorkload, Unique, UniqueView,
     UniqueViewMut, View, ViewMut, Workload, World,
 };
 
@@ -62,7 +62,7 @@ enum FloorResult {
     Win,
 }
 
-impl std::error::Error for FloorResult {}
+impl core::error::Error for FloorResult {}
 
 impl std::fmt::Display for FloorResult {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -258,7 +258,7 @@ fn floor_loop() -> Workload {
         spawn,
         collision,
         clean_up,
-        check_end_floor.into_workload_try_system().unwrap(),
+        check_end_floor,
         render,
     )
         .into_workload()
@@ -607,13 +607,13 @@ fn check_end_floor(
     power_ups: UniqueView<PowerUps>,
     spawned_on_floor: UniqueView<SpawnedOnFloor>,
     squares: ViewMut<Square>,
-) -> Result<(), FloorResult> {
+) -> Result<(), SystemError> {
     if player.square.size < BASE_INIT_SIZE {
-        Err(FloorResult::Loose)
+        Err(FloorResult::Loose.into())
     } else if spawned_on_floor.0 == (floor_counter.0 + 1) * 2 + power_ups.square_number()
         && squares.is_empty()
     {
-        Err(FloorResult::Win)
+        Err(FloorResult::Win.into())
     } else {
         Ok(())
     }

@@ -1,26 +1,29 @@
 use crate::component::Component;
-use crate::iter::IntoShiperator;
-use crate::sparse_set::{FullRawWindow, FullRawWindowMut, RawEntityIdAccess};
-use crate::storage::StorageId;
-use crate::tracking::{Inserted, InsertedOrModified, Modified, Tracking};
+use crate::iter::planner::ConstructionMetadata;
+use crate::iter::{IntoShiperator, RawEntityIdAccess};
+use crate::sparse_set::{FullRawWindow, FullRawWindowMut};
+use crate::tracking::{
+    Inserted, InsertedOrModified, InsertionOrModificationTracking, InsertionTracking,
+    ModificationTracking, Modified,
+};
 use crate::views::{View, ViewMut};
-use crate::ShipHashSet;
 
 macro_rules! impl_into_shiperator_tracking {
-    ($($type: ident)+) => {$(
-        impl<'tmp, 'v: 'tmp, T: Component, Track: Tracking> IntoShiperator
+    ($($type: ident => $capability: ident)+) => {$(
+        // SAFE: We wrap the view's own results and mark them filtered, they never drive a grouped
+        // walk. The filter only rejects candidates of the view's window, which upholds the rest.
+        unsafe impl<'tmp, 'v: 'tmp, T: Component, Track: $capability> IntoShiperator
             for $type<&'tmp View<'v, T, Track>>
         {
-            type Shiperator = $type<FullRawWindow<'tmp, T>>;
+            type Shiperator = $type<FullRawWindow<'tmp, T, Track>>;
 
             #[inline]
             fn into_shiperator(
                 self,
-                storage_ids: &mut ShipHashSet<StorageId>,
-            ) -> (Self::Shiperator, usize, RawEntityIdAccess) {
-                let (window, len, entity_access) = self.0.into_shiperator(storage_ids);
+            ) -> (Self::Shiperator, RawEntityIdAccess, ConstructionMetadata) {
+                let (window, entities, _) = self.0.into_shiperator();
 
-                ($type(window), len, entity_access)
+                ($type(window), entities, ConstructionMetadata::filtered())
             }
 
             #[inline]
@@ -34,19 +37,20 @@ macro_rules! impl_into_shiperator_tracking {
             }
         }
 
-        impl<'tmp, 'v: 'tmp, T: Component, Track: Tracking> IntoShiperator
+        // SAFE: We wrap the view's own results and mark them filtered, they never drive a grouped
+        // walk. The filter only rejects candidates of the view's window, which upholds the rest.
+        unsafe impl<'tmp, 'v: 'tmp, T: Component, Track: $capability> IntoShiperator
             for $type<&'tmp ViewMut<'v, T, Track>>
         {
-            type Shiperator = $type<FullRawWindow<'tmp, T>>;
+            type Shiperator = $type<FullRawWindow<'tmp, T, Track>>;
 
             #[inline]
             fn into_shiperator(
                 self,
-                storage_ids: &mut ShipHashSet<StorageId>,
-            ) -> (Self::Shiperator, usize, RawEntityIdAccess) {
-                let (window, len, entity_access) = self.0.into_shiperator(storage_ids);
+            ) -> (Self::Shiperator, RawEntityIdAccess, ConstructionMetadata) {
+                let (window, entities, _) = self.0.into_shiperator();
 
-                ($type(window), len, entity_access)
+                ($type(window), entities, ConstructionMetadata::filtered())
             }
 
             #[inline]
@@ -60,7 +64,9 @@ macro_rules! impl_into_shiperator_tracking {
             }
         }
 
-        impl<'tmp, 'v: 'tmp, T: Component, Track: Tracking> IntoShiperator
+        // SAFE: We wrap the view's own results and mark them filtered, they never drive a grouped
+        // walk. The filter only rejects candidates of the view's window, which upholds the rest.
+        unsafe impl<'tmp, 'v: 'tmp, T: Component, Track: $capability> IntoShiperator
             for $type<&'tmp mut ViewMut<'v, T, Track>>
         {
             type Shiperator = $type<FullRawWindowMut<'tmp, T, Track>>;
@@ -68,11 +74,10 @@ macro_rules! impl_into_shiperator_tracking {
             #[inline]
             fn into_shiperator(
                 self,
-                storage_ids: &mut ShipHashSet<StorageId>,
-            ) -> (Self::Shiperator, usize, RawEntityIdAccess) {
-                let (window, len, entity_access) = self.0.into_shiperator(storage_ids);
+            ) -> (Self::Shiperator, RawEntityIdAccess, ConstructionMetadata) {
+                let (window, entities, _) = self.0.into_shiperator();
 
-                ($type(window), len, entity_access)
+                ($type(window), entities, ConstructionMetadata::filtered())
             }
 
             #[inline]
@@ -88,4 +93,8 @@ macro_rules! impl_into_shiperator_tracking {
     )+};
 }
 
-impl_into_shiperator_tracking![Inserted Modified InsertedOrModified];
+impl_into_shiperator_tracking![
+    Inserted => InsertionTracking
+    Modified => ModificationTracking
+    InsertedOrModified => InsertionOrModificationTracking
+];

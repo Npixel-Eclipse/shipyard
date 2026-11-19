@@ -1,19 +1,32 @@
 test-all:
     cargo test --all-features
 
-test-no-default:
-    cargo test --tests --lib --no-default-features
+check-features $RUSTFLAGS="-D warnings":
+    cargo check --no-default-features
+    cargo check --no-default-features --features=proc
+    cargo check --no-default-features --features=std
+    cargo check --no-default-features --features=thread_local
+    cargo check --no-default-features --features=std,thread_local
+    cargo check --no-default-features --features=parallel
+    cargo check --no-default-features --features=parallel,thread_local
+    cargo check --no-default-features --features=serde1
+    cargo check --no-default-features --features=serde1,thread_local
+    cargo check --no-default-features --features=memory_constrained
+    cargo check --no-default-features --features=extended_tuple
+    cargo check --all-features
 
-miri: clean _miri
+miri:
+    cargo +nightly miri test --lib --no-default-features --features=std tests::miri::
+    cargo +nightly miri test --lib --no-default-features --features=std,thread_local tests::miri::
 
-_miri:
+miri-full:
     cargo +nightly miri test --tests --lib --no-default-features --features=std
 
 clean:
     cargo clean -p shipyard
 
 clippy $RUSTFLAGS="-D warnings":
-    cargo clippy
+    cargo clippy --all-features
 
 fmt:
     cargo fmt
@@ -30,16 +43,22 @@ move_square_eater:
 
 square_eater: build_square_eater move_square_eater
 
-test: fmt test-all doc miri clippy clean
-
-dev_visualizer $RUSTFLAGS = "--cfg=web_sys_unstable_apis":
-    trunk serve visualizer/index.html
+test: fmt check-features test-all doc miri clippy
 
 visualizer:
-    trunk serve visualizer/index.html
+    cd visualizer && dx serve --platform web
+
+visualizer_desktop:
+    cd visualizer && dx serve --platform desktop
+
+visualizer_bundle:
+    cd visualizer && dx bundle --platform web --release --out-dir dist
 
 rustfmt_errors:
     cargo +nightly fmt -- --config=error_on_line_overflow=true,error_on_unformatted=true
 
 publish version args="":
     cargo release {{version}} {{args}}
+
+book args="":
+    mdbook build ./guide/master {{args}}

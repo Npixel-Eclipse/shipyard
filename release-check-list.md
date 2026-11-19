@@ -1,6 +1,7 @@
 - make sure there is no debugging left
 - make sure the bunny demo and square eater are working
-- duplicate the guide
+- duplicate the guide (3 edits in the GH action)
+- change link to the guide in README.md
 - bump version
 - create new branch
 - change link to the guide in lib.rs

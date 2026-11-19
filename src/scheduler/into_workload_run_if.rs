@@ -1,13 +1,12 @@
 use crate::all_storages::AllStorages;
 use crate::borrow::{BorrowInfo, Mutability, WorldBorrow};
 use crate::error;
-use crate::scheduler::system::{RunIf, WorkloadRunIfFn};
 use crate::scheduler::TypeInfo;
+use crate::scheduler::system::{RunIf, WorkloadRunIf};
 use crate::storage::StorageId;
 use crate::tracking::TrackingTimestamp;
-use crate::World;
+use crate::world::World;
 use alloc::boxed::Box;
-use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -24,6 +23,8 @@ where
     fn into_workload_run_if(self) -> Result<RunIf, error::InvalidSystem> {
         Ok(RunIf {
             system_fn: Box::new(move |_: &World| Ok((self)())),
+            borrow_constraints: Vec::new(),
+            tracking_to_enable: Vec::new(),
         })
     }
 }
@@ -32,6 +33,41 @@ impl IntoRunIf<RunIf> for RunIf {
     fn into_workload_run_if(self) -> Result<RunIf, error::InvalidSystem> {
         Ok(self)
     }
+}
+
+/// Checks that a condition's borrows can all be held at the same time.
+fn validate_borrows(borrows: &[TypeInfo]) -> Result<(), error::InvalidSystem> {
+    if borrows.contains(&TypeInfo {
+        name: "".into(),
+        storage_id: StorageId::of::<AllStorages>(),
+        mutability: Mutability::Exclusive,
+        thread_safe: true,
+    }) && borrows.len() > 1
+    {
+        return Err(error::InvalidSystem::AllStorages);
+    }
+
+    // The condition holds all its borrows at once, so every pair has to be compatible.
+    for (index, a_type_info) in borrows.iter().enumerate() {
+        for b_type_info in &borrows[index + 1..] {
+            if a_type_info.storage_id != b_type_info.storage_id {
+                continue;
+            }
+
+            match (a_type_info.mutability, b_type_info.mutability) {
+                (Mutability::Exclusive, Mutability::Exclusive) => {
+                    return Err(error::InvalidSystem::MultipleViewsMut);
+                }
+                (Mutability::Exclusive, Mutability::Shared)
+                | (Mutability::Shared, Mutability::Exclusive) => {
+                    return Err(error::InvalidSystem::MultipleViews);
+                }
+                (Mutability::Shared, Mutability::Shared) => {}
+            }
+        }
+    }
+
+    Ok(())
 }
 
 macro_rules! impl_into_workload_run_if {
@@ -51,34 +87,12 @@ macro_rules! impl_into_workload_run_if {
                     $type::borrow_info(&mut borrows);
                 )+
 
-                if borrows.contains(&TypeInfo {
-                    name: "".into(),
-                    storage_id: StorageId::of::<AllStorages>(),
-                    mutability: Mutability::Exclusive,
-                    thread_safe: true,
-                }) && borrows.len() > 1
-                {
-                    return Err(error::InvalidSystem::AllStorages);
-                }
+                validate_borrows(&borrows)?;
 
-                let mid = borrows.len() / 2 + (borrows.len() % 2 != 0) as usize;
-
-                for a_type_info in &borrows[..mid] {
-                    for b_type_info in &borrows[mid..] {
-                        if a_type_info.storage_id == b_type_info.storage_id {
-                            match (a_type_info.mutability, b_type_info.mutability) {
-                                (Mutability::Exclusive, Mutability::Exclusive) => {
-                                    return Err(error::InvalidSystem::MultipleViewsMut)
-                                }
-                                (Mutability::Exclusive, Mutability::Shared)
-                                | (Mutability::Shared, Mutability::Exclusive) => {
-                                    return Err(error::InvalidSystem::MultipleViews)
-                                }
-                                (Mutability::Shared, Mutability::Shared) => {}
-                            }
-                        }
-                    }
-                }
+                let mut tracking_to_enable = Vec::new();
+                $(
+                    $type::enable_tracking(&mut tracking_to_enable);
+                )+
 
                 let last_run = AtomicU64::new(0);
                 Ok(RunIf {
@@ -87,6 +101,8 @@ macro_rules! impl_into_workload_run_if {
                         let last_run = TrackingTimestamp::new(last_run.swap(current.get(), Ordering::Acquire));
                         Ok((&&self)($($type::world_borrow(&world, Some(last_run), current)?),+))
                     }),
+                    borrow_constraints: borrows,
+                    tracking_to_enable,
                 })
             }
         }
@@ -113,16 +129,45 @@ into_workload_run_if![
     (EE, 30) (FF, 31)
 ];
 
+/// A workload condition's last run.
+///
+/// Cloning it gives a cursor that hasn't run yet: each system a workload condition is propagated to
+/// tracks the changes since its own last evaluation.
+struct Cursor(AtomicU64);
+
+impl Cursor {
+    fn new() -> Cursor {
+        Cursor(AtomicU64::new(0))
+    }
+
+    /// Moves the cursor to `current` and returns its previous position.
+    fn advance(&self, current: TrackingTimestamp) -> TrackingTimestamp {
+        // Closures call this method instead of using the atomic directly,
+        // that way they capture the whole `Cursor` and cloning them goes through its `Clone`.
+        TrackingTimestamp::new(self.0.swap(current.get(), Ordering::Acquire))
+    }
+}
+
+impl Clone for Cursor {
+    fn clone(&self) -> Cursor {
+        Cursor::new()
+    }
+}
+
 pub trait IntoWorkloadRunIf<B> {
-    fn into_workload_run_if(self) -> Result<Box<dyn WorkloadRunIfFn>, error::InvalidSystem>;
+    fn into_workload_run_if(self) -> Result<WorkloadRunIf, error::InvalidSystem>;
 }
 
 impl<F> IntoWorkloadRunIf<Nothing> for F
 where
     F: 'static + Send + Sync + Clone + Fn() -> bool,
 {
-    fn into_workload_run_if(self) -> Result<Box<dyn WorkloadRunIfFn>, error::InvalidSystem> {
-        Ok(Box::new(move |_: &World| Ok((self)())))
+    fn into_workload_run_if(self) -> Result<WorkloadRunIf, error::InvalidSystem> {
+        Ok(WorkloadRunIf {
+            system_fn: Box::new(move |_: &World| Ok((self)())),
+            borrow_constraints: Vec::new(),
+            tracking_to_enable: Vec::new(),
+        })
     }
 }
 
@@ -138,47 +183,29 @@ macro_rules! impl_into_workload_run_if {
                 Fn($($type),+) -> bool
                 + Fn($($type::WorldView<'a>),+) -> bool {
 
-            fn into_workload_run_if(self) -> Result<Box<dyn WorkloadRunIfFn>, error::InvalidSystem> {
+            fn into_workload_run_if(self) -> Result<WorkloadRunIf, error::InvalidSystem> {
                 let mut borrows = Vec::new();
                 $(
                     $type::borrow_info(&mut borrows);
                 )+
 
-                if borrows.contains(&TypeInfo {
-                    name: "".into(),
-                    storage_id: StorageId::of::<AllStorages>(),
-                    mutability: Mutability::Exclusive,
-                    thread_safe: true,
-                }) && borrows.len() > 1
-                {
-                    return Err(error::InvalidSystem::AllStorages);
-                }
+                validate_borrows(&borrows)?;
 
-                if borrows.len() > 1 {
-                    for (i, a_type_info) in borrows[..borrows.len() - 1].iter().enumerate() {
-                        for b_type_info in &borrows[i + 1..] {
-                            if a_type_info.storage_id == b_type_info.storage_id {
-                                match (a_type_info.mutability, b_type_info.mutability) {
-                                    (Mutability::Exclusive, Mutability::Exclusive) => {
-                                        return Err(error::InvalidSystem::MultipleViewsMut)
-                                    }
-                                    (Mutability::Exclusive, Mutability::Shared)
-                                    | (Mutability::Shared, Mutability::Exclusive) => {
-                                        return Err(error::InvalidSystem::MultipleViews)
-                                    }
-                                    (Mutability::Shared, Mutability::Shared) => {}
-                                }
-                            }
-                        }
-                    }
-                }
+                let mut tracking_to_enable = Vec::new();
+                $(
+                    $type::enable_tracking(&mut tracking_to_enable);
+                )+
 
-                let last_run = Arc::new(AtomicU64::new(0));
-                Ok(Box::new(move |world: &World| {
-                    let current = world.get_current();
-                    let last_run = TrackingTimestamp::new(last_run.swap(current.get(), Ordering::Acquire));
-                    Ok((&&self)($($type::world_borrow(&world, Some(last_run), current)?),+))
-                }))
+                let cursor = Cursor::new();
+                Ok(WorkloadRunIf {
+                    system_fn: Box::new(move |world: &World| {
+                        let current = world.get_current();
+                        let last_run = cursor.advance(current);
+                        Ok((&&self)($($type::world_borrow(&world, Some(last_run), current)?),+))
+                    }),
+                    borrow_constraints: borrows,
+                    tracking_to_enable,
+                })
             }
         }
     }

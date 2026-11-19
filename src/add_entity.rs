@@ -2,7 +2,7 @@ use crate::component::Component;
 use crate::entity_id::EntityId;
 use crate::views::ViewMut;
 
-/// Trait describing how to add a new entity to a storage.
+/// Creates a new entity with the given components.
 pub trait AddEntity {
     #[allow(missing_docs)]
     type Component;
@@ -23,7 +23,9 @@ impl<T: Component, TRACK> AddEntity for ViewMut<'_, T, TRACK> {
 
     #[inline]
     fn add_entity(storage: &mut Self, entity: EntityId, component: Self::Component) {
-        AddEntity::add_entity(&mut &mut *storage, entity, component);
+        let _ = storage
+            .sparse_set
+            .insert(entity, component, storage.current);
     }
 }
 
@@ -33,9 +35,7 @@ impl<T: Component, TRACK> AddEntity for &mut ViewMut<'_, T, TRACK> {
     #[inline]
     #[track_caller]
     fn add_entity(storage: &mut Self, entity: EntityId, component: Self::Component) {
-        let _ = storage
-            .sparse_set
-            .insert(entity, component, storage.current);
+        AddEntity::add_entity(*storage, entity, component);
     }
 }
 
