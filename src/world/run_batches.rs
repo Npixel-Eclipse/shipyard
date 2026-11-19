@@ -3,6 +3,11 @@ use crate::scheduler::{Batches, Label};
 use crate::world::World;
 use alloc::boxed::Box;
 
+#[cfg(feature = "scheduler-experiment")]
+mod scheduler_experiment;
+#[cfg(feature = "scheduler-experiment")]
+use scheduler_experiment::{mode, Mode};
+
 impl World {
     #[cfg(feature = "parallel")]
     #[allow(clippy::type_complexity)]
@@ -13,6 +18,11 @@ impl World {
         batches: &Batches,
         #[cfg_attr(not(feature = "tracing"), allow(unused))] workload_name: &dyn Label,
     ) -> Result<(), error::RunWorkload> {
+        #[cfg(feature = "scheduler-experiment")]
+        if mode() == Mode::Direct {
+            return self.run_batches_direct(systems, system_names, batches, workload_name);
+        }
+
         #[cfg(feature = "tracing")]
         let parent_span = tracing::info_span!("workload", name = ?workload_name);
         #[cfg(feature = "tracing")]

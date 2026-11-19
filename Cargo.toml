@@ -31,6 +31,7 @@ tracing = { version = "0.1.44", default-features = false, optional = true }
 default = ["parallel", "proc", "std"]
 extended_tuple = []
 parallel = ["rayon", "shipyard_proc/parallel", "hashbrown/rayon"]
+scheduler-experiment = ["std", "parallel"]
 proc = ["shipyard_proc"]
 serde1 = ["serde", "hashbrown/serde"]
 std = ["hashbrown/default-hasher"]
@@ -54,3 +55,7 @@ tag-message = "Release {{crate_name}} version {{version}}"
 [[example]]
 name = "chunk_planning"
 required-features = ["parallel", "std"]
+
+[profile.buildfast]
+inherits = "dev"
+debug = 0
