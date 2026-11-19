@@ -21,6 +21,7 @@ use tracing::{info_span, Span};
 pub(super) enum Mode {
     Baseline,
     Direct,
+    Dag,
 }
 
 impl Mode {
@@ -28,6 +29,7 @@ impl Mode {
         match value {
             None | Some("baseline") => Self::Baseline,
             Some("direct") => Self::Direct,
+            Some("dag") => Self::Dag,
             Some(value) => panic!("Unsupported BATTLE_SCHEDULER_MODE: {value}"),
         }
     }
@@ -36,6 +38,7 @@ impl Mode {
         match self {
             Self::Baseline => "baseline",
             Self::Direct => "direct",
+            Self::Dag => "dag",
         }
     }
 }

@@ -43,7 +43,7 @@ impl Execution<'_> {
             return;
         }
         let result = catch_unwind(AssertUnwindSafe(|| {
-            self.world.run_dag_system(
+            self.world.run_single_system(
                 self.systems,
                 self.names,
                 #[cfg(feature = "tracing")]
@@ -96,7 +96,7 @@ impl World {
             if let Some(plan) = &batches.dag {
                 for epoch in &plan.epochs {
                     match epoch {
-                        DagEpoch::Fence(batch) => self.run_dag_fence_batch(
+                        DagEpoch::Fence(batch) => self.run_one_batch_direct(
                             systems,
                             system_names,
                             batches,
@@ -116,7 +116,7 @@ impl World {
             } else {
                 // Fail closed without reentering a mode router.
                 for batch in 0..batches.parallel.len() {
-                    self.run_dag_fence_batch(
+                    self.run_one_batch_direct(
                         systems,
                         system_names,
                         batches,
@@ -178,95 +178,6 @@ impl World {
             Some((_, error)) => Err(error),
             None => Ok(()),
         }
-    }
-
-    fn run_dag_system(
-        &self,
-        systems: &[SystemFn],
-        names: &[Box<dyn Label>],
-        #[cfg(feature = "tracing")] parent: &Span,
-        index: usize,
-    ) -> Result<(), RunWorkload> {
-        #[cfg(feature = "tracing")]
-        let span = info_span!(parent: parent.clone(), "system", name = ?names[index]);
-        #[cfg(feature = "tracing")]
-        let _span = span.enter();
-        (systems[index])(self).map_err(|error| RunWorkload::Run((names[index].clone(), error)))
-    }
-
-    // A verbatim-semantic baseline batch for condition/owner/fallible fences.
-    // Integration may substitute the validated direct-dispatch batch helper;
-    // condition evaluation and direct-error priority must remain unchanged.
-    fn run_dag_fence_batch(
-        &self,
-        systems: &[SystemFn],
-        names: &[Box<dyn Label>],
-        batches: &Batches,
-        batch_index: usize,
-        #[cfg(feature = "tracing")] parent: &Span,
-    ) -> Result<(), RunWorkload> {
-        let batch = &batches.parallel[batch_index];
-        let conditions = &batches.parallel_run_if[batch_index];
-        let run_condition = |index: usize, condition: usize| -> Result<bool, RunWorkload> {
-            if condition == usize::MAX {
-                Ok(true)
-            } else {
-                (batches.systems_run_if[condition])(self)
-                    .map_err(|error| RunWorkload::Run((names[index].clone(), error)))
-            }
-        };
-        let direct_eligible = match batch.0 {
-            Some(index) => run_condition(index, conditions.0)?,
-            None => true,
-        };
-        let parallel_eligible = batch
-            .1
-            .iter()
-            .zip(&conditions.1)
-            .map(|(&index, &condition)| run_condition(index, condition))
-            .collect::<Result<Vec<_>, _>>()?;
-        let mut start = 0;
-        let direct = batch.0.filter(|_| direct_eligible).or_else(|| {
-            let first = batch.1.first().copied().filter(|_| parallel_eligible[0]);
-            if first.is_some() {
-                start = 1;
-            }
-            first
-        });
-        let mut parallel_result = Ok(());
-        in_place_scope(|scope| -> Result<(), RunWorkload> {
-            if start < batch.1.len() {
-                scope.spawn(|_| {
-                    use rayon::prelude::*;
-                    parallel_result = batch.1[start..]
-                        .par_iter()
-                        .zip(&parallel_eligible[start..])
-                        .try_for_each(|(&index, &eligible)| {
-                            if !eligible {
-                                return Ok(());
-                            }
-                            self.run_dag_system(
-                                systems,
-                                names,
-                                #[cfg(feature = "tracing")]
-                                parent,
-                                index,
-                            )
-                        });
-                });
-            }
-            if let Some(index) = direct {
-                self.run_dag_system(
-                    systems,
-                    names,
-                    #[cfg(feature = "tracing")]
-                    parent,
-                    index,
-                )?;
-            }
-            Ok(())
-        })?;
-        parallel_result
     }
 }
 

@@ -42,10 +42,11 @@ fn error(message: &str) -> Run {
 }
 
 #[test]
-fn mode_defaults_to_baseline_and_only_direct_opts_in() {
+fn mode_defaults_to_baseline_and_experiments_require_explicit_selection() {
     assert_eq!(Mode::parse(None), Mode::Baseline);
     assert_eq!(Mode::parse(Some("baseline")), Mode::Baseline);
     assert_eq!(Mode::parse(Some("direct")), Mode::Direct);
+    assert_eq!(Mode::parse(Some("dag")), Mode::Dag);
 }
 
 #[test]

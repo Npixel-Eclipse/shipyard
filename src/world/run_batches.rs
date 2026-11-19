@@ -19,8 +19,14 @@ impl World {
         #[cfg_attr(not(feature = "tracing"), allow(unused))] workload_name: &dyn Label,
     ) -> Result<(), error::RunWorkload> {
         #[cfg(feature = "scheduler-experiment")]
-        if mode() == Mode::Direct {
-            return self.run_batches_direct(systems, system_names, batches, workload_name);
+        match mode() {
+            Mode::Baseline => {}
+            Mode::Direct => {
+                return self.run_batches_direct(systems, system_names, batches, workload_name);
+            }
+            Mode::Dag => {
+                return self.run_batches_dag(systems, system_names, batches, workload_name);
+            }
         }
 
         #[cfg(feature = "tracing")]
@@ -187,7 +193,7 @@ impl World {
     }
 
     #[allow(clippy::type_complexity)]
-    fn run_single_system(
+    pub(super) fn run_single_system(
         &self,
         systems: &[Box<dyn Fn(&World) -> Result<(), error::Run> + Send + Sync>],
         system_names: &[Box<dyn Label>],

@@ -3,8 +3,9 @@
 Base: Shipyard 0.11.9, commit `246579659572b816d7f252f005c578d47667490c`.
 `scheduler-experiment` enables `std` and `parallel`; it is off by default.
 This prototype supplies `World::run_batches_dag` internally. The experiment
-integration selects it explicitly; this branch does not change the baseline
-mode router. No production rollout is implied.
+integration selects it with `BATTLE_SCHEDULER_MODE=dag`; the unset mode
+remains baseline. Fences and validation fallback reuse `run_one_batch_direct`
+from stage 1, so the second comparison isolates DAG scheduling. No production rollout is implied.
 
 ## Registration-time graph
 

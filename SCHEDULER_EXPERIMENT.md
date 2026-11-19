@@ -9,6 +9,8 @@ mode before starting the process:
 - `BATTLE_SCHEDULER_MODE=direct`: ordinary parallel batches are driven by the
   caller's parallel iterator, without the outer `scope.spawn` wrapper and its
   batch completion scope. Singleton batches call the system directly.
+- `BATTLE_SCHEDULER_MODE=dag`: stage-1 direct fences plus the opt-in DAG
+  executor described in `SCHEDULER_DAG_EXPERIMENT.md`.
 - Any other explicit value fails rather than silently measuring the baseline.
 
 The selection is cached once per process and checked once per workload. When
