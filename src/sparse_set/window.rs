@@ -16,7 +16,7 @@ use core::ptr::{self, NonNull};
 
 /// Raw access to a storage's components.
 ///
-/// All pointers are anchored at the start of the storage's allocations.\
+/// Dense array pointers are anchored at the start of their allocations.\
 /// Captains iterate a segment of the storage: they receive indices local to that segment
 /// and resolve them to absolute storage indices by adding `segment_start`.\
 /// Sparse lookups always return absolute indices.
@@ -361,27 +361,29 @@ unsafe impl<T: Send + Component, Track: Tracking> Send for FullRawWindowMut<'_, 
 impl<'w, T: Component, Track: Tracking> FullRawWindowMut<'w, T, Track> {
     #[inline]
     pub(crate) fn new(view: &mut ViewMut<'_, T, Track>) -> Self {
-        let sparse_len = view.sparse.len();
-        let sparse: *mut Option<Box<Page>> = view.sparse.as_mut_ptr();
+        // Reborrow the storage once so field access preserves the summary pointer.
+        let storage = &mut *view.sparse_set;
+        let sparse_len = storage.sparse.len();
+        let sparse: *mut Option<Box<Page>> = storage.sparse.as_mut_ptr();
         let sparse = sparse as *mut *mut EntityId;
 
         FullRawWindowMut {
             sparse,
             sparse_len,
-            dense: NonNull::new(view.dense.as_mut_ptr().cast()).unwrap(),
-            dense_len: view.dense.len(),
+            dense: NonNull::new(storage.dense.as_mut_ptr().cast()).unwrap(),
+            dense_len: storage.dense.len(),
             segment_start: 0,
-            data: view.data.as_mut_ptr(),
-            insertion_data: view.insertion_data.as_ptr(),
-            modification_summary: NonNull::from(&view.modification_summary),
-            modification_writers: NonNull::from(view.modification_summary.writers()),
+            data: storage.data.as_mut_ptr(),
+            insertion_data: storage.insertion_data.as_ptr(),
+            modification_summary: NonNull::from(&storage.modification_summary),
+            modification_writers: NonNull::from(storage.modification_summary.writers()),
             chunks_prepared: false,
-            insertion_chunks: NonNull::from(&view.insertion_chunks[..]),
-            modification_data: view.modification_data.as_mut_ptr(),
+            insertion_chunks: NonNull::from(&storage.insertion_chunks[..]),
+            modification_data: storage.modification_data.as_mut_ptr(),
             last_insertion: view.last_insertion,
             last_modification: view.last_modification,
             current: view.current,
-            is_tracking_modification: view.is_tracking_modification(),
+            is_tracking_modification: storage.is_tracking_modification(),
             _phantom: PhantomData,
         }
     }
@@ -431,8 +433,7 @@ impl<'w, T: Component, Track: Tracking> FullRawWindowMut<'w, T, Track> {
             _phantom: PhantomData,
         };
         // The metadata points to the storage, our caller can't take it before handing us the
-        // view: moving it in reborrows the storage exclusively. The window only points into
-        // the storage's allocations.
+        // view: moving it in reborrows the storage exclusively.
         let metadata = ConstructionMetadata::window(sparse_set);
 
         (window, all_borrow, borrow, metadata)
