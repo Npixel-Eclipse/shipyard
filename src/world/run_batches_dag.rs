@@ -4,6 +4,7 @@
 
 use crate::error::{Run, RunWorkload};
 use crate::scheduler::dag::{DagEpoch, DagGraph};
+use crate::scheduler::order_witness::ensure_bound as ensure_order_witness_bound;
 use crate::scheduler::{Batches, Label};
 use crate::world::World;
 use alloc::boxed::Box;
@@ -88,11 +89,22 @@ impl World {
         batches: &Batches,
         #[cfg_attr(not(feature = "tracing"), allow(unused))] workload_name: &dyn Label,
     ) -> Result<(), RunWorkload> {
+        ensure_order_witness_bound();
         #[cfg(feature = "tracing")]
         let parent_span = info_span!("workload", name = ?workload_name);
         #[cfg(feature = "tracing")]
         let _parent_span = parent_span.enter();
         let run = || -> Result<(), RunWorkload> {
+            if let Some(witness) = batches.dag.as_ref().and_then(|plan| plan.order_witness.as_ref()) {
+                return self.run_order_witness(
+                    systems,
+                    system_names,
+                    batches,
+                    witness,
+                    #[cfg(feature = "tracing")]
+                    &parent_span,
+                );
+            }
             if let Some(plan) = &batches.dag {
                 for epoch in &plan.epochs {
                     match epoch {
@@ -183,3 +195,5 @@ impl World {
 
 #[cfg(test)]
 mod tests;
+
+mod order_witness;

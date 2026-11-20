@@ -12,6 +12,10 @@ use alloc::format;
 // use alloc::string::String;
 #[cfg(feature = "scheduler-experiment")]
 use crate::scheduler::dag::{write_plan_output, DagInput, DagPlan, Fallible};
+#[cfg(feature = "scheduler-experiment")]
+use crate::scheduler::order_witness::prepare as prepare_order_witness;
+#[cfg(feature = "scheduler-registration-benchmark")]
+use crate::scheduler::registration_benchmark::{build_graph_enabled, record, Phase, Timer};
 use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt::Debug;
@@ -91,10 +95,18 @@ pub(super) fn create_workload(
     default: &mut Box<dyn Label>,
     #[cfg(feature = "scheduler-experiment")] dag_registered_fallible: &mut Vec<bool>,
 ) -> Result<WorkloadInfo, error::AddWorkload> {
+    #[cfg(feature = "scheduler-registration-benchmark")]
+    let complete_timer = Timer::start();
+    #[cfg(feature = "scheduler-registration-benchmark")]
+    let build_dag = build_graph_enabled();
+    #[cfg(all(feature = "scheduler-experiment", not(feature = "scheduler-registration-benchmark")))]
+    let build_dag = true;
     if workloads.contains_key(&builder.name) {
         return Err(error::AddWorkload::AlreadyExists);
     }
 
+    #[cfg(feature = "scheduler-registration-benchmark")]
+    let timer = Timer::start();
     let mut to_be_placed_systems = insert_systems_in_scheduler(
         &mut builder,
         systems,
@@ -104,7 +116,13 @@ pub(super) fn create_workload(
         tracking_to_enable,
         #[cfg(feature = "scheduler-experiment")]
         dag_registered_fallible,
+        #[cfg(feature = "scheduler-experiment")]
+        build_dag,
     );
+    #[cfg(feature = "scheduler-registration-benchmark")]
+    timer.finish(Phase::InsertSystems);
+    #[cfg(feature = "scheduler-registration-benchmark")]
+    let timer = Timer::start();
 
     if let Err(err) = check_require_in_workload(&mut to_be_placed_systems) {
         return Err(err);
@@ -138,6 +156,10 @@ pub(super) fn create_workload(
     if let Err(err) = check_require_after(&mut to_be_placed_systems) {
         return Err(err);
     }
+    #[cfg(feature = "scheduler-registration-benchmark")]
+    timer.finish(Phase::Requirements);
+    #[cfg(feature = "scheduler-registration-benchmark")]
+    let node_count = to_be_placed_systems.len();
 
     let mut batches = Batches {
         workload_run_if,
@@ -145,26 +167,42 @@ pub(super) fn create_workload(
     };
 
     #[cfg(feature = "scheduler-experiment")]
-    let dag_inputs: Vec<_> = to_be_placed_systems
-        .iter()
-        .map(|system| DagInput {
-            system_index: system.index,
-            hard_after: system.hard_after.0.clone(),
-            borrow_constraints: system.borrow_constraints.clone(),
-            fallible: system.fallible,
-        })
-        .collect();
+    let dag_inputs: Vec<_> = if build_dag {
+        #[cfg(feature = "scheduler-registration-benchmark")]
+        let timer = Timer::start();
+        let inputs = to_be_placed_systems.iter().map(|system| DagInput {
+                system_index: system.index,
+                hard_after: system.hard_after.0.clone(),
+                borrow_constraints: system.borrow_constraints.clone(),
+                fallible: system.fallible,
+            }).collect();
+        #[cfg(feature = "scheduler-registration-benchmark")]
+        timer.finish(Phase::DagInputCapture);
+        inputs
+    } else {
+        Vec::new()
+    };
     #[cfg(feature = "scheduler-experiment")]
     let mut dag_occurrences = Vec::new();
+    #[cfg(feature = "scheduler-registration-benchmark")]
+    let timer = Timer::start();
     let batches_info = order_systems(
         &mut to_be_placed_systems,
         &mut batches,
         #[cfg(feature = "scheduler-experiment")]
         &mut dag_occurrences,
+        #[cfg(feature = "scheduler-experiment")]
+        build_dag,
     )?;
+    #[cfg(feature = "scheduler-registration-benchmark")]
+    timer.finish(Phase::BaselineBatches);
     #[cfg(feature = "scheduler-experiment")]
-    {
+    if build_dag {
+        #[cfg(feature = "scheduler-registration-benchmark")]
+        let timer = Timer::start();
         batches.dag = DagPlan::build(&dag_inputs, &dag_occurrences, &batches);
+        #[cfg(feature = "scheduler-registration-benchmark")]
+        timer.finish(Phase::DagPlanBuild);
         write_plan_output(
             &*workload_name,
             system_names,
@@ -172,6 +210,19 @@ pub(super) fn create_workload(
             &dag_occurrences,
             &batches,
         );
+    }
+    #[cfg(feature = "scheduler-experiment")]
+    {
+        let witness = prepare_order_witness(
+            &*workload_name,
+            system_names,
+            &dag_inputs,
+            &dag_occurrences,
+            &batches,
+        );
+        if let Some(plan) = &mut batches.dag {
+            plan.order_witness = witness;
+        }
     }
     let workload_info = WorkloadInfo {
         name: format!("{:?}", workload_name),
@@ -181,7 +232,11 @@ pub(super) fn create_workload(
     if workloads.is_empty() {
         *default = workload_name.clone();
     }
+    #[cfg(feature = "scheduler-registration-benchmark")]
+    record(node_count, batches.parallel.len(), build_dag, batches.dag.is_some());
     workloads.insert(workload_name, batches);
+    #[cfg(feature = "scheduler-registration-benchmark")]
+    complete_timer.finish(Phase::CreateWorkload);
 
     Ok(workload_info)
 }
@@ -329,6 +384,7 @@ fn insert_systems_in_scheduler(
     lookup_table: &mut ShipHashMap<TypeId, usize>,
     all_tracking_to_enable: &mut Vec<fn(&AllStorages) -> Result<(), error::GetStorage>>,
     #[cfg(feature = "scheduler-experiment")] dag_registered_fallible: &mut Vec<bool>,
+    #[cfg(feature = "scheduler-experiment")] capture_dag: bool,
 ) -> Vec<ToBePlacedSystem> {
     builder
         .systems
@@ -359,12 +415,14 @@ fn insert_systems_in_scheduler(
                 #[cfg(not(feature = "scheduler-experiment"))]
                 let _ = occurrence;
                 #[cfg(feature = "scheduler-experiment")]
-                let marked_fallible = tags.iter().any(|tag| {
+                let marked_fallible = capture_dag && tags.iter().any(|tag| {
                     tag.as_any().downcast_ref::<TypeId>() == Some(&TypeId::of::<Fallible>())
                 });
                 let system_index = *lookup_table.entry(type_id).or_insert_with(|| {
                     #[cfg(feature = "scheduler-experiment")]
-                    dag_registered_fallible.push(marked_fallible);
+                    if capture_dag {
+                        dag_registered_fallible.push(marked_fallible);
+                    }
                     systems.push(system_fn);
                     system_names.push(display_name.clone());
                     system_generators.push(generator);
@@ -393,7 +451,7 @@ fn insert_systems_in_scheduler(
                     #[cfg(feature = "scheduler-experiment")]
                     occurrence,
                     #[cfg(feature = "scheduler-experiment")]
-                    fallible: dag_registered_fallible[system_index],
+                    fallible: capture_dag && dag_registered_fallible[system_index],
                     index: system_index,
                     display_name,
                     borrow_constraints,
@@ -613,6 +671,7 @@ fn order_systems(
     to_be_placed_systems: &mut Vec<ToBePlacedSystem>,
     batches: &mut Batches,
     #[cfg(feature = "scheduler-experiment")] dag_occurrences: &mut Vec<Vec<usize>>,
+    #[cfg(feature = "scheduler-experiment")] capture_dag: bool,
 ) -> Result<Vec<BatchInfo>, error::AddWorkload> {
     if to_be_placed_systems.is_empty() {
         return Ok(Vec::new());
@@ -636,7 +695,9 @@ fn order_systems(
     }];
     batches.parallel.push((None, Vec::new()));
     #[cfg(feature = "scheduler-experiment")]
-    dag_occurrences.push(Vec::new());
+    if capture_dag {
+        dag_occurrences.push(Vec::new());
+    }
     batches.parallel_run_if.push((usize::MAX, Vec::new()));
     let mut latest_batch = &mut batches.parallel[0];
     let mut latest_batch_run_if = &mut batches.parallel_run_if[0];
@@ -650,7 +711,9 @@ fn order_systems(
             if conflict.is_some() {
                 batches.parallel.push((None, Vec::new()));
                 #[cfg(feature = "scheduler-experiment")]
-                dag_occurrences.push(Vec::new());
+                if capture_dag {
+                    dag_occurrences.push(Vec::new());
+                }
                 batches.parallel_run_if.push((usize::MAX, Vec::new()));
                 batches_info.push(BatchInfo {
                     systems: (None, Vec::new()),
@@ -735,7 +798,9 @@ fn order_systems(
         } else {
             batches.parallel.push((None, Vec::new()));
             #[cfg(feature = "scheduler-experiment")]
-            dag_occurrences.push(Vec::new());
+            if capture_dag {
+                dag_occurrences.push(Vec::new());
+            }
             batches.parallel_run_if.push((usize::MAX, Vec::new()));
             batches_info.push(BatchInfo {
                 systems: (None, Vec::new()),

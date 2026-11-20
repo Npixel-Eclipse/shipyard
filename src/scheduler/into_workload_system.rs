@@ -6,6 +6,8 @@ use crate::scheduler::label::{SystemLabel, WorkloadLabel};
 use crate::scheduler::{AsLabel, Label, TypeInfo, Workload, WorkloadSystem};
 use crate::storage::StorageId;
 use crate::tracking::TrackingTimestamp;
+#[cfg(feature = "scheduler-experiment")]
+use crate::tracking_observation::system_started;
 use crate::world::World;
 use alloc::boxed::Box;
 use alloc::vec;
@@ -151,6 +153,8 @@ macro_rules! impl_into_workload_system {
                     system_fn: Box::new(move |world: &World| {
                         let current = world.get_current();
                         let last_run = TrackingTimestamp::new(last_run.swap(current.get(), Ordering::Acquire));
+                        #[cfg(feature = "scheduler-experiment")]
+                        let _observation = system_started(current, type_name::<Func>());
                         Ok(drop((&&self)($($type::world_borrow(&world, Some(last_run), current)?),+)))
                     }),
                     type_id: TypeId::of::<Func>(),

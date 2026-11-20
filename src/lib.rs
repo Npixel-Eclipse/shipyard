@@ -72,6 +72,8 @@ mod public_transport;
 mod remove;
 /// Stores systems from all workloads and their scheduling.
 pub mod scheduler;
+#[cfg(feature = "scheduler-experiment")]
+pub mod tracking_observation;
 mod seal;
 /// Default component storage.
 pub mod sparse_set;

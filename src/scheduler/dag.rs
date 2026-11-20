@@ -3,6 +3,7 @@
 use crate::all_storages::AllStorages;
 use crate::borrow::Mutability;
 use crate::scheduler::Label;
+use crate::scheduler::order_witness::OrderWitness;
 use crate::scheduler::{Batches, TypeInfo};
 use alloc::boxed::Box;
 use alloc::format;
@@ -17,6 +18,8 @@ use std::fs::{create_dir_all, File};
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 use std::process::id as process_id;
+#[cfg(feature = "scheduler-registration-benchmark")]
+use crate::scheduler::registration_benchmark::{Phase, Timer};
 
 /// Private TypeId tag; never exposed as a user-facing scheduling label.
 pub(crate) struct Fallible;
@@ -49,6 +52,7 @@ pub(crate) enum DagEpoch {
 
 pub(crate) struct DagPlan {
     pub(crate) epochs: Vec<DagEpoch>,
+    pub(crate) order_witness: Option<OrderWitness>,
 }
 
 impl DagPlan {
@@ -113,7 +117,7 @@ impl DagPlan {
                 || ids.iter().any(|&id| inputs[id].fallible);
             if is_fence {
                 if !pending.is_empty() {
-                    epochs.push(DagEpoch::Graph(DagGraph::build(inputs, &pending)?));
+                    epochs.push(DagEpoch::Graph(DagGraph::build(inputs, &pending, &batch_of)?));
                     pending.clear();
                 }
                 epochs.push(DagEpoch::Fence(batch));
@@ -122,14 +126,20 @@ impl DagPlan {
             }
         }
         if !pending.is_empty() {
-            epochs.push(DagEpoch::Graph(DagGraph::build(inputs, &pending)?));
+            epochs.push(DagEpoch::Graph(DagGraph::build(inputs, &pending, &batch_of)?));
         }
-        Some(Self { epochs })
+        Some(Self { epochs, order_witness: None })
     }
 }
 
 impl DagGraph {
-    fn build(inputs: &[DagInput], occurrences: &[usize]) -> Option<Self> {
+    fn build(
+        inputs: &[DagInput],
+        occurrences: &[usize],
+        batch_of: &[usize],
+    ) -> Option<Self> {
+        #[cfg(feature = "scheduler-registration-benchmark")]
+        let timer = Timer::start();
         let mut local = vec![usize::MAX; inputs.len()];
         for (position, &id) in occurrences.iter().enumerate() {
             local[id] = position;
@@ -159,16 +169,29 @@ impl DagGraph {
             // Orient by the actual baseline ordering; explicit ordering may have
             // deliberately moved a system relative to its registration order.
             for before in 0..after {
-                if conflicts(
-                    &inputs[occurrences[before]].borrow_constraints,
-                    &input.borrow_constraints,
-                ) {
+                let before_id = occurrences[before];
+                let before_input = &inputs[before_id];
+                // Registered functions share a last_run timestamp even when
+                // their component views are read-only. Preserve completion
+                // between their original batches, but retain the original
+                // independence of repeated occurrences within one batch.
+                let shared_system_across_batches = before_input.system_index == input.system_index
+                    && batch_of.get(before_id)? != batch_of.get(after_id)?;
+                if shared_system_across_batches
+                    || conflicts(&before_input.borrow_constraints, &input.borrow_constraints)
+                {
                     add_edge(&mut nodes, before, after);
                 }
             }
         }
         let raw_edge_count = nodes.iter().map(|node| node.successors.len()).sum();
+        #[cfg(feature = "scheduler-registration-benchmark")]
+        timer.finish(Phase::DagEdges);
+        #[cfg(feature = "scheduler-registration-benchmark")]
+        let timer = Timer::start();
         reduce_transitive_edges(&mut nodes);
+        #[cfg(feature = "scheduler-registration-benchmark")]
+        timer.finish(Phase::DagReduction);
         let roots = nodes
             .iter()
             .enumerate()
@@ -350,7 +373,7 @@ mod tests {
             input(5, &[], vec![borrow::<u32>(Mutability::Shared)]),
             input(6, &[1], vec![borrow::<u32>(Mutability::Exclusive)]),
         ];
-        let Some(graph) = DagGraph::build(&inputs, &[0, 1, 2]) else {
+        let Some(graph) = DagGraph::build(&inputs, &[0, 1, 2], &[0, 0, 1]) else {
             panic!("valid graph");
         };
         assert_eq!(graph.nodes[0].occurrence, 0);
@@ -361,17 +384,44 @@ mod tests {
     }
 
     #[test]
+    fn repeated_readers_keep_cross_batch_order_without_ordering_batch_siblings() {
+        let inputs: Vec<_> = (0..4)
+            .map(|_| input(5, &[], vec![borrow::<u32>(Mutability::Shared)]))
+            .collect();
+        // Also exercise an explicit reordering relative to occurrence IDs.
+        // Every reader in the earlier batch must precede every later reader;
+        // connecting just the immediately previous occurrence is insufficient.
+        for (occurrences, batch_of) in [
+            ([0, 1, 2, 3], [0, 0, 1, 1]),
+            ([2, 3, 0, 1], [1, 1, 0, 0]),
+        ] {
+            let Some(graph) = DagGraph::build(&inputs, &occurrences, &batch_of) else {
+                panic!("valid repeated-reader graph");
+            };
+            assert_eq!(graph.roots, vec![0, 1]);
+            assert_eq!(graph.raw_edge_count, 4);
+            assert_eq!(graph.nodes[0].occurrence, occurrences[0]);
+            assert_eq!(graph.nodes[0].successors, vec![2, 3]);
+            assert_eq!(graph.nodes[1].successors, vec![2, 3]);
+            assert_eq!(graph.nodes[2].predecessors, 2);
+            assert_eq!(graph.nodes[3].predecessors, 2);
+            assert!(graph.nodes[2].successors.is_empty());
+            assert!(graph.nodes[3].successors.is_empty());
+        }
+    }
+
+    #[test]
     fn explicit_reordering_orients_conflicts_in_baseline_order() {
         let inputs = vec![
             input(0, &[1], vec![borrow::<u32>(Mutability::Exclusive)]),
             input(1, &[], vec![borrow::<u32>(Mutability::Exclusive)]),
         ];
-        let Some(graph) = DagGraph::build(&inputs, &[1, 0]) else {
+        let Some(graph) = DagGraph::build(&inputs, &[1, 0], &[1, 0]) else {
             panic!("valid graph");
         };
         assert_eq!(graph.roots, vec![0]);
         assert_eq!(graph.nodes[0].successors, vec![1]);
-        assert!(DagGraph::build(&inputs, &[0, 1]).is_none());
+        assert!(DagGraph::build(&inputs, &[0, 1], &[1, 0]).is_none());
     }
 
     #[test]
@@ -382,7 +432,7 @@ mod tests {
             input(2, &[0], vec![]),
             input(3, &[0, 1, 2], vec![]),
         ];
-        let Some(graph) = DagGraph::build(&inputs, &[0, 1, 2, 3]) else {
+        let Some(graph) = DagGraph::build(&inputs, &[0, 1, 2, 3], &[0, 0, 1, 2]) else {
             panic!("valid graph");
         };
         assert_eq!(graph.nodes[2].predecessors, 1);

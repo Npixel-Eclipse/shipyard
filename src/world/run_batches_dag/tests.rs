@@ -330,6 +330,71 @@ fn repeated_occurrences_reinitialize_each_tick_and_join_nested_rayon() {
     assert_eq!(checks.load(Ordering::SeqCst), 3);
 }
 
+#[test]
+fn reused_read_only_tracking_system_keeps_its_original_batch_boundaries() {
+    use crate::track::All;
+    use crate::{IntoIter, View};
+
+    struct Tracked;
+    impl Component for Tracked {
+        type Tracking = All;
+    }
+    fn unrelated(_: ViewMut<X>) {}
+
+    let mut world = two_workers();
+    let counts = Arc::new(Mutex::new(Vec::new()));
+    let observed = Arc::clone(&counts);
+    let read_tracked = move |values: View<Tracked>| {
+        let count = values.inserted_or_modified().iter().count();
+        let Ok(mut observations) = observed.lock() else {
+            panic!("tracking observations");
+        };
+        observations.push(count);
+    };
+    assert!(Workload::new("test")
+        .with_system(read_tracked.clone())
+        .with_system(unrelated)
+        .with_system(read_tracked.clone().after_all(unrelated))
+        .with_system(read_tracked.after_all(unrelated))
+        .add_to_world(&world)
+        .is_ok());
+
+    {
+        let Ok(scheduler) = world.scheduler.borrow() else {
+            panic!("scheduler borrow");
+        };
+        let Ok(batches) = scheduler.workload(&"test") else {
+            panic!("registered workload");
+        };
+        assert_eq!(batches.parallel, vec![(None, vec![0, 1]), (None, vec![0, 0])]);
+        let Some(plan) = &batches.dag else {
+            panic!("valid DAG plan");
+        };
+        let [DagEpoch::Graph(graph)] = plan.epochs.as_slice() else {
+            panic!("read-only systems must remain in one graph epoch");
+        };
+        // All three occurrences reuse the same registered tracking closure.
+        // These assertions detect the old bug deterministically, without
+        // depending on which ready root a Rayon worker happens to steal.
+        assert_eq!(graph.nodes[0].system_index, graph.nodes[2].system_index);
+        assert_eq!(graph.nodes[0].system_index, graph.nodes[3].system_index);
+        assert_eq!(graph.nodes[0].successors, vec![2, 3]);
+        assert!(graph.nodes[2].successors.is_empty());
+        assert!(graph.nodes[3].successors.is_empty());
+    }
+
+    for _ in 0..3 {
+        world.add_entity((Tracked,));
+        assert!(run(&world).is_ok());
+    }
+    // Each tick's first occurrence consumes the insertion window; both later
+    // occurrences retain their original empty window and remain unordered.
+    let Ok(observations) = counts.lock() else {
+        panic!("tracking observations");
+    };
+    assert_eq!(*observations, vec![1, 0, 0, 1, 0, 0, 1, 0, 0]);
+}
+
 #[cfg(feature = "thread_local")]
 #[test]
 fn non_send_sync_borrow_remains_on_owner_thread() {

@@ -4,6 +4,8 @@ use crate::iter::ShiperatorSailor;
 use crate::sparse_set::{FullRawWindow, FullRawWindowMut};
 use crate::track;
 use crate::tracking::{Inserted, InsertedOrModified, Modified};
+#[cfg(feature = "scheduler-experiment")]
+use crate::tracking_observation::hit;
 
 impl<'tmp, T: Component> ShiperatorSailor for Inserted<FullRawWindow<'tmp, T>> {
     type Index = usize;
@@ -22,6 +24,8 @@ impl<'tmp, T: Component> ShiperatorSailor for Inserted<FullRawWindow<'tmp, T>> {
         if unsafe { *self.0.insertion_data.add(index) }
             .is_within(self.0.last_insertion, self.0.current)
         {
+            #[cfg(feature = "scheduler-experiment")]
+            hit::<T>("inserted", eid, self.0.current);
             Some(index)
         } else {
             None
@@ -29,10 +33,12 @@ impl<'tmp, T: Component> ShiperatorSailor for Inserted<FullRawWindow<'tmp, T>> {
     }
 
     #[inline]
-    fn captain_indices_of(&self, _: EntityId, index: usize) -> Option<Self::Index> {
+    fn captain_indices_of(&self, _eid: EntityId, index: usize) -> Option<Self::Index> {
         if unsafe { *self.0.insertion_data.add(index) }
             .is_within(self.0.last_insertion, self.0.current)
         {
+            #[cfg(feature = "scheduler-experiment")]
+            hit::<T>("inserted", _eid, self.0.current);
             Some(index)
         } else {
             None
@@ -64,6 +70,8 @@ macro_rules! impl_shiperator_sailor_inserted {
 
                     if unsafe { *self.0.insertion_data.add(index) }.is_within(self.0.last_insertion, self.0.current)
                     {
+                        #[cfg(feature = "scheduler-experiment")]
+                        hit::<T>("inserted", eid, self.0.current);
                         Some(index)
                     } else {
                         None
@@ -71,9 +79,11 @@ macro_rules! impl_shiperator_sailor_inserted {
                 }
 
                 #[inline]
-                fn captain_indices_of(&self, _: EntityId, index: usize) -> Option<Self::Index> {
+                fn captain_indices_of(&self, _eid: EntityId, index: usize) -> Option<Self::Index> {
                     if unsafe { *self.0.insertion_data.add(index) }.is_within(self.0.last_insertion, self.0.current)
                     {
+                        #[cfg(feature = "scheduler-experiment")]
+                        hit::<T>("inserted", _eid, self.0.current);
                         Some(index)
                     } else {
                         None
@@ -109,6 +119,8 @@ impl<'tmp, T: Component> ShiperatorSailor for Modified<FullRawWindow<'tmp, T>> {
         if unsafe { *self.0.modification_data.add(index) }
             .is_within(self.0.last_modification, self.0.current)
         {
+            #[cfg(feature = "scheduler-experiment")]
+            hit::<T>("modified", eid, self.0.current);
             Some(index)
         } else {
             None
@@ -116,10 +128,12 @@ impl<'tmp, T: Component> ShiperatorSailor for Modified<FullRawWindow<'tmp, T>> {
     }
 
     #[inline]
-    fn captain_indices_of(&self, _: EntityId, index: usize) -> Option<Self::Index> {
+    fn captain_indices_of(&self, _eid: EntityId, index: usize) -> Option<Self::Index> {
         if unsafe { *self.0.modification_data.add(index) }
             .is_within(self.0.last_modification, self.0.current)
         {
+            #[cfg(feature = "scheduler-experiment")]
+            hit::<T>("modified", _eid, self.0.current);
             Some(index)
         } else {
             None
@@ -151,6 +165,8 @@ macro_rules! impl_shiperator_sailor_modified {
 
                     if unsafe { *self.0.modification_data.add(index) }.is_within(self.0.last_modification, self.0.current)
                     {
+                        #[cfg(feature = "scheduler-experiment")]
+                        hit::<T>("modified", eid, self.0.current);
                         Some(index)
                     } else {
                         None
@@ -158,9 +174,11 @@ macro_rules! impl_shiperator_sailor_modified {
                 }
 
                 #[inline]
-                fn captain_indices_of(&self, _: EntityId, index: usize) -> Option<Self::Index> {
+                fn captain_indices_of(&self, _eid: EntityId, index: usize) -> Option<Self::Index> {
                     if unsafe { *self.0.modification_data.add(index) }.is_within(self.0.last_modification, self.0.current)
                     {
+                        #[cfg(feature = "scheduler-experiment")]
+                        hit::<T>("modified", _eid, self.0.current);
                         Some(index)
                     } else {
                         None
@@ -198,6 +216,8 @@ impl<'tmp, T: Component> ShiperatorSailor for InsertedOrModified<FullRawWindow<'
             || unsafe { *self.0.modification_data.add(index) }
                 .is_within(self.0.last_modification, self.0.current)
         {
+            #[cfg(feature = "scheduler-experiment")]
+            hit::<T>("inserted_or_modified", eid, self.0.current);
             Some(index)
         } else {
             None
@@ -205,12 +225,14 @@ impl<'tmp, T: Component> ShiperatorSailor for InsertedOrModified<FullRawWindow<'
     }
 
     #[inline]
-    fn captain_indices_of(&self, _: EntityId, index: usize) -> Option<Self::Index> {
+    fn captain_indices_of(&self, _eid: EntityId, index: usize) -> Option<Self::Index> {
         if unsafe { *self.0.insertion_data.add(index) }
             .is_within(self.0.last_insertion, self.0.current)
             || unsafe { *self.0.modification_data.add(index) }
                 .is_within(self.0.last_modification, self.0.current)
         {
+            #[cfg(feature = "scheduler-experiment")]
+            hit::<T>("inserted_or_modified", _eid, self.0.current);
             Some(index)
         } else {
             None
@@ -244,6 +266,8 @@ macro_rules! impl_shiperator_sailor_inserted_or_modified {
                         || unsafe { *self.0.modification_data.add(index) }
                             .is_within(self.0.last_modification, self.0.current)
                     {
+                        #[cfg(feature = "scheduler-experiment")]
+                        hit::<T>("inserted_or_modified", eid, self.0.current);
                         Some(index)
                     } else {
                         None
@@ -251,11 +275,13 @@ macro_rules! impl_shiperator_sailor_inserted_or_modified {
                 }
 
                 #[inline]
-                fn captain_indices_of(&self, _: EntityId, index: usize) -> Option<Self::Index> {
+                fn captain_indices_of(&self, _eid: EntityId, index: usize) -> Option<Self::Index> {
                     if unsafe { *self.0.insertion_data.add(index) }.is_within(self.0.last_insertion, self.0.current)
                         || unsafe { *self.0.modification_data.add(index) }
                             .is_within(self.0.last_modification, self.0.current)
                     {
+                        #[cfg(feature = "scheduler-experiment")]
+                        hit::<T>("inserted_or_modified", _eid, self.0.current);
                         Some(index)
                     } else {
                         None

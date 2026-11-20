@@ -2,6 +2,8 @@
 
 use crate::error::{Run, RunWorkload};
 use crate::scheduler::{Batches, Label};
+#[cfg(feature = "scheduler-registration-benchmark")]
+use crate::scheduler::registration_benchmark::validate_execution_mode;
 use crate::World;
 use alloc::boxed::Box;
 use alloc::format;
@@ -53,6 +55,8 @@ pub(super) fn mode() -> Mode {
             Err(error) => panic!("Invalid BATTLE_SCHEDULER_MODE: {error}"),
         };
         let selected = Mode::parse(value.as_deref());
+        #[cfg(feature = "scheduler-registration-benchmark")]
+        validate_execution_mode(selected == Mode::Baseline);
         let output = match var("BATTLE_SCHEDULER_MODE_OUTPUT") {
             Ok(path) => Some(path),
             Err(VarError::NotPresent) => None,
@@ -138,6 +142,30 @@ impl World {
         batch_index: usize,
         #[cfg(feature = "tracing")] parent_span: &Span,
     ) -> Result<(), RunWorkload> {
+        self.run_one_batch_with(system_names, batches, batch_index, |index| {
+            self.run_single_system(
+                systems,
+                system_names,
+                #[cfg(feature = "tracing")]
+                parent_span,
+                index,
+            )
+        })
+    }
+
+    /// Identical fence logic with an optional caller-supplied body observer.
+    /// The ordinary path supplies its original call directly, without a
+    /// per-system observer or environment lookup.
+    pub(crate) fn run_one_batch_with<F>(
+        &self,
+        system_names: &[Box<dyn Label>],
+        batches: &Batches,
+        batch_index: usize,
+        run_system: F,
+    ) -> Result<(), RunWorkload>
+    where
+        F: Fn(usize) -> Result<(), RunWorkload> + Sync,
+    {
         let batch = &batches.parallel[batch_index];
         let batch_run_if = &batches.parallel_run_if[batch_index];
         // Preserve serial run_if evaluation, including failures before any
@@ -168,16 +196,6 @@ impl World {
                 })
                 .collect::<Result<Vec<_>, RunWorkload>>()?,
         );
-
-        let run_system = |index| {
-            self.run_single_system(
-                systems,
-                system_names,
-                #[cfg(feature = "tracing")]
-                parent_span,
-                index,
-            )
-        };
 
         if batch.0.is_some() {
             // Required caller-thread slots retain the original scope,

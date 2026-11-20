@@ -1,7 +1,11 @@
 mod batches;
 #[cfg(feature = "scheduler-experiment")]
 pub(crate) mod dag;
+#[cfg(feature = "scheduler-experiment")]
+pub(crate) mod order_witness;
 pub mod info;
+#[cfg(feature = "scheduler-registration-benchmark")]
+pub mod registration_benchmark;
 mod into_workload;
 mod into_workload_run_if;
 mod into_workload_system;
