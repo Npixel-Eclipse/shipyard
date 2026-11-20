@@ -85,15 +85,6 @@ name = "tracking_mixed"
 harness = false
 required-features = ["parallel", "std"]
 
-[package.metadata.docs.rs]
-all-features = true
-rustdoc-args = ["--cfg", "docsrs"]
-
-[workspace.metadata.release]
-consolidate-commits = false
-pre-release-commit-message = "Bump {{crate_name}} version to {{version}}"
-tag-message = "Release {{crate_name}} version {{version}}"
-
 [[bench]]
 name = "tracking_chunks"
 harness = false
@@ -103,3 +94,12 @@ required-features = ["parallel", "std"]
 name = "tracking_plan"
 harness = false
 required-features = ["parallel", "std"]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[workspace.metadata.release]
+consolidate-commits = false
+pre-release-commit-message = "Bump {{crate_name}} version to {{version}}"
+tag-message = "Release {{crate_name}} version {{version}}"
