@@ -1060,7 +1060,7 @@ impl<T: Component> SparseSet<T> {
         self.insertion_data.clear();
         self.insertion_chunks.clear();
         self.modification_data.clear();
-        self.modification_summary = Default::default();
+        self.modification_summary.clear();
 
         let is_tracking_deletion = self.is_tracking_deletion();
 
@@ -1094,7 +1094,7 @@ impl<T: Component> SparseSet<T> {
         self.insertion_data.clear();
         self.insertion_chunks.clear();
         self.modification_data.clear();
-        self.modification_summary = Default::default();
+        self.modification_summary.clear();
 
         let dense_ptr = self.dense.as_ptr();
         let dense_len = self.dense.len();
