@@ -309,8 +309,8 @@ pub struct FullRawWindowMut<'a, T, Track: Tracking> {
     pub(crate) segment_start: usize,
     pub(crate) data: *mut T,
     pub(crate) insertion_data: *const TrackingTimestamp,
-    // Points inside the SparseSet. Do not reborrow the whole storage exclusively
-    // while this window or a copy can use the pointer.
+    // Points inside the SparseSet. Stays valid while this window and its copies
+    // reach the storage through the field borrows taken in `new`.
     pub(crate) modification_summary: NonNull<ModificationSummary>,
     pub(crate) modification_writers: NonNull<[ChunkTimestamp]>,
     /// Every candidate in the installed segment already has its summary marked.
