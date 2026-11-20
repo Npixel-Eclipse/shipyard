@@ -375,6 +375,15 @@ fn not_and_optional() {
     assert_eq!(b.get(e[4]).unwrap().0, 18);
 }
 
+#[test]
+fn mutable_fold_prepares_tracking_summary() {
+    let mut world = World::new_for_test();
+    let id = world.add_entity(Tracked(7));
+    let mut tracked = world.borrow::<ViewMut<'_, Tracked, track::All>>().unwrap();
+    assert_eq!((&mut tracked).iter().fold(0, |sum, item| sum + item.0), 7);
+    assert!(!tracked.is_modified(id));
+}
+
 /// Asserts that a tracking filter reads each candidate's timestamp at the right index: only the
 /// components inserted after clearing are yielded, writing through them marks exactly those as
 /// modified.

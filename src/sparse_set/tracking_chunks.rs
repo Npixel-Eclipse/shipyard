@@ -1,5 +1,6 @@
 use super::tracking_plan::TrackingPlan;
-use crate::tracking::TrackingTimestamp;
+use crate::component::Component;
+use crate::tracking::{Tracking, TrackingTimestamp};
 use alloc::vec::Vec;
 use core::ops::Range;
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -147,30 +148,39 @@ impl ModificationSummary {
         self.all_changed(last) || self.chunks[index].0.load(Ordering::Relaxed) > last.get()
     }
 
-    #[inline]
-    pub(crate) fn query_plan(
-        &self,
-        modified: bool,
-        len: usize,
-        max_chunks: usize,
-        last: TrackingTimestamp,
-        mut inserted_candidate: impl FnMut(usize) -> bool,
-    ) -> TrackingPlan {
-        if modified && self.all_changed(last) {
-            return TrackingPlan::Dense { len };
-        }
-        // The query is built before any mutable segment is handed out.
-        TrackingPlan::build_with_budget(len, max_chunks, |chunk| {
-            inserted_candidate(chunk) || (modified && self.chunks[chunk].changed_since(last))
-        })
-    }
-
     #[cfg(test)]
     fn upper(&self, chunk: &ChunkTimestamp) -> u64 {
         self.whole
             .0
             .load(Ordering::Relaxed)
             .max(chunk.0.load(Ordering::Relaxed))
+    }
+}
+
+impl<T: Component> super::SparseSet<T> {
+    #[inline]
+    pub(crate) fn tracking_plan<Track: Tracking, const INSERTED: bool, const MODIFIED: bool>(
+        &self,
+        last_insertion: TrackingTimestamp,
+        last_modification: TrackingTimestamp,
+        max_chunks: usize,
+    ) -> TrackingPlan {
+        let summary = &self.modification_summary;
+        let modified = MODIFIED && Track::track_modification();
+        let len = self.len();
+        if modified && summary.all_changed(last_modification) {
+            return TrackingPlan::Dense { len };
+        }
+
+        TrackingPlan::build_with_budget(len, max_chunks, |chunk| {
+            let inserted = INSERTED
+                && Track::track_insertion()
+                && self
+                    .insertion_chunks
+                    .get(chunk)
+                    .is_none_or(|t| t.changed_since(last_insertion));
+            inserted || (modified && summary.chunks[chunk].changed_since(last_modification))
+        })
     }
 }
 
