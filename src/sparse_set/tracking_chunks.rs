@@ -82,6 +82,11 @@ impl ModificationSummary {
         self.chunks.capacity()
     }
 
+    pub(super) fn clear(&mut self) {
+        self.chunks.clear();
+        self.whole = ChunkTimestamp::default();
+    }
+
     /// Opaque marking handles; candidate reads go through this summary.
     #[inline]
     pub(crate) fn writers(&self) -> &[ChunkTimestamp] {
@@ -179,7 +184,12 @@ impl<T: Component> super::SparseSet<T> {
                     .insertion_chunks
                     .get(chunk)
                     .is_none_or(|t| t.changed_since(last_insertion));
-            inserted || (modified && summary.chunks[chunk].changed_since(last_modification))
+            inserted
+                || (modified
+                    && summary
+                        .chunks
+                        .get(chunk)
+                        .is_none_or(|t| t.changed_since(last_modification)))
         })
     }
 }
