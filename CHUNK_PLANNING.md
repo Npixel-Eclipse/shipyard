@@ -1,5 +1,15 @@
 # Tracking chunk 계획
 
+## 0.11.9 custom-features 통합 (2026-11-23)
+
+`2fb4fdd`의 새 `Shiperator`/구간 계획·grouping·tracking 청크 구현을 기준으로 이전 회귀 동작과 실험 관측을 이식한다. 기존 아래 측정값은 이 통합본의 성능 검증 결과가 아니다.
+
+- 기본 병렬 순회는 upstream의 후보량 기반 자동 분할과 exact traversal의 indexed 경로를 유지한다. 명시적 `with_split_threshold(n)`만 unindexed producer를 사용하고 `opt_len()`은 `None`이다. 0은 거부하고 마지막 설정이 적용되며 `with_id()`도 설정을 보존한다. 후보량은 join/OR 중복 제거 전 상한이며, mutable tracking OR의 분할 금지는 override보다 우선한다.
+- `Modified`, `InsertedOrModified`, 중첩 OR 연산자 및 View 재대여 수명 분리를 유지한다. 수정 가능한 추적 조건을 포함한 OR는 다른 producer의 timestamp를 읽지 않도록 단일 producer로 실행한다. 일반 mutable OR와 읽기 전용 tracking OR의 병렬 분할은 유지한다.
+- mutable OR 이력은 실제 `get_data`에 도달한 왼쪽 반환 항목만 기억한다. 뒤쪽 join에 의해 탈락한 후보는 이력에 넣지 않는다. 역순/앞뒤 혼합 순회는 기존 safe 구간 분할을 통해 한 후보를 분리하고, 소비한 조각의 이력을 합쳐 ID/값 대응과 중복 방지를 유지한다. 역순 호환 경로는 계획/이력 복사가 발생할 수 있으며 역순 성능 개선을 주장하지 않는다.
+- `scheduler-experiment` 관측은 기존 `TrackingHit` 스키마와 양성 predicate 적중 의미를 유지한다. 새 iterator의 tracking captain 및 sailor, 직접 `is_*`, deleted/removed 반환을 관측하며 이후 join/filter 탈락은 가능한 그대로다. 최종 loop-body 횟수나 mutation audit가 아니다. Entity cursor는 기존 pointer read를 캡슐화한 safe accessor에서 nonempty를 release assertion으로 확인하며 새 unsafe read를 추가하지 않는다.
+- 기존 OR·정렬·tracking chunk·빈 join·분할 임계값 회귀는 보존한다. 새 관측 회귀는 workload 밖의 조회 제외, join 탈락 후보, inner Rayon의 system/timestamp 연결과 union kind를 검사한다. 빌드/테스트 결과는 통합 검증 실행 후 별도로 기록한다.
+
 최초 작업의 기준은 Npixel-Eclipse/shipyard의 `origin/0.11.5`, 커밋 `d3dbd51435c225629564f3eda723291747aebda1`이다. 리뷰 브랜치 `0.11.5-chunk-planning`은 `0.11.6`과 별도로 개발했으며, `0.11.7` 통합 내용은 다음 절에 기록한다. 아래 Battle 비교를 위해 임시 적용한 의존성·설정·배포 바이너리는 측정 후 모두 복구했다. 별도 patch5 저장소도 그대로 유지했다.
 
 아래 기존 실측과 최초 검증 기록은 `b7290af` 기준이다. 후속 작업은 다음 절에 구분하며, 기존 실측 수치를 후속 코드의 성능 결과로 해석하지 않는다.

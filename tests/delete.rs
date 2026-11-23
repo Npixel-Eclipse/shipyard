@@ -31,7 +31,7 @@ fn no_pack() {
             name: type_name::<USIZE>(),
         })
     );
-    assert_eq!(*(&mut u32s).get(entity1).unwrap().as_ref(), U32(1));
+    assert_eq!(*(&mut u32s).get(entity1).unwrap(), U32(1));
     assert_eq!(usizes.get(entity2), Ok(&USIZE(2)));
     assert_eq!(u32s.get(entity2), Ok(&U32(3)));
 }
@@ -125,41 +125,6 @@ fn newer_key() {
             assert_eq!(u32s.len(), 0);
         },
     );
-}
-
-#[test]
-fn view_clears_removed_and_deleted_tracking() -> Result<(), Box<dyn std::error::Error>> {
-    #[derive(PartialEq, Eq, Debug)]
-    struct USIZE(usize);
-    impl Component for USIZE {
-        type Tracking = track::All;
-    }
-
-    let mut world = World::new();
-    let deleted = world.add_entity(USIZE(10));
-    let removed = world.add_entity(USIZE(20));
-    let alive = world.add_entity(USIZE(30));
-    let mut usizes = world.borrow::<ViewMut<USIZE>>()?;
-    assert!(usizes.delete(deleted));
-    assert_eq!(usizes.remove(removed), Some(USIZE(20)));
-    assert_eq!(
-        usizes.deleted().collect::<Vec<_>>(),
-        vec![(deleted, &USIZE(10))]
-    );
-    assert_eq!(usizes.removed().collect::<Vec<_>>(), vec![removed]);
-    let mut recorded = usizes.removed_or_deleted().collect::<Vec<_>>();
-    recorded.sort_unstable();
-    assert_eq!(recorded, vec![deleted, removed]);
-
-    for _ in 0..2 {
-        usizes.clear_all_removed_and_deleted();
-        assert_eq!(usizes.deleted().next(), None);
-        assert_eq!(usizes.removed().next(), None);
-        assert_eq!(usizes.removed_or_deleted().next(), None);
-        assert_eq!(usizes.len(), 1);
-        assert_eq!(usizes[alive], USIZE(30));
-    }
-    Ok(())
 }
 
 #[test]

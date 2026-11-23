@@ -1,10 +1,10 @@
 #![cfg(feature = "parallel")]
 
-use rayon::{prelude::*, ThreadPoolBuilder};
+use rayon::{ThreadPoolBuilder, prelude::*};
 use shipyard::{
+    Component, EntityId, Get, IntoIter, View, ViewMut, World,
     iter::OneOfTwo,
     track::{All, Untracked},
-    Component, EntityId, Get, IntoIter, View, ViewMut, World,
 };
 use std::error::Error;
 
@@ -51,7 +51,8 @@ fn threshold_stops_at_the_boundary_and_preserves_ordinary_results() -> TestResul
             assert_eq!(default[0], (0..len).collect::<Vec<_>>());
 
             let iter = values.par_iter().with_split_threshold(8);
-            assert_eq!(iter.opt_len(), Some(len));
+            // Explicit candidate thresholds use unindexed consumers even for dense input.
+            assert_eq!(iter.opt_len(), None);
             let explicit = partitions(iter.map(|v| v.0));
             assert_eq!(explicit.len() == 1, len <= 8);
             let mut actual: Vec<_> = explicit.into_iter().flatten().collect();
@@ -66,7 +67,7 @@ fn threshold_stops_at_the_boundary_and_preserves_ordinary_results() -> TestResul
 #[test]
 fn last_threshold_wins_across_with_id_without_changing_other_iterators() -> TestResult {
     let pool = ThreadPoolBuilder::new().num_threads(4).build()?;
-    let (world, ids) = fixture(33);
+    let (world, ids) = fixture(129);
     let values = world.borrow::<View<Value>>()?;
     pool.install(|| {
         let small = partitions(

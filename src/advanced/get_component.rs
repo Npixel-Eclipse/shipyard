@@ -1,4 +1,4 @@
-use crate::all_storages::{AllStorages, CustomStorageAccess};
+use crate::all_storages::AllStorages;
 use crate::atomic_refcell::{ARef, ARefMut};
 use crate::atomic_refcell::{ExclusiveBorrow, SharedBorrow};
 #[cfg(feature = "thread_local")]
@@ -6,8 +6,9 @@ use crate::borrow::{NonSend, NonSendSync, NonSync};
 use crate::component::Component;
 use crate::entity_id::EntityId;
 use crate::error;
-use crate::r#mut::{ModFlag, Mut, SafeMut};
-use crate::sparse_set::{SparseSet, TRACKING_CHUNK_SHIFT};
+use crate::r#mut::{Mut, SafeMut};
+use crate::sparse_set::SparseSet;
+use crate::sparse_set::TRACKING_CHUNK_SIZE;
 use crate::tracking::TrackingTimestamp;
 use core::any::type_name;
 use core::ops::Deref;
@@ -124,7 +125,7 @@ impl<T: Component + Send + Sync> GetComponent for &'_ T {
         _current: TrackingTimestamp,
         entity: EntityId,
     ) -> Result<Self::Out<'a>, error::GetComponent> {
-        let view = all_storages.custom_storage_or_insert(SparseSet::new)?;
+        let view = all_storages.component_storage_or_insert(SparseSet::new)?;
 
         let (sparse_set, borrow) = unsafe { ARef::destructure(view) };
 
@@ -152,7 +153,8 @@ impl<T: Component + Sync> GetComponent for NonSend<&'_ T> {
         _current: TrackingTimestamp,
         entity: EntityId,
     ) -> Result<Self::Out<'a>, error::GetComponent> {
-        let view = all_storages.custom_storage_or_insert_non_send(|| NonSend(SparseSet::new()))?;
+        let view =
+            all_storages.component_storage_or_insert_non_send(|| NonSend(SparseSet::new()))?;
 
         let (sparse_set, borrow) = unsafe { ARef::destructure(view) };
 
@@ -180,7 +182,8 @@ impl<T: Component + Send> GetComponent for NonSync<&'_ T> {
         _current: TrackingTimestamp,
         entity: EntityId,
     ) -> Result<Self::Out<'a>, error::GetComponent> {
-        let view = all_storages.custom_storage_or_insert_non_sync(|| NonSync(SparseSet::new()))?;
+        let view =
+            all_storages.component_storage_or_insert_non_sync(|| NonSync(SparseSet::new()))?;
 
         let (sparse_set, borrow) = unsafe { ARef::destructure(view) };
 
@@ -209,7 +212,7 @@ impl<T: Component> GetComponent for NonSendSync<&'_ T> {
         entity: EntityId,
     ) -> Result<Self::Out<'a>, error::GetComponent> {
         let view = all_storages
-            .custom_storage_or_insert_non_send_sync(|| NonSendSync(SparseSet::new()))?;
+            .component_storage_or_insert_non_send_sync(|| NonSendSync(SparseSet::new()))?;
 
         let (sparse_set, borrow) = unsafe { ARef::destructure(view) };
 
@@ -236,7 +239,7 @@ impl<T: Component + Send + Sync> GetComponent for &'_ mut T {
         current: TrackingTimestamp,
         entity: EntityId,
     ) -> Result<Self::Out<'a>, error::GetComponent> {
-        let view = all_storages.custom_storage_or_insert_mut(SparseSet::new)?;
+        let view = all_storages.component_storage_or_insert_mut(SparseSet::new)?;
 
         let (sparse_set, borrow) = unsafe { ARefMut::destructure(view) };
 
@@ -250,19 +253,18 @@ impl<T: Component + Send + Sync> GetComponent for &'_ mut T {
         let SparseSet {
             data,
             modification_data,
-            modification_chunks,
+            modification_summary,
             is_tracking_modification,
             ..
         } = sparse_set;
 
         Ok(RefMut {
             inner: SafeMut::new(Mut {
-                flag: is_tracking_modification.then(|| ModFlag {
-                    slot: unsafe { modification_data.get_unchecked_mut(index) },
-                    chunk: modification_chunks.get(index >> TRACKING_CHUNK_SHIFT),
-                }),
-                current,
                 data: unsafe { data.get_unchecked_mut(index) },
+                flag: is_tracking_modification
+                    .then(|| unsafe { modification_data.get_unchecked_mut(index) }),
+                chunk: modification_summary.get(index / TRACKING_CHUNK_SIZE),
+                current,
             }),
             all_borrow,
             borrow,
@@ -282,7 +284,7 @@ impl<T: Component + Sync> GetComponent for NonSend<&'_ mut T> {
         entity: EntityId,
     ) -> Result<Self::Out<'a>, error::GetComponent> {
         let view =
-            all_storages.custom_storage_or_insert_non_send_mut(|| NonSend(SparseSet::new()))?;
+            all_storages.component_storage_or_insert_non_send_mut(|| NonSend(SparseSet::new()))?;
 
         let (sparse_set, borrow) = unsafe { ARefMut::destructure(view) };
 
@@ -296,19 +298,18 @@ impl<T: Component + Sync> GetComponent for NonSend<&'_ mut T> {
         let NonSend(SparseSet {
             data,
             modification_data,
-            modification_chunks,
+            modification_summary,
             is_tracking_modification,
             ..
         }) = sparse_set;
 
         Ok(RefMut {
             inner: SafeMut::new(Mut {
-                flag: is_tracking_modification.then(|| ModFlag {
-                    slot: unsafe { modification_data.get_unchecked_mut(index) },
-                    chunk: modification_chunks.get(index >> TRACKING_CHUNK_SHIFT),
-                }),
-                current,
                 data: unsafe { data.get_unchecked_mut(index) },
+                flag: is_tracking_modification
+                    .then(|| unsafe { modification_data.get_unchecked_mut(index) }),
+                chunk: modification_summary.get(index / TRACKING_CHUNK_SIZE),
+                current,
             }),
             all_borrow,
             borrow,
@@ -328,7 +329,7 @@ impl<T: Component + Send> GetComponent for NonSync<&'_ mut T> {
         entity: EntityId,
     ) -> Result<Self::Out<'a>, error::GetComponent> {
         let view =
-            all_storages.custom_storage_or_insert_non_sync_mut(|| NonSync(SparseSet::new()))?;
+            all_storages.component_storage_or_insert_non_sync_mut(|| NonSync(SparseSet::new()))?;
 
         let (sparse_set, borrow) = unsafe { ARefMut::destructure(view) };
 
@@ -342,19 +343,18 @@ impl<T: Component + Send> GetComponent for NonSync<&'_ mut T> {
         let NonSync(SparseSet {
             data,
             modification_data,
-            modification_chunks,
+            modification_summary,
             is_tracking_modification,
             ..
         }) = sparse_set;
 
         Ok(RefMut {
             inner: SafeMut::new(Mut {
-                flag: is_tracking_modification.then(|| ModFlag {
-                    slot: unsafe { modification_data.get_unchecked_mut(index) },
-                    chunk: modification_chunks.get(index >> TRACKING_CHUNK_SHIFT),
-                }),
-                current,
                 data: unsafe { data.get_unchecked_mut(index) },
+                flag: is_tracking_modification
+                    .then(|| unsafe { modification_data.get_unchecked_mut(index) }),
+                chunk: modification_summary.get(index / TRACKING_CHUNK_SIZE),
+                current,
             }),
             all_borrow,
             borrow,
@@ -374,7 +374,7 @@ impl<T: Component> GetComponent for NonSendSync<&'_ mut T> {
         entity: EntityId,
     ) -> Result<Self::Out<'a>, error::GetComponent> {
         let view = all_storages
-            .custom_storage_or_insert_non_send_sync_mut(|| NonSendSync(SparseSet::new()))?;
+            .component_storage_or_insert_non_send_sync_mut(|| NonSendSync(SparseSet::new()))?;
 
         let (sparse_set, borrow) = unsafe { ARefMut::destructure(view) };
 
@@ -388,19 +388,18 @@ impl<T: Component> GetComponent for NonSendSync<&'_ mut T> {
         let NonSendSync(SparseSet {
             data,
             modification_data,
-            modification_chunks,
+            modification_summary,
             is_tracking_modification,
             ..
         }) = sparse_set;
 
         Ok(RefMut {
             inner: SafeMut::new(Mut {
-                flag: is_tracking_modification.then(|| ModFlag {
-                    slot: unsafe { modification_data.get_unchecked_mut(index) },
-                    chunk: modification_chunks.get(index >> TRACKING_CHUNK_SHIFT),
-                }),
-                current,
                 data: unsafe { data.get_unchecked_mut(index) },
+                flag: is_tracking_modification
+                    .then(|| unsafe { modification_data.get_unchecked_mut(index) }),
+                chunk: modification_summary.get(index / TRACKING_CHUNK_SIZE),
+                current,
             }),
             all_borrow,
             borrow,

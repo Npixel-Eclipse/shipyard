@@ -1,3 +1,4 @@
+use shipyard::SafeMut;
 use shipyard::*;
 
 #[test]
@@ -26,8 +27,8 @@ fn type_check() {
     let life: SafeMut<Life> = (&mut vm_life).get(entity).unwrap();
     let energy: SafeMut<Energy> = (&mut vm_energy).get(entity).unwrap();
 
-    assert_eq!(*life.as_ref(), Life(0.));
-    assert_eq!(*energy.as_ref(), Energy(0.));
+    assert_eq!(*life, Life(0.));
+    assert_eq!(*energy, Energy(0.));
 }
 
 #[test]

@@ -3,23 +3,25 @@
 use crate::all_storages::AllStorages;
 use crate::borrow::Mutability;
 use crate::scheduler::Label;
-use crate::scheduler::order_witness::OrderWitness;
-use crate::scheduler::{Batches, TypeInfo};
+use crate::scheduler::info::WorkloadInfo;
+use crate::scheduler::order_witness::{OrderWitness, prepare as prepare_order_witness};
+#[cfg(feature = "scheduler-registration-benchmark")]
+use crate::scheduler::registration_benchmark::{Phase, Timer, build_graph_enabled, record};
+use crate::scheduler::{Batches, Step, TypeInfo};
 use alloc::boxed::Box;
 use alloc::format;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::any::TypeId;
+use core::iter::once;
 use core::sync::atomic::{AtomicU64, Ordering};
 use serde_json::{json, to_writer_pretty};
 use std::env::var_os;
 use std::error::Error;
-use std::fs::{create_dir_all, File};
+use std::fs::{File, create_dir_all};
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 use std::process::id as process_id;
-#[cfg(feature = "scheduler-registration-benchmark")]
-use crate::scheduler::registration_benchmark::{Phase, Timer};
 
 /// Private TypeId tag; never exposed as a user-facing scheduling label.
 pub(crate) struct Fallible;
@@ -55,8 +57,100 @@ pub(crate) struct DagPlan {
     pub(crate) order_witness: Option<OrderWitness>,
 }
 
+pub(crate) fn step_system(step: Step) -> Option<usize> {
+    match step {
+        Step::System(index) => Some(index),
+        Step::Regroup(_) => None,
+    }
+}
+
+/// Compile from the final upstream schedule, after regroup preparation and
+/// tracking registration succeeded. Conditions contribute their full footprint.
+pub(crate) fn finish_registration(
+    name: &dyn Label,
+    names: &[Box<dyn Label>],
+    registered_fallible: &[bool],
+    batches: &mut Batches,
+    info: &WorkloadInfo,
+) {
+    #[cfg(feature = "scheduler-registration-benchmark")]
+    if !build_graph_enabled() {
+        record(
+            info.batches_info
+                .iter()
+                .map(|batch| batch.systems().count())
+                .sum(),
+            batches.parallel.len(),
+            false,
+            false,
+        );
+        let _ = prepare_order_witness(name, names, &[], &[], batches);
+        return;
+    }
+    #[cfg(feature = "scheduler-registration-benchmark")]
+    let timer = Timer::start();
+    let mut indexed: Vec<_> = info
+        .batches_info
+        .iter()
+        .flat_map(|batch| batch.systems())
+        .map(|system| {
+            (
+                system.occurrence.id,
+                DagInput {
+                    system_index: system.unique_id,
+                    hard_after: system.after.clone(),
+                    borrow_constraints: system.occurrence.footprint.clone(),
+                    fallible: registered_fallible[system.unique_id],
+                },
+            )
+        })
+        .collect();
+    indexed.sort_unstable_by_key(|(occurrence, _)| *occurrence);
+    let inputs: Vec<_> = indexed
+        .into_iter()
+        .enumerate()
+        .map(|(index, (occurrence, input))| {
+            assert_eq!(
+                index, occurrence,
+                "upstream occurrence metadata must be complete"
+            );
+            input
+        })
+        .collect();
+    let occurrences: Vec<Vec<_>> = batches
+        .parallel_occurrences
+        .iter()
+        .map(|(owner, parallel)| {
+            once(*owner)
+                .chain(parallel.iter().copied())
+                .filter(|&id| id != usize::MAX)
+                .collect()
+        })
+        .collect();
+    #[cfg(feature = "scheduler-registration-benchmark")]
+    timer.finish(Phase::DagInputCapture);
+    #[cfg(feature = "scheduler-registration-benchmark")]
+    let timer = Timer::start();
+    batches.dag = DagPlan::build(&inputs, &occurrences, batches);
+    #[cfg(feature = "scheduler-registration-benchmark")]
+    {
+        timer.finish(Phase::DagPlanBuild);
+        record(
+            inputs.len(),
+            batches.parallel.len(),
+            true,
+            batches.dag.is_some(),
+        );
+    }
+    write_plan_output(name, names, &inputs, &occurrences, batches);
+    let witness = prepare_order_witness(name, names, &inputs, &occurrences, batches);
+    if let Some(plan) = &mut batches.dag {
+        plan.order_witness = witness;
+    }
+}
+
 impl DagPlan {
-    /// Snapshot input is captured before the normal sorter consumes hard_after.
+    /// Input uses the upstream sorter's final occurrence metadata.
     /// Each integer identifies an occurrence, not a registered function/type.
     /// An unexpected mapping fails closed to the original batch executor.
     pub(crate) fn build(
@@ -64,7 +158,8 @@ impl DagPlan {
         occurrences: &[Vec<usize>],
         batches: &Batches,
     ) -> Option<Self> {
-        if occurrences.len() != batches.parallel.len()
+        if !batches.regroups.is_empty()
+            || occurrences.len() != batches.parallel.len()
             || occurrences.len() != batches.parallel_run_if.len()
         {
             return None;
@@ -84,7 +179,8 @@ impl DagPlan {
                 .iter()
                 .copied()
                 .chain(batches.parallel[batch].1.iter().copied())
-                .collect();
+                .map(step_system)
+                .collect::<Option<Vec<_>>>()?;
             let mut actual: Vec<_> = ids.iter().map(|&id| inputs[id].system_index).collect();
             expected.sort_unstable();
             actual.sort_unstable();
@@ -117,7 +213,9 @@ impl DagPlan {
                 || ids.iter().any(|&id| inputs[id].fallible);
             if is_fence {
                 if !pending.is_empty() {
-                    epochs.push(DagEpoch::Graph(DagGraph::build(inputs, &pending, &batch_of)?));
+                    epochs.push(DagEpoch::Graph(DagGraph::build(
+                        inputs, &pending, &batch_of,
+                    )?));
                     pending.clear();
                 }
                 epochs.push(DagEpoch::Fence(batch));
@@ -126,18 +224,19 @@ impl DagPlan {
             }
         }
         if !pending.is_empty() {
-            epochs.push(DagEpoch::Graph(DagGraph::build(inputs, &pending, &batch_of)?));
+            epochs.push(DagEpoch::Graph(DagGraph::build(
+                inputs, &pending, &batch_of,
+            )?));
         }
-        Some(Self { epochs, order_witness: None })
+        Some(Self {
+            epochs,
+            order_witness: None,
+        })
     }
 }
 
 impl DagGraph {
-    fn build(
-        inputs: &[DagInput],
-        occurrences: &[usize],
-        batch_of: &[usize],
-    ) -> Option<Self> {
+    fn build(inputs: &[DagInput], occurrences: &[usize], batch_of: &[usize]) -> Option<Self> {
         #[cfg(feature = "scheduler-registration-benchmark")]
         let timer = Timer::start();
         let mut local = vec![usize::MAX; inputs.len()];
@@ -308,7 +407,9 @@ pub(crate) fn write_plan_output(
         let baseline: Vec<_> = occurrences.iter().enumerate().map(|(index, ids)| {
             let condition = &batches.parallel_run_if[index];
             json!({"index": index, "occurrences": ids, "size": ids.len(),
-                "required_caller_system": batches.parallel[index].0,
+                "required_caller_system": batches.parallel[index].0.and_then(step_system),
+                "contains_regroup": batches.parallel[index].0.iter().chain(&batches.parallel[index].1)
+                    .any(|step| matches!(step, Step::Regroup(_))),
                 "has_run_if": condition.0 != usize::MAX || condition.1.iter().any(|&id| id != usize::MAX),
                 "has_registered_fallible": ids.iter().any(|&id| inputs[id].fallible)})
         }).collect();
@@ -323,7 +424,9 @@ pub(crate) fn write_plan_output(
         }).collect();
         let output = json!({"schema": 1, "workload_name": format!("{:?}", workload_name),
             "plan_valid": batches.dag.is_some(),
-            "fallback_reason": if batches.dag.is_some() { None } else {
+            "fallback_reason": if batches.dag.is_some() { None } else if !batches.regroups.is_empty() {
+                Some("Upstream regroup steps retained by the original batch executor")
+            } else {
                 Some("Occurrence membership, hard ordering, or forward-edge validation failed; original batch execution retained") },
             "node_count": inputs.len(), "ordinary_count": graph_nodes, "graph_node_count": graph_nodes,
             "fence_count": fence_count, "fence_node_count": fence_nodes,
@@ -346,7 +449,64 @@ pub(crate) fn write_plan_output(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::World;
+    use crate::error::SystemError;
+    use crate::scheduler::{SystemModificator, Workload};
     use crate::storage::StorageId;
+
+    #[test]
+    fn rejected_registration_rolls_back_fallibility_before_callable_reuse() {
+        fn ordinary() {}
+        fn fallible() -> Result<(), SystemError> {
+            Ok(())
+        }
+
+        let world = World::new_for_test();
+        assert!(
+            Workload::new("rejected")
+                .with_system(fallible.require_in_workload("absent"))
+                .add_to_world(&world)
+                .is_err()
+        );
+        {
+            let Ok(scheduler) = world.scheduler.borrow() else {
+                panic!("scheduler borrow");
+            };
+            assert!(scheduler.systems.is_empty());
+            assert!(scheduler.dag_registered_fallible.is_empty());
+        }
+        assert!(
+            Workload::new("ordinary")
+                .with_system(ordinary)
+                .add_to_world(&world)
+                .is_ok()
+        );
+        assert!(
+            Workload::new("fallible")
+                .with_system(fallible)
+                .add_to_world(&world)
+                .is_ok()
+        );
+        assert!(
+            Workload::new("reused")
+                .with_system(fallible)
+                .add_to_world(&world)
+                .is_ok()
+        );
+        let Ok(scheduler) = world.scheduler.borrow() else {
+            panic!("scheduler borrow");
+        };
+        assert_eq!(scheduler.dag_registered_fallible, vec![false, true]);
+        for name in ["fallible", "reused"] {
+            let Ok(batches) = scheduler.workload(&name) else {
+                panic!("registered workload");
+            };
+            let Some(plan) = &batches.dag else {
+                panic!("valid plan");
+            };
+            assert!(matches!(plan.epochs.as_slice(), [DagEpoch::Fence(0)]));
+        }
+    }
 
     fn input(system: usize, hard_after: &[usize], borrow: Vec<TypeInfo>) -> DagInput {
         DagInput {
@@ -391,10 +551,8 @@ mod tests {
         // Also exercise an explicit reordering relative to occurrence IDs.
         // Every reader in the earlier batch must precede every later reader;
         // connecting just the immediately previous occurrence is insufficient.
-        for (occurrences, batch_of) in [
-            ([0, 1, 2, 3], [0, 0, 1, 1]),
-            ([2, 3, 0, 1], [1, 1, 0, 0]),
-        ] {
+        for (occurrences, batch_of) in [([0, 1, 2, 3], [0, 0, 1, 1]), ([2, 3, 0, 1], [1, 1, 0, 0])]
+        {
             let Some(graph) = DagGraph::build(&inputs, &occurrences, &batch_of) else {
                 panic!("valid repeated-reader graph");
             };
@@ -447,11 +605,11 @@ mod tests {
         inputs[3].fallible = true;
         let batches = Batches {
             parallel: vec![
-                (None, vec![0]),
-                (None, vec![1]),
-                (Some(2), vec![]),
-                (None, vec![3]),
-                (None, vec![4]),
+                (None, vec![Step::System(0)]),
+                (None, vec![Step::System(1)]),
+                (Some(Step::System(2)), vec![]),
+                (None, vec![Step::System(3)]),
+                (None, vec![Step::System(4)]),
             ],
             parallel_run_if: vec![
                 (usize::MAX, vec![usize::MAX]),

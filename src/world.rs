@@ -2,22 +2,23 @@ mod builder;
 mod run_batches;
 #[cfg(feature = "scheduler-experiment")]
 mod run_batches_dag;
+#[cfg(test)]
+mod tests;
 
 pub use builder::WorldBuilder;
 
 use crate::all_storages::{
-    AllStorages, CustomStorageAccess, TupleClone, TupleDeleteAny, TupleRetainStorage,
+    AllStorages, CustomStorageAccess, GroupMember, TupleClone, TupleDeleteAny, TupleRetainStorage,
 };
 use crate::atomic_refcell::{ARef, ARefMut, AtomicRefCell};
 use crate::borrow::WorldBorrow;
 use crate::component::{Component, Unique};
-use crate::entities::Entities;
 use crate::entity_id::EntityId;
 use crate::error;
 use crate::get_component::GetComponent;
 use crate::get_unique::GetUnique;
-use crate::iter::{ShiperatorCaptain, ShiperatorSailor};
-use crate::iter_component::{into_iter, IntoIterRef, IterComponent};
+use crate::iter::Shiperator;
+use crate::iter_component::{IntoIterRef, IterComponent, into_iter};
 use crate::memory_usage::WorldMemoryUsage;
 use crate::r#mut::SafeMut;
 use crate::reserve::BulkEntityIter;
@@ -65,16 +66,21 @@ impl Default for World {
 
 #[cfg(feature = "std")]
 impl Clone for World {
+    /// Clones the storages with a registered clone function, see [`World::register_clone`].
+    ///
+    /// The clone has the same groups, including the storages whose components aren't cloned.\
+    /// Copied components only move to their group at the next regroup.
     #[track_caller]
     fn clone(&self) -> Self {
         let mut other = World::new();
 
+        let all_storages = self.all_storages.borrow().unwrap();
         let other_all_storages = other.all_storages.get_mut();
 
-        self.all_storages
-            .borrow()
-            .unwrap()
-            .clone_storages_to(other_all_storages);
+        // We declare the groups first, so every member exists with its ranges before any data
+        // comes in. Cloned members then keep these ranges, see `clone_storages_to`.
+        all_storages.grouping.clone().install(other_all_storages);
+        all_storages.clone_storages_to(other_all_storages);
 
         other
     }
@@ -94,13 +100,22 @@ impl World {
     /// Adds a new unique storage, unique storages store a single value.
     /// To access a unique storage value, use [`UniqueView`] or [`UniqueViewMut`].
     ///
+    /// If `T`'s unique storage already exists, `component` replaces its value instead.\
+    /// The replacement is tracked as a modification, not an insertion.\
+    /// Everything else about the storage is preserved: its insertion tracking, its registered
+    /// clone function, and the wrapper and thread restrictions it was first inserted with.
+    ///
     /// ### Borrows
     ///
     /// - [`AllStorages`] (shared)
+    /// - `T` storage (exclusive), only if it already exists
     ///
     /// ### Panics
     ///
     /// - [`AllStorages`] borrow failed.
+    /// - `T` storage borrow failed, only if it already exists.
+    ///   This happens when the storage is already borrowed, or when it was inserted as `!Send`
+    ///   and we're not on the thread it was inserted on.
     ///
     /// ### Example
     ///
@@ -113,9 +128,10 @@ impl World {
     /// let world = World::new();
     ///
     /// world.add_unique(U32(0));
+    /// world.add_unique(U32(1));
     ///
     /// let i = world.borrow::<UniqueView<U32>>().unwrap();
-    /// assert_eq!(i.0, 0);
+    /// assert_eq!(i.0, 1);
     /// ```
     ///
     /// [`AllStorages`]: crate::all_storages::AllStorages
@@ -127,15 +143,26 @@ impl World {
     }
     /// Adds a new unique storage, unique storages store a single value.
     /// To access a `!Send` unique storage value, use [`NonSend`] with [`UniqueView`] or [`UniqueViewMut`].
-    /// Does nothing if the storage already exists.
+    ///
+    /// If `T`'s unique storage already exists, `component` replaces its value instead.
+    /// The replacement is tracked as a modification, not an insertion.
+    /// Everything else about the storage is preserved: its insertion tracking, its registered
+    /// clone function, and the wrapper and thread restrictions it was first inserted with.
+    ///
+    /// The first insertion decides which wrapper views have to use, whichever `add_unique*` method
+    /// replaces the value later. A unique added with this method is always borrowed with
+    /// [`NonSend`], even after [`add_unique`](World::add_unique) replaces its value.
     ///
     /// ### Borrows
     ///
     /// - [`AllStorages`] (shared)
+    /// - `T` storage (exclusive), only if it already exists
     ///
     /// ### Panics
     ///
     /// - [`AllStorages`] borrow failed.
+    /// - Not called from the [`World`]'s thread.
+    /// - `T` storage borrow failed, only if it already exists.
     ///
     /// ### Example
     ///
@@ -149,9 +176,11 @@ impl World {
     ///
     /// // I'm using `u32` here but imagine it's a `!Send` type
     /// world.add_unique_non_send(U32(0));
+    /// world.add_unique(U32(1));
     ///
+    /// // The storage is still `NonSend`, it was first inserted with `add_unique_non_send`.
     /// let i = world.borrow::<NonSend<UniqueView<U32>>>().unwrap();
-    /// assert_eq!(i.0, 0);
+    /// assert_eq!(i.0, 1);
     /// ```
     ///
     /// [`AllStorages`]: crate::all_storages::AllStorages
@@ -169,15 +198,27 @@ impl World {
     }
     /// Adds a new unique storage, unique storages store a single value.
     /// To access a `!Sync` unique storage value, use [`NonSync`] with [`UniqueView`] or [`UniqueViewMut`].
-    /// Does nothing if the storage already exists.
+    ///
+    /// If `T`'s unique storage already exists, `component` replaces its value instead.
+    /// The replacement is tracked as a modification, not an insertion.
+    /// Everything else about the storage is preserved: its insertion tracking, its registered
+    /// clone function, and the wrapper and thread restrictions it was first inserted with.
+    ///
+    /// The first insertion decides which wrapper views have to use, whichever `add_unique*` method
+    /// replaces the value later. See [`add_unique_non_send`](World::add_unique_non_send) for an
+    /// example.
     ///
     /// ### Borrows
     ///
     /// - [`AllStorages`] (shared)
+    /// - `T` storage (exclusive), only if it already exists
     ///
     /// ### Panics
     ///
     /// - [`AllStorages`] borrow failed.
+    /// - `T` storage borrow failed, only if it already exists.
+    ///   This happens when the storage is already borrowed, or when it was inserted as `!Send`
+    ///   and we're not on the thread it was inserted on.
     ///
     /// ### Example
     ///
@@ -211,15 +252,26 @@ impl World {
     }
     /// Adds a new unique storage, unique storages store a single value.
     /// To access a `!Send + !Sync` unique storage value, use [`NonSendSync`] with [`UniqueView`] or [`UniqueViewMut`].
-    /// Does nothing if the storage already exists.
+    ///
+    /// If `T`'s unique storage already exists, `component` replaces its value instead.
+    /// The replacement is tracked as a modification, not an insertion.
+    /// Everything else about the storage is preserved: its insertion tracking, its registered
+    /// clone function, and the wrapper and thread restrictions it was first inserted with.
+    ///
+    /// The first insertion decides which wrapper views have to use, whichever `add_unique*` method
+    /// replaces the value later. See [`add_unique_non_send`](World::add_unique_non_send) for an
+    /// example.
     ///
     /// ### Borrows
     ///
     /// - [`AllStorages`] (shared)
+    /// - `T` storage (exclusive), only if it already exists
     ///
     /// ### Panics
     ///
     /// - [`AllStorages`] borrow failed.
+    /// - Not called from the [`World`]'s thread.
+    /// - `T` storage borrow failed, only if it already exists.
     ///
     /// ### Example
     ///
@@ -241,7 +293,7 @@ impl World {
     /// [`AllStorages`]: crate::all_storages::AllStorages
     /// [`UniqueView`]: crate::UniqueView
     /// [`UniqueViewMut`]: crate::UniqueViewMut
-    /// [`NonSendSync`]: crate::borrow::NonSync
+    /// [`NonSendSync`]: crate::borrow::NonSendSync
     #[cfg(feature = "thread_local")]
     #[cfg_attr(docsrs, doc(cfg(feature = "thread_local")))]
     #[track_caller]
@@ -262,7 +314,7 @@ impl World {
     ///
     /// - [`AllStorages`] borrow failed.
     /// - `Unique<T>` storage borrow failed.
-    /// - `Unique<T>` storage did not exist.
+    /// - `Unique<T>` storage did not exist, or was registered as a custom storage.
     ///
     /// ### Example
     ///
@@ -698,12 +750,14 @@ let i = world.run(sys1);
     ///
     /// - Scheduler (shared)
     /// - Systems' borrow as they are executed
+    /// - Connected sets regrouped by the workload (exclusive), as they are regrouped
     ///
     /// ### Errors
     ///
     /// - Scheduler borrow failed.
     /// - Workload did not exist.
     /// - Storage borrow failed.
+    /// - Regroup borrow failed.
     /// - User error returned by system.
     pub fn run_workload<T>(&self, label: impl AsLabel<T>) -> Result<(), error::RunWorkload> {
         let scheduler = self
@@ -756,13 +810,12 @@ let i = world.run(sys1);
         batches: &Batches,
         workload_name: &dyn Label,
     ) -> Result<(), error::RunWorkload> {
-        if let Some(run_if) = &batches.workload_run_if {
-            if !run_if
+        if let Some(run_if) = &batches.workload_run_if
+            && !run_if
                 .run(self)
                 .map_err(|err| error::RunWorkload::Run((workload_name.dyn_clone(), err)))?
-            {
-                return Ok(());
-            }
+        {
+            return Ok(());
         }
 
         #[cfg(feature = "parallel")]
@@ -781,11 +834,13 @@ let i = world.run(sys1);
     ///
     /// - Scheduler (shared)
     /// - Systems' borrow as they are executed
+    /// - Connected sets regrouped by the workload (exclusive), as they are regrouped
     ///
     /// ### Errors
     ///
     /// - Scheduler borrow failed.
     /// - Storage borrow failed.
+    /// - Regroup borrow failed.
     /// - User error returned by system.
     pub fn run_default_workload(&self) -> Result<(), error::RunWorkload> {
         let scheduler = self
@@ -1115,7 +1170,10 @@ impl World {
     #[inline]
     #[track_caller]
     #[cfg(all(feature = "parallel", not(feature = "thread_local")))]
-    pub fn par_bulk_delete_entity(&mut self, entities: impl IntoIterator<Item = EntityId>) -> usize {
+    pub fn par_bulk_delete_entity(
+        &mut self,
+        entities: impl IntoIterator<Item = EntityId>,
+    ) -> usize {
         self.all_storages.get_mut().par_bulk_delete_entity(entities)
     }
 
@@ -1329,6 +1387,69 @@ impl World {
         self.all_storages.get_mut().track_all::<T>();
     }
 
+    /// Moves components to the groups they belong to, to speed up iteration.
+    ///
+    /// Groups are declared with [`WorldBuilder::with_group`].\
+    /// Components only move to their group during a regroup.\
+    /// Iteration stays correct between regroups, but adding or removing components slows it down.
+    ///
+    /// Workloads added to the world regroup storages they use automatically.\
+    /// This is for the rest, like iterating in [`World::run`].
+    pub fn regroup(&mut self) {
+        self.all_storages.get_mut().regroup();
+    }
+
+    /// Regroups the [connected set] holding `T`'s storage, leaving the rest of the world alone.
+    ///
+    /// Like [`World::borrow`], it only needs a shared reference to the world.\
+    /// Every storage of the set is borrowed exclusively until the regroup ends, the other storages
+    /// can stay borrowed meanwhile.\
+    /// `T` can be any member of the set, all of them give the same result.
+    ///
+    /// ### Errors
+    ///
+    /// - [`NotGrouped`] when `T`'s storage isn't part of any group.
+    /// - [`Storage`] when `AllStorages` is borrowed mutably, or a storage of the set is already
+    ///   borrowed, or is `!Send` and this isn't the world's thread.\
+    ///   It can be a member other than `T`. Nothing moves in that case.
+    ///
+    /// ### Example
+    ///
+    /// ```
+    /// use shipyard::{error, Component, World};
+    ///
+    /// #[derive(Component)]
+    /// struct Pos(f32);
+    ///
+    /// #[derive(Component)]
+    /// struct Vel(f32);
+    ///
+    /// #[derive(Component)]
+    /// struct Health(u32);
+    ///
+    /// let mut world = World::builder().with_group::<(Pos, Vel)>().build();
+    /// world.add_entity((Pos(0.0), Vel(1.0)));
+    ///
+    /// world.regroup_set::<Pos>().unwrap();
+    ///
+    /// // Health isn't part of any group.
+    /// assert!(matches!(
+    ///     world.regroup_set::<Health>(),
+    ///     Err(error::RegroupSet::NotGrouped { .. })
+    /// ));
+    /// ```
+    ///
+    /// [connected set]: crate::world::WorldBuilder::with_group
+    /// [`NotGrouped`]: error::RegroupSet::NotGrouped
+    /// [`Storage`]: error::RegroupSet::Storage
+    pub fn regroup_set<T: GroupMember>(&self) -> Result<(), error::RegroupSet> {
+        let all_storages = self.all_storages.borrow().map_err(|borrow| {
+            error::RegroupSet::Storage(error::GetStorage::AllStoragesBorrow(borrow))
+        })?;
+
+        all_storages.regroup_set::<T>()
+    }
+
     #[doc = "Retrieve components of `entity`.
 
 Multiple components can be queried at the same time using a tuple.
@@ -1397,11 +1518,14 @@ assert!(j.as_ref() == &U32(1));
         entity: EntityId,
     ) -> Result<T::Out<'_>, error::GetComponent> {
         let (all_storages, all_borrow) = unsafe {
-            ARef::destructure(
-                self.all_storages
-                    .borrow()
-                    .map_err(error::GetStorage::AllStoragesBorrow)?,
-            )
+            ARef::destructure(match self.all_storages.borrow() {
+                Ok(all_storages) => all_storages,
+                Err(err) => {
+                    return Err(error::GetComponent::StorageBorrow(
+                        error::GetStorage::AllStoragesBorrow(err),
+                    ));
+                }
+            })
         };
 
         let current = self.get_current();
@@ -1467,11 +1591,10 @@ assert!(*i == U32(0));
     #[inline]
     pub fn get_unique<T: GetUnique>(&self) -> Result<T::Out<'_>, error::GetStorage> {
         let (all_storages, all_borrow) = unsafe {
-            ARef::destructure(
-                self.all_storages
-                    .borrow()
-                    .map_err(error::GetStorage::AllStoragesBorrow)?,
-            )
+            ARef::destructure(match self.all_storages.borrow() {
+                Ok(all_storages) => all_storages,
+                Err(err) => return Err(error::GetStorage::AllStoragesBorrow(err)),
+            })
         };
 
         T::get_unique(all_storages, Some(all_borrow))
@@ -1542,7 +1665,7 @@ for (i, j) in &mut iter {
     #[track_caller]
     pub fn iter<'a, T: IterComponent>(&'a self) -> IntoIterRef<'a, T>
     where
-        <T as IterComponent>::Shiperator<'a>: ShiperatorCaptain + ShiperatorSailor,
+        <T as IterComponent>::Shiperator<'a>: Shiperator,
     {
         let (all_storages, all_borrow) = unsafe {
             ARef::destructure(
@@ -1577,11 +1700,12 @@ for (i, j) in &mut iter {
     }
 
     /// Returns true if entity matches a living entity.
+    #[inline]
     pub fn is_entity_alive(&mut self, entity: EntityId) -> bool {
         self.all_storages
             .get_mut()
-            .exclusive_storage_mut::<Entities>()
-            .unwrap()
+            .entities
+            .get_mut()
             .is_alive(entity)
     }
 

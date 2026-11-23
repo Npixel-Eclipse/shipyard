@@ -1,6 +1,10 @@
 use crate::all_storages::AllStorages;
 use crate::borrow::{BorrowInfo, Mutability, WorldBorrow};
 use crate::error;
+#[cfg(feature = "scheduler-experiment")]
+use crate::error::SystemError;
+#[cfg(feature = "scheduler-experiment")]
+use crate::scheduler::dag::Fallible;
 use crate::scheduler::info::DedupedLabels;
 use crate::scheduler::label::{SystemLabel, WorkloadLabel};
 use crate::scheduler::{AsLabel, Label, TypeInfo, Workload, WorkloadSystem};
@@ -12,13 +16,16 @@ use crate::world::World;
 use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
-use core::any::{type_name, TypeId};
+use core::any::{Any, TypeId, type_name};
 use core::sync::atomic::{AtomicU64, Ordering};
 
 /// Validates a function can become a system.
 ///
 /// Usually you don't have to use it directly except if you want to handle the error.\
 /// To modify the system execution see [SystemModificator](crate::scheduler::SystemModificator).
+///
+/// A system returning exactly `Result<(), SystemError>` stops its workload when it returns an error,
+/// any other return value is dropped. See [`Workload::with_system`].
 pub trait IntoWorkloadSystem<B, R> {
     /// Wraps a function in a struct containing all information required by a workload.
     fn into_workload_system(self) -> Result<WorkloadSystem, error::InvalidSystem>;
@@ -29,7 +36,35 @@ pub trait IntoWorkloadSystem<B, R> {
     fn call(&self) -> R;
 }
 
+/// Turns a system's return value into its workload result.
+///
+/// `Result<(), SystemError>`'s error is returned, any other value is dropped.
+fn workload_result<R: 'static>(output: R) -> Result<(), error::Run> {
+    // We can't name `R`'s concrete type, `Any` tells us if it's the one we propagate.
+    // We wrap the value in an `Option` to be able to move it out of the `&mut dyn Any`.
+    let mut output = Some(output);
+    let output: &mut dyn Any = &mut output;
+
+    match output
+        .downcast_mut::<Option<Result<(), error::SystemError>>>()
+        .and_then(Option::take)
+    {
+        Some(Err(error)) => Err(error::Run::Custom(error)),
+        Some(Ok(())) | None => Ok(()),
+    }
+}
+
 pub struct Nothing;
+
+fn system_tags<R: 'static>(label: Box<dyn Label>) -> Vec<Box<dyn Label>> {
+    #[allow(unused_mut)]
+    let mut tags = vec![label];
+    #[cfg(feature = "scheduler-experiment")]
+    if TypeId::of::<R>() == TypeId::of::<Result<(), SystemError>>() {
+        tags.push(Box::new(TypeId::of::<Fallible>()));
+    }
+    tags
+}
 
 impl<R, F> IntoWorkloadSystem<Nothing, R> for F
 where
@@ -41,11 +76,8 @@ where
             borrow_constraints: Vec::new(),
             tracking_to_enable: Vec::new(),
             display_name: self.label(),
-            tags: vec![self.label()],
-            system_fn: Box::new(move |_: &World| {
-                (self)();
-                Ok(())
-            }),
+            tags: system_tags::<R>(self.label()),
+            system_fn: Box::new(move |_: &World| workload_result((self)())),
             type_id: TypeId::of::<F>(),
             generator: Box::new(|_| TypeId::of::<F>()),
             before_all: DedupedLabels::new(),
@@ -54,6 +86,7 @@ where
             before: Vec::new(),
             unique_id: 0,
             run_if: None,
+            run_if_borrow_constraints: Vec::new(),
             require_in_workload: DedupedLabels::new(),
             require_before: DedupedLabels::new(),
             require_after: DedupedLabels::new(),
@@ -148,14 +181,14 @@ macro_rules! impl_into_workload_system {
                 Ok(WorkloadSystem {
                     borrow_constraints: borrows,
                     tracking_to_enable,
-                    display_name: self.label(),
-                    tags: vec![self.label()],
+                    display_name: <Func as IntoWorkloadSystem<($($type,)+), Ret>>::label(&self),
+                    tags: system_tags::<Ret>(<Func as IntoWorkloadSystem<($($type,)+), Ret>>::label(&self)),
                     system_fn: Box::new(move |world: &World| {
                         let current = world.get_current();
                         let last_run = TrackingTimestamp::new(last_run.swap(current.get(), Ordering::Acquire));
                         #[cfg(feature = "scheduler-experiment")]
                         let _observation = system_started(current, type_name::<Func>());
-                        Ok(drop((&&self)($($type::world_borrow(&world, Some(last_run), current)?),+)))
+                        workload_result((&&self)($($type::world_borrow(&world, Some(last_run), current)?),+))
                     }),
                     type_id: TypeId::of::<Func>(),
                     before_all: DedupedLabels::new(),
@@ -171,6 +204,7 @@ macro_rules! impl_into_workload_system {
                         TypeId::of::<Func>()
                     }),
                     run_if: None,
+                    run_if_borrow_constraints: Vec::new(),
                     require_in_workload: DedupedLabels::new(),
                     require_before: DedupedLabels::new(),
                     require_after: DedupedLabels::new(),

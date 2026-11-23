@@ -1,36 +1,44 @@
-use super::{ShiperatorCaptain, ShiperatorOutput, ShiperatorSailor};
-use crate::{entity_id::EntityId, sparse_set::TrackingPlan};
+use super::{EntityCursor, SegmentEntry, SegmentRow, Shiperator};
+use crate::{EntityId, sparse_set::tracking_plan::TrackingPlan};
+use core::ops::Range;
 
-/// Internal tracking wrapper carrying the current query's chunk plan.
+pub(crate) trait TrackingFilter: Shiperator {
+    fn segment_start(&self) -> usize;
+}
+
+/// A tracking filter with a query-local candidate plan.
 #[doc(hidden)]
 #[derive(Clone)]
 pub struct PlannedTracking<S> {
-    inner: S,
-    plan: TrackingPlan,
+    pub(crate) inner: S,
+    pub(crate) plan: TrackingPlan,
+    pub(crate) len: usize,
 }
 
-impl<S> PlannedTracking<S> {
-    pub(crate) fn new(inner: S, plan: TrackingPlan) -> Self {
-        Self { inner, plan }
-    }
-}
-
-impl<S: ShiperatorOutput> ShiperatorOutput for PlannedTracking<S> {
+impl<S: TrackingFilter> Shiperator for PlannedTracking<S> {
     type Out = S::Out;
-}
+    type Index = S::Index;
+    const PREFER_CAPTAIN_FIRST: bool = S::PREFER_CAPTAIN_FIRST;
+    const HAS_CANDIDATE_PLAN: bool = true;
+    const HAS_UNSTABLE_MEMBERSHIP: bool = S::HAS_UNSTABLE_MEMBERSHIP;
+    const CAN_SPLIT: bool = S::CAN_SPLIT;
 
-impl<S: ShiperatorCaptain> ShiperatorCaptain for PlannedTracking<S> {
+    fn merge_iteration_state(&mut self, other: &Self) {
+        self.inner.merge_iteration_state(&other.inner);
+    }
+
     #[inline]
-    fn has_stable_membership(&self) -> bool {
-        self.plan.is_empty() || self.inner.has_stable_membership()
+    fn node_count() -> usize {
+        S::node_count()
     }
     #[inline]
-    unsafe fn get_captain_data(&self, index: usize) -> Self::Out {
-        self.inner.get_captain_data(index)
+    fn describe(&self, active: bool, row: &mut SegmentRow) {
+        self.inner.describe(active, row);
     }
     #[inline]
-    fn next_slice(&mut self) {
-        self.inner.next_slice();
+    unsafe fn enter_segment(&mut self, entry: &mut SegmentEntry<'_>) {
+        // SAFE: The wrapper preserves its filter's layout and segment state.
+        unsafe { self.inner.enter_segment(entry) };
     }
     #[inline]
     fn sail_time(&self) -> usize {
@@ -41,69 +49,59 @@ impl<S: ShiperatorCaptain> ShiperatorCaptain for PlannedTracking<S> {
         false
     }
     #[inline]
-    fn unpick(&mut self) {
-        self.inner.unpick();
-        // Sailors only need per-entity probes and the empty-input proof. Release
-        // sparse ranges so producer clones don't retain unused plans/Arc refs.
-        if !self.has_no_candidates() {
-            self.plan = TrackingPlan::Dense {
-                len: self.inner.sail_time(),
-            };
-        }
-    }
-    #[inline]
     fn has_no_candidates(&self) -> bool {
         self.plan.is_empty()
     }
     #[inline]
-    fn next_possible(&self, index: usize) -> usize {
-        if matches!(self.plan, TrackingPlan::Dense { .. }) {
-            return self.inner.next_possible(index);
+    fn has_dense_candidates(&self) -> bool {
+        matches!(self.plan, TrackingPlan::Dense { .. })
+    }
+    #[inline]
+    fn unpick(&mut self) {
+        if !self.plan.is_empty() {
+            self.plan = TrackingPlan::Dense { len: self.len };
         }
-        self.plan.next(index)
     }
     #[inline]
-    fn next_possible_in(&self, index: usize, end: usize) -> usize {
-        if matches!(self.plan, TrackingPlan::Dense { .. }) {
-            return self.inner.next_possible_in(index, end);
-        }
-        self.plan.next_in(index, end)
+    unsafe fn next_candidate_range(&self, start: usize, end: usize) -> Range<usize> {
+        let offset = self.inner.segment_start();
+        let range = self.plan.next_range(start + offset, end + offset);
+        range.start - offset..range.end - offset
     }
     #[inline]
-    fn previous_possible(&self, end: usize) -> usize {
-        self.plan.previous(end)
-    }
-    #[cfg(feature = "parallel")]
-    #[inline]
-    fn candidate_count(&self, start: usize, end: usize) -> usize {
-        self.plan.count(start, end)
-    }
-    #[cfg(feature = "parallel")]
-    #[inline]
-    fn candidate_midpoint(&self, start: usize, end: usize) -> usize {
-        self.plan.midpoint(start, end)
-    }
-}
-
-impl<S: ShiperatorSailor> ShiperatorSailor for PlannedTracking<S> {
-    type Index = S::Index;
-    #[inline]
-    unsafe fn get_sailor_data(&self, index: Self::Index) -> Self::Out {
-        self.inner.get_sailor_data(index)
+    unsafe fn candidate_count(&self, start: usize, end: usize) -> usize {
+        let offset = self.inner.segment_start();
+        self.plan.count(start + offset, end + offset)
     }
     #[inline]
-    fn indices_of(&self, eid: EntityId, index: usize) -> Option<Self::Index> {
+    unsafe fn candidate_split_at(&self, start: usize, end: usize, count: usize) -> usize {
+        let offset = self.inner.segment_start();
+        self.plan.split_at(start + offset, end + offset, count) - offset
+    }
+    #[inline]
+    unsafe fn captain_indices_of(
+        &self,
+        entities: &EntityCursor,
+        index: usize,
+    ) -> Option<Self::Index> {
+        // SAFE: Our caller's cursor and index are the filter's own.
+        unsafe { self.inner.captain_indices_of(entities, index) }
+    }
+    #[inline]
+    fn sailor_indices_of(&self, entity: EntityId) -> Option<Self::Index> {
         if self.plan.is_empty() {
-            return None;
+            None
+        } else {
+            self.inner.sailor_indices_of(entity)
         }
-        self.inner.indices_of(eid, index)
     }
     #[inline]
-    fn captain_indices_of(&self, eid: EntityId, index: usize) -> Option<Self::Index> {
-        self.inner.captain_indices_of(eid, index)
+    fn storage_index(index: &Self::Index) -> Option<usize> {
+        S::storage_index(index)
     }
     #[inline]
-    fn index_from_usize(index: usize) -> Self::Index {
-        S::index_from_usize(index)
+    unsafe fn get_data(&self, index: Self::Index) -> Self::Out {
+        // SAFE: The index was resolved by this same filter.
+        unsafe { self.inner.get_data(index) }
     }
 }

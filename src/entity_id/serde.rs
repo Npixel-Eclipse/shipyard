@@ -1,10 +1,13 @@
+#[cfg(test)]
+mod tests;
+
 use super::EntityId;
 use core::fmt;
 use core::num::NonZeroU64;
 use serde::{
+    Deserialize, Deserializer, Serialize, Serializer,
     de::{self, MapAccess, SeqAccess, Visitor},
     ser::SerializeStruct,
-    Deserialize, Deserializer, Serialize, Serializer,
 };
 
 const FIELDS: &[&str] = &["index", "gen"];
@@ -17,10 +20,10 @@ impl Serialize for EntityId {
         if serializer.is_human_readable() {
             let mut ser_struct = serializer.serialize_struct("EntityId", 2)?;
             ser_struct.serialize_field(FIELDS[0], &(self.index()))?;
-            ser_struct.serialize_field(FIELDS[1], &(self.gen()))?;
+            ser_struct.serialize_field(FIELDS[1], &(self.generation()))?;
             ser_struct.end()
         } else {
-            let clone = self.clone();
+            let clone = self;
             ((clone.0).get() - 1).serialize(serializer)
         }
     }
@@ -129,22 +132,4 @@ impl<'de> Deserialize<'de> for EntityId {
             Ok(EntityId(unsafe { NonZeroU64::new_unchecked(non_zero + 1) }))
         }
     }
-}
-
-#[test]
-fn serde_json() {
-    let string = serde_json::to_string(&EntityId::new_from_index_and_gen(10, 2)).unwrap();
-    assert_eq!(r#"{"index":10,"gen":2}"#, string);
-
-    let entity = serde_json::de::from_str::<EntityId>(&string).unwrap();
-    assert_eq!(entity, EntityId::new_from_index_and_gen(10, 2));
-}
-
-#[test]
-fn bincode() {
-    let bytes = bincode::serialize(&EntityId::new_from_parts(10, 2)).unwrap();
-    assert_eq!(&[10, 0, 0, 0, 0, 0, 2, 0][..], &bytes);
-
-    let entity = bincode::deserialize::<EntityId>(&bytes).unwrap();
-    assert_eq!(entity, EntityId::new_from_parts(10, 2));
 }

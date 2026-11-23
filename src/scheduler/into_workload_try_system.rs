@@ -1,6 +1,7 @@
+use crate::World;
 use crate::all_storages::AllStorages;
 use crate::borrow::{BorrowInfo, Mutability, WorldBorrow};
-use crate::error;
+use crate::error::{InvalidSystem, Run};
 use crate::scheduler::info::DedupedLabels;
 use crate::scheduler::into_workload_system::Nothing;
 use crate::scheduler::label::SystemLabel;
@@ -9,14 +10,13 @@ use crate::storage::StorageId;
 use crate::tracking::TrackingTimestamp;
 #[cfg(feature = "scheduler-experiment")]
 use crate::tracking_observation::system_started;
-use crate::World;
 use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
-use core::any::type_name;
 #[cfg(not(feature = "std"))]
 use core::any::Any;
 use core::any::TypeId;
+use core::any::type_name;
 use core::sync::atomic::{AtomicU64, Ordering};
 #[cfg(feature = "std")]
 use std::error::Error;
@@ -33,20 +33,20 @@ fn mark_fallible(#[allow(unused_mut)] mut system: WorkloadSystem) -> WorkloadSys
 
 /// Validates a function can become a failable system.
 pub trait IntoWorkloadTrySystem<Views, R> {
-    /// Wraps a fallible function in a struct containing all information required by a workload.  
+    /// Wraps a fallible function in a struct containing all information required by a workload.
     /// The workload will stop if an error is returned.
     #[cfg(feature = "std")]
     fn into_workload_try_system<Ok, Err: Into<Box<dyn Error + Send + Sync>>>(
         self,
-    ) -> Result<WorkloadSystem, error::InvalidSystem>
+    ) -> Result<WorkloadSystem, InvalidSystem>
     where
         R: Into<Result<Ok, Err>>;
-    /// Wraps a fallible function in a struct containing all information required by a workload.  
+    /// Wraps a fallible function in a struct containing all information required by a workload.
     /// The workload will stop if an error is returned.
     #[cfg(not(feature = "std"))]
     fn into_workload_try_system<Ok, Err: 'static + Send + Any>(
         self,
-    ) -> Result<WorkloadSystem, error::InvalidSystem>
+    ) -> Result<WorkloadSystem, InvalidSystem>
     where
         R: Into<Result<Ok, Err>>;
 }
@@ -58,7 +58,7 @@ where
     #[cfg(feature = "std")]
     fn into_workload_try_system<Ok, Err: Into<Box<dyn Error + Send + Sync>>>(
         self,
-    ) -> Result<WorkloadSystem, error::InvalidSystem>
+    ) -> Result<WorkloadSystem, InvalidSystem>
     where
         R: Into<Result<Ok, Err>>,
     {
@@ -68,7 +68,7 @@ where
             borrow_constraints: Vec::new(),
             tracking_to_enable: Vec::new(),
             system_fn: Box::new(move |_: &World| {
-                (self)().into().map_err(error::Run::from_custom)?;
+                (self)().into().map_err(Run::from_custom)?;
                 Ok(())
             }),
             type_id: TypeId::of::<F>(),
@@ -87,6 +87,7 @@ where
                 name: system_type_name.as_label(),
             })],
             run_if: None,
+            run_if_borrow_constraints: Vec::new(),
             require_in_workload: DedupedLabels::new(),
             require_before: DedupedLabels::new(),
             require_after: DedupedLabels::new(),
@@ -95,7 +96,7 @@ where
     #[cfg(not(feature = "std"))]
     fn into_workload_try_system<Ok, Err: 'static + Send + Any>(
         self,
-    ) -> Result<WorkloadSystem, error::InvalidSystem>
+    ) -> Result<WorkloadSystem, InvalidSystem>
     where
         R: Into<Result<Ok, Err>>,
     {
@@ -105,7 +106,7 @@ where
             borrow_constraints: Vec::new(),
             tracking_to_enable: Vec::new(),
             system_fn: Box::new(move |_: &World| {
-                (self)().into().map_err(error::Run::from_custom)?;
+                (self)().into().map_err(Run::from_custom)?;
                 Ok(())
             }),
             type_id: TypeId::of::<F>(),
@@ -124,6 +125,7 @@ where
                 name: system_type_name.as_label(),
             })],
             run_if: None,
+            run_if_borrow_constraints: Vec::new(),
             require_in_workload: DedupedLabels::new(),
             require_before: DedupedLabels::new(),
             require_after: DedupedLabels::new(),
@@ -132,21 +134,21 @@ where
 }
 
 // The `Result` type is not actually used and the error type can be anything
-impl IntoWorkloadTrySystem<WorkloadSystem, Result<(), error::InvalidSystem>> for WorkloadSystem {
-    /// Wraps a fallible function in a struct containing all information required by a workload.  
+impl IntoWorkloadTrySystem<WorkloadSystem, Result<(), InvalidSystem>> for WorkloadSystem {
+    /// Wraps a fallible function in a struct containing all information required by a workload.
     /// The workload will stop if an error is returned.
     #[cfg(feature = "std")]
     fn into_workload_try_system<Ok, Err: Into<Box<dyn Error + Send + Sync>>>(
         self,
-    ) -> Result<WorkloadSystem, error::InvalidSystem> {
+    ) -> Result<WorkloadSystem, InvalidSystem> {
         Ok(mark_fallible(self))
     }
-    /// Wraps a fallible function in a struct containing all information required by a workload.  
+    /// Wraps a fallible function in a struct containing all information required by a workload.
     /// The workload will stop if an error is returned.
     #[cfg(not(feature = "std"))]
     fn into_workload_try_system<Ok, Err: 'static + Send + Any>(
         self,
-    ) -> Result<WorkloadSystem, error::InvalidSystem> {
+    ) -> Result<WorkloadSystem, InvalidSystem> {
         Ok(mark_fallible(self))
     }
 }
@@ -160,13 +162,13 @@ macro_rules! impl_into_workload_try_system {
                 + Sync,
             for<'a, 'b> &'b Func:
                 Fn($($type),+) -> Ret
-                + Fn($($type::WorldView<'a>),+) -> Ret
+                + Fn($(<$type as WorldBorrow>::WorldView<'a>),+) -> Ret
         {
             #[cfg(feature = "std")]
-            fn into_workload_try_system<Ok, Err: Into<Box<dyn Error + Send + Sync>>>(self) -> Result<WorkloadSystem, error::InvalidSystem> where Ret: Into<Result<Ok, Err>> {
+            fn into_workload_try_system<Ok, Err: Into<Box<dyn Error + Send + Sync>>>(self) -> Result<WorkloadSystem, InvalidSystem> where Ret: Into<Result<Ok, Err>> {
                 let mut borrows = Vec::new();
                 $(
-                    $type::borrow_info(&mut borrows);
+                    <$type as BorrowInfo>::borrow_info(&mut borrows);
                 )+
 
                 if borrows.contains(&TypeInfo {
@@ -176,7 +178,7 @@ macro_rules! impl_into_workload_try_system {
                     thread_safe: true,
                 }) && borrows.len() > 1
                 {
-                    return Err(error::InvalidSystem::AllStorages);
+                    return Err(InvalidSystem::AllStorages);
                 }
 
                 if borrows.len() > 1 {
@@ -185,11 +187,11 @@ macro_rules! impl_into_workload_try_system {
                             if a_type_info.storage_id == b_type_info.storage_id {
                                 match (a_type_info.mutability, b_type_info.mutability) {
                                     (Mutability::Exclusive, Mutability::Exclusive) => {
-                                        return Err(error::InvalidSystem::MultipleViewsMut)
+                                        return Err(InvalidSystem::MultipleViewsMut)
                                     }
                                     (Mutability::Exclusive, Mutability::Shared)
                                     | (Mutability::Shared, Mutability::Exclusive) => {
-                                        return Err(error::InvalidSystem::MultipleViews)
+                                        return Err(InvalidSystem::MultipleViews)
                                     }
                                     (Mutability::Shared, Mutability::Shared) => {}
                                 }
@@ -200,7 +202,7 @@ macro_rules! impl_into_workload_try_system {
 
                 let mut tracking_to_enable = Vec::new();
                 $(
-                    $type::enable_tracking(&mut tracking_to_enable);
+                    <$type as BorrowInfo>::enable_tracking(&mut tracking_to_enable);
                 )+
 
                 let last_run = AtomicU64::new(0);
@@ -212,7 +214,7 @@ macro_rules! impl_into_workload_try_system {
                         let last_run = TrackingTimestamp::new(last_run.swap(current.get(), Ordering::Acquire));
                         #[cfg(feature = "scheduler-experiment")]
                         let _observation = system_started(current, type_name::<Func>());
-                        Ok(drop((&&self)($($type::world_borrow(&world, Some(last_run), current)?),+).into().map_err(error::Run::from_custom)?))
+                        Ok(drop((&&self)($(<$type as WorldBorrow>::world_borrow(&world, Some(last_run), current)?),+).into().map_err(Run::from_custom)?))
                     }),
                     type_id: TypeId::of::<Func>(),
                     display_name: Box::new(SystemLabel {
@@ -221,7 +223,7 @@ macro_rules! impl_into_workload_try_system {
                     }),
                     generator: Box::new(|constraints| {
                         $(
-                            $type::borrow_info(constraints);
+                            <$type as BorrowInfo>::borrow_info(constraints);
                         )+
 
                         TypeId::of::<Func>()
@@ -236,16 +238,17 @@ macro_rules! impl_into_workload_try_system {
                         name: type_name::<Func>().as_label(),
                     })],
                     run_if: None,
+                    run_if_borrow_constraints: Vec::new(),
                     require_in_workload: DedupedLabels::new(),
                     require_before: DedupedLabels::new(),
                     require_after: DedupedLabels::new(),
                 }))
             }
             #[cfg(not(feature = "std"))]
-            fn into_workload_try_system<Ok, Err: 'static + Send + Any>(self) -> Result<WorkloadSystem, error::InvalidSystem> where Ret: Into<Result<Ok, Err>> {
+            fn into_workload_try_system<Ok, Err: 'static + Send + Any>(self) -> Result<WorkloadSystem, InvalidSystem> where Ret: Into<Result<Ok, Err>> {
                 let mut borrows = Vec::new();
                 $(
-                    $type::borrow_info(&mut borrows);
+                    <$type as BorrowInfo>::borrow_info(&mut borrows);
                 )+
 
                 if borrows.contains(&TypeInfo {
@@ -255,7 +258,7 @@ macro_rules! impl_into_workload_try_system {
                     thread_safe: true,
                 }) && borrows.len() > 1
                 {
-                    return Err(error::InvalidSystem::AllStorages);
+                    return Err(InvalidSystem::AllStorages);
                 }
 
                 if borrows.len() > 1 {
@@ -264,11 +267,11 @@ macro_rules! impl_into_workload_try_system {
                             if a_type_info.storage_id == b_type_info.storage_id {
                                 match (a_type_info.mutability, b_type_info.mutability) {
                                     (Mutability::Exclusive, Mutability::Exclusive) => {
-                                        return Err(error::InvalidSystem::MultipleViewsMut)
+                                        return Err(InvalidSystem::MultipleViewsMut)
                                     }
                                     (Mutability::Exclusive, Mutability::Shared)
                                     | (Mutability::Shared, Mutability::Exclusive) => {
-                                        return Err(error::InvalidSystem::MultipleViews)
+                                        return Err(InvalidSystem::MultipleViews)
                                     }
                                     (Mutability::Shared, Mutability::Shared) => {}
                                 }
@@ -279,7 +282,7 @@ macro_rules! impl_into_workload_try_system {
 
                 let mut tracking_to_enable = Vec::new();
                 $(
-                    $type::enable_tracking(&mut tracking_to_enable);
+                    <$type as BorrowInfo>::enable_tracking(&mut tracking_to_enable);
                 )+
 
                 let last_run = AtomicU64::new(0);
@@ -291,7 +294,7 @@ macro_rules! impl_into_workload_try_system {
                         let last_run = TrackingTimestamp::new(last_run.swap(current.get(), Ordering::Acquire));
                         #[cfg(feature = "scheduler-experiment")]
                         let _observation = system_started(current, type_name::<Func>());
-                        Ok(drop((&&self)($($type::world_borrow(&world, Some(last_run), current)?),+).into().map_err(error::Run::from_custom)?))
+                        Ok(drop((&&self)($(<$type as WorldBorrow>::world_borrow(&world, Some(last_run), current)?),+).into().map_err(Run::from_custom)?))
                     }),
                     type_id: TypeId::of::<Func>(),
                     display_name: Box::new(SystemLabel {
@@ -300,7 +303,7 @@ macro_rules! impl_into_workload_try_system {
                     }),
                     generator: Box::new(|constraints| {
                         $(
-                            $type::borrow_info(constraints);
+                            <$type as BorrowInfo>::borrow_info(constraints);
                         )+
 
                         TypeId::of::<Func>()
@@ -315,6 +318,7 @@ macro_rules! impl_into_workload_try_system {
                         name: type_name::<Func>().as_label(),
                     })],
                     run_if: None,
+                    run_if_borrow_constraints: Vec::new(),
                     require_in_workload: DedupedLabels::new(),
                     require_before: DedupedLabels::new(),
                     require_after: DedupedLabels::new(),

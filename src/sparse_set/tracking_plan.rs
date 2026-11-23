@@ -14,8 +14,6 @@ pub(crate) enum TrackingPlan {
 }
 
 pub(crate) struct SparsePlan {
-    // Retained for candidate-work splitting when parallel iteration is enabled.
-    #[cfg_attr(not(feature = "parallel"), allow(dead_code))]
     ranges: Box<[CandidateRange]>,
     chunk_bits: Box<[usize]>,
     len: usize,
@@ -23,12 +21,10 @@ pub(crate) struct SparsePlan {
     chunks: usize,
 }
 
-#[cfg_attr(not(feature = "parallel"), allow(dead_code))]
 struct CandidateRange {
     start: usize,
     end: usize,
     /// Number of candidate slots in all preceding ranges.
-    #[cfg(any(feature = "parallel", test))]
     prefix: usize,
 }
 
@@ -61,16 +57,31 @@ impl TrackingPlan {
             };
         }
         let bits = usize::BITS as usize;
-        let mut chunk_bits = Vec::new();
-        let mut chunks = 0;
-        let mut runs = 0;
-        let mut previous_candidate = false;
         let dense_threshold = if chunk_count >= MIN_DENSE_FALLBACK_CHUNKS {
             chunk_count.div_ceil(2)
         } else {
             chunk_count
         };
-        for chunk in 0..chunk_count {
+        // Dense prefixes need neither a bitmap nor run bookkeeping.
+        let mut leading = 0;
+        while leading < dense_threshold && candidate(leading) {
+            leading += 1;
+        }
+        if leading == dense_threshold {
+            return Self::Dense { len };
+        }
+        let mut chunk_bits = Vec::new();
+        let mut chunks = leading;
+        let mut runs = usize::from(leading != 0);
+        let mut previous_candidate = false;
+        if leading != 0 {
+            chunk_bits.resize(chunk_count.div_ceil(bits), 0usize);
+            for chunk in 0..leading {
+                chunk_bits[chunk / bits] |= 1usize << (chunk % bits);
+            }
+        }
+        // The prefix scan already checked the first non-candidate chunk.
+        for chunk in leading + 1..chunk_count {
             let is_candidate = candidate(chunk);
             if is_candidate {
                 chunks += 1;
@@ -101,16 +112,15 @@ impl TrackingPlan {
                 let chunk = word_index * bits + remaining.trailing_zeros() as usize;
                 remaining &= remaining - 1;
                 let start = chunk * TRACKING_CHUNK_SIZE;
-                if start != run_end {
-                    if let Some(start_of_run) = run_start.take() {
-                        ranges.push(CandidateRange {
-                            start: start_of_run,
-                            end: run_end,
-                            #[cfg(any(feature = "parallel", test))]
-                            prefix: slots,
-                        });
-                        slots += run_end - start_of_run;
-                    }
+                if start != run_end
+                    && let Some(start_of_run) = run_start.take()
+                {
+                    ranges.push(CandidateRange {
+                        start: start_of_run,
+                        end: run_end,
+                        prefix: slots,
+                    });
+                    slots += run_end - start_of_run;
                 }
                 run_start.get_or_insert(start);
                 run_end = (start + TRACKING_CHUNK_SIZE).min(len);
@@ -120,7 +130,6 @@ impl TrackingPlan {
             ranges.push(CandidateRange {
                 start,
                 end: run_end,
-                #[cfg(any(feature = "parallel", test))]
                 prefix: slots,
             });
             slots += run_end - start;
@@ -132,6 +141,40 @@ impl TrackingPlan {
             slots,
             chunks,
         }))
+    }
+
+    pub(crate) fn next_range(&self, start: usize, end: usize) -> core::ops::Range<usize> {
+        let start = self.next_in(start, end);
+        if start == end {
+            return end..end;
+        }
+        match self {
+            Self::Sparse(plan) => {
+                let pos = plan.ranges.partition_point(|range| range.end <= start);
+                start..plan.ranges[pos].end.min(end)
+            }
+            _ => start..end,
+        }
+    }
+
+    pub(crate) fn split_at(&self, start: usize, end: usize, count: usize) -> usize {
+        if count == 0 {
+            return start;
+        }
+        if count == self.count(start, end) {
+            return end;
+        }
+        let rank = self.rank(start) + count;
+        match self {
+            Self::Sparse(plan) => {
+                let pos = plan
+                    .ranges
+                    .partition_point(|range| range.prefix + range.end - range.start <= rank);
+                let range = &plan.ranges[pos];
+                range.start + rank - range.prefix
+            }
+            _ => start + count,
+        }
     }
 
     #[inline]
@@ -147,11 +190,6 @@ impl TrackingPlan {
             Self::Dense { len } => len.saturating_add(len.div_ceil(TRACKING_CHUNK_SIZE)),
             Self::Sparse(plan) => plan.slots.saturating_add(plan.chunks),
         }
-    }
-
-    #[inline]
-    pub(crate) fn next(&self, index: usize) -> usize {
-        self.next_in(index, usize::MAX)
     }
 
     #[inline]
@@ -185,7 +223,6 @@ impl TrackingPlan {
         }
     }
 
-    #[cfg(any(feature = "parallel", test))]
     #[inline]
     fn rank(&self, index: usize) -> usize {
         match self {
@@ -201,54 +238,8 @@ impl TrackingPlan {
     }
 
     #[inline]
-    pub(crate) fn previous(&self, end: usize) -> usize {
-        match self {
-            Self::Empty => 0,
-            Self::Dense { len } => end.min(*len),
-            Self::Sparse(plan) => {
-                let end = end.min(plan.len);
-                if end == 0 {
-                    return 0;
-                }
-                let bits = usize::BITS as usize;
-                let chunk = (end - 1) / TRACKING_CHUNK_SIZE;
-                let mut word = chunk / bits;
-                let mut candidates =
-                    plan.chunk_bits[word] & (usize::MAX >> (bits - 1 - chunk % bits));
-                while candidates == 0 {
-                    if word == 0 {
-                        return 0;
-                    }
-                    word -= 1;
-                    candidates = plan.chunk_bits[word];
-                }
-                let chunk = word * bits + bits - 1 - candidates.leading_zeros() as usize;
-                end.min((chunk + 1) * TRACKING_CHUNK_SIZE)
-            }
-        }
-    }
-
-    #[cfg(any(feature = "parallel", test))]
-    #[inline]
     pub(crate) fn count(&self, start: usize, end: usize) -> usize {
         self.rank(end) - self.rank(start)
-    }
-
-    #[cfg(any(feature = "parallel", test))]
-    #[inline]
-    pub(crate) fn midpoint(&self, start: usize, end: usize) -> usize {
-        let start_rank = self.rank(start);
-        let rank = start_rank + (self.rank(end) - start_rank) / 2;
-        match self {
-            Self::Sparse(plan) => {
-                let pos = plan
-                    .ranges
-                    .partition_point(|range| range.prefix + range.end - range.start <= rank);
-                let range = &plan.ranges[pos];
-                range.start + rank - range.prefix
-            }
-            _ => start + (end - start) / 2,
-        }
     }
 }
 
@@ -265,23 +256,13 @@ mod tests {
             let mut actual = Vec::new();
             let mut index = 0;
             while index < len {
-                index = plan.next(index);
-                if index < len {
-                    actual.push(index);
-                    index += 1;
-                }
+                let range = plan.next_range(index, len);
+                assert!(index <= range.start && range.start <= range.end && range.end <= len);
+                assert!(!range.is_empty() || range.end == len);
+                actual.extend(range.clone());
+                index = range.end;
             }
             assert_eq!(actual, candidate);
-            let mut reverse = Vec::new();
-            let mut end = len;
-            while end != 0 {
-                end = plan.previous(end);
-                if end != 0 {
-                    end -= 1;
-                    reverse.push(end);
-                }
-            }
-            assert_eq!(reverse, candidate.iter().rev().copied().collect::<Vec<_>>());
             for start in [0, 1, 63, 64, 65, 127, 128, 192, 256] {
                 for end in [64, 127, 128, 191, 192, 256, 257] {
                     if end <= start {
@@ -290,7 +271,7 @@ mod tests {
                     let expected = candidate.iter().filter(|&&i| start <= i && i < end).count();
                     assert_eq!(plan.count(start, end), expected);
                     if expected > 1 {
-                        let split = plan.midpoint(start, end);
+                        let split = plan.split_at(start, end, expected / 2);
                         assert!(start < split && split < end);
                         assert_eq!(plan.count(start, split), expected / 2);
                         assert_eq!(plan.count(split, end), expected - expected / 2);
@@ -343,7 +324,7 @@ mod tests {
     }
 
     #[test]
-    fn bitmap_word_boundaries_keep_forward_reverse_and_split_coverage() {
+    fn bitmap_word_boundaries_keep_counts_and_split_coverage() {
         let word_slots = usize::BITS as usize * 64;
         let len = word_slots * 3 + 7;
         let chunks = [
@@ -366,20 +347,11 @@ mod tests {
             len,
         ] {
             assert_eq!(
-                plan.previous(end),
-                candidate
-                    .iter()
-                    .copied()
-                    .take_while(|&i| i < end)
-                    .last()
-                    .map_or(0, |i| i + 1)
-            );
-            assert_eq!(
                 plan.count(0, end),
                 candidate.iter().filter(|&&i| i < end).count()
             );
         }
-        let split = plan.midpoint(0, len);
+        let split = plan.split_at(0, len, candidate.len() / 2);
         assert_eq!(plan.count(0, split), candidate.len() / 2);
     }
 
@@ -439,7 +411,7 @@ mod tests {
             chunk == 781
         });
         assert_eq!(reads, 782);
-        assert_eq!(plan.next(0), 49_984);
+        assert_eq!(plan.next_in(0, len), 49_984);
         assert_eq!(plan.count(0, len), 16);
         assert!(TrackingPlan::build_with_budget(0, 0, |_| unreachable!()).is_empty());
     }

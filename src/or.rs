@@ -1,8 +1,9 @@
 use crate::{
+    EntityId, ShipHashSet,
     component::Component,
+    iter::plan::OrBranch,
     tracking::{Inserted, InsertedOrModified, Modified, Tracking},
     views::{View, ViewMut},
-    EntityId, ShipHashSet,
 };
 use core::cell::RefCell;
 use core::ops::BitOr;
@@ -44,7 +45,7 @@ use core::ops::BitOr;
 #[derive(Copy, Clone)]
 pub struct Or<T>(pub(crate) T);
 
-impl<'tmp, 'v: 'tmp, T: Component, Track: Tracking, U> BitOr<U> for &'tmp View<'v, T, Track> {
+impl<'a, 'v, T: Component, Track: Tracking, U> BitOr<U> for &'a View<'v, T, Track> {
     type Output = Or<(Self, U)>;
 
     fn bitor(self, rhs: U) -> Self::Output {
@@ -52,7 +53,21 @@ impl<'tmp, 'v: 'tmp, T: Component, Track: Tracking, U> BitOr<U> for &'tmp View<'
     }
 }
 
-impl<T, U> BitOr<U> for Or<T> {
+macro_rules! impl_filter_or {
+    ($($filter:ident),+) => {$(
+        impl<T, U> BitOr<U> for $filter<T> {
+            type Output = Or<(Self, U)>;
+
+            fn bitor(self, rhs: U) -> Self::Output {
+                Or((self, rhs))
+            }
+        }
+    )+};
+}
+
+impl_filter_or!(Inserted, Modified, InsertedOrModified, Or);
+
+impl<'a, 'v, T: Component, Track: Tracking, U> BitOr<U> for &'a ViewMut<'v, T, Track> {
     type Output = Or<(Self, U)>;
 
     fn bitor(self, rhs: U) -> Self::Output {
@@ -60,17 +75,7 @@ impl<T, U> BitOr<U> for Or<T> {
     }
 }
 
-impl<'tmp, 'v: 'tmp, T: Component, Track: Tracking, U> BitOr<U> for &'tmp ViewMut<'v, T, Track> {
-    type Output = Or<(Self, U)>;
-
-    fn bitor(self, rhs: U) -> Self::Output {
-        Or((self, rhs))
-    }
-}
-
-impl<'tmp, 'v: 'tmp, T: Component, Track: Tracking, U> BitOr<U>
-    for &'tmp mut ViewMut<'v, T, Track>
-{
+impl<'a, 'v, T: Component, Track: Tracking, U> BitOr<U> for &'a mut ViewMut<'v, T, Track> {
     type Output = Or<(Self, U)>;
 
     fn bitor(self, rhs: U) -> Self::Output {
@@ -96,21 +101,9 @@ impl From<usize> for OneOfTwo<usize, usize> {
 #[derive(Clone)]
 pub struct OrWindow<T> {
     pub(crate) storages: T,
-    pub(crate) left_slices: usize,
-    pub(crate) current_slice: usize,
+    /// Branch driving the current segment.
+    pub(crate) branch: OrBranch,
+    /// Only mutable tracking membership needs history. Records actual left yields, not
+    /// predicate hits later rejected by an enclosing join. Clones copy this local history.
     pub(crate) seen_left: RefCell<Option<ShipHashSet<EntityId>>>,
 }
-
-macro_rules! impl_tracking_or {
-    ($($wrapper:ident),+) => {$(
-        impl<T, U> BitOr<U> for $wrapper<T> {
-            type Output = Or<(Self, U)>;
-
-            fn bitor(self, rhs: U) -> Self::Output {
-                Or((self, rhs))
-            }
-        }
-    )+};
-}
-
-impl_tracking_or!(Inserted, Modified, InsertedOrModified);

@@ -1,23 +1,31 @@
 # Local scheduler DAG experiment
 
-Base: Shipyard 0.11.9, commit `246579659572b816d7f252f005c578d47667490c`.
+Release: Shipyard 0.11.9. The scheduler/iterator/proc-macro base is
+`origin/custom-features` commit `2fb4fddbbb947d2ce0ea6f1bab59edb960841739`,
+merged with the local experiments through `4b8be985aee669947b8a38124e33017db3876f51`.
 `scheduler-experiment` enables `std` and `parallel`; it is off by default.
 This prototype supplies `World::run_batches_dag` internally. The experiment
 integration selects it with `BATTLE_SCHEDULER_MODE=dag`; the unset mode
-remains baseline. Fences and validation fallback reuse `run_one_batch_direct`
-from stage 1, so the second comparison isolates DAG scheduling. No production rollout is implied.
+remains baseline. Fences retain upstream step/condition execution. Workloads
+containing regroup steps and validation failures use the upstream baseline
+executor. No production rollout is implied.
 
 ## Registration-time graph
 
-The input is captured inside `create_workload` after hard ordering and barriers
-have been propagated and before the normal sorter consumes those requirements.
+The input is captured from final upstream `WorkloadInfo` after scheduling,
+regroup preparation and tracking registration have succeeded. Occurrence IDs,
+predecessors and complete system/condition borrow footprints come from that
+metadata; the experimental compiler does not replace upstream scheduling.
 Each node is one workload occurrence, even when multiple occurrences share the
 same registered function. The original sorter still produces the baseline
 batches and occurrence ordering used to orient conflicting accesses.
 
 Every hard predecessor and every pair of conflicting declared storage borrows
-contributes an edge. `soft_after` controls the baseline sequential placement,
+contributes an edge. `order_after` controls the baseline sequential placement,
 but expressly permits parallel execution and is not an execution dependency.
+Occurrences sharing a registered callable also retain completion ordering
+between distinct baseline batches because they share the tracking `last_run`.
+Repeated occurrences already within one batch remain independent.
 Transitive edges are removed once at registration using forward topological
 IDs and reverse-order reachability bitsets. The reduced graph has exactly the
 same reachability. Each invocation initializes only atomic predecessor counts;
@@ -25,10 +33,15 @@ it does not reconstruct the graph.
 
 Any original batch containing a run condition, required caller slot
 (`AllStorages` or non-thread-safe views), or a registered fallible function is
-kept as a complete fence. Its conditions still run on the original coordinator,
-after the preceding epoch finishes and before any of its batch bodies starts.
-Try-system provenance is recorded at first registration, alongside the function
-registry, so reusing that function through another workload does not lose it.
+kept as a complete fence. Each condition runs immediately before its own body,
+at the upstream-selected execution location, after the preceding epoch ends.
+The caller-bound slot stays on the calling thread even with a local Rayon pool.
+Native `Result<(), SystemError>` provenance is recorded at first registration,
+alongside the function registry. Reuse retains it and failed registration rolls
+back this metadata together with the registered callable. The std-only legacy
+`IntoWorkloadTrySystem` / `with_try_system` compatibility API marks its callable
+the same way. No-std retains upstream's native `SystemError` API; the old
+arbitrary-`Any` no-std error API is not restored.
 
 Other consecutive batches form a DAG epoch. An epoch uses one Rayon scope;
 ready roots are submitted and successful completion releases ready successors
@@ -41,7 +54,7 @@ system/workload labels are retained.
 The existing baseline/direct modes retain their original batch failure contract.
 The DAG experiment intentionally cannot promise that an independent later-batch
 effect remains unstarted if an unanticipated error or panic occurs: removing
-that batch barrier permits precisely such early execution. Known try-system
+that batch barrier permits precisely such early execution. Known fallible-system
 batches are fenced, but dynamic borrow failures and arbitrary panics remain
 possible in ordinary systems.
 
@@ -71,6 +84,12 @@ must inspect actual graph node and epoch sizes, not merely the selected mode.
 
 Focused unit tests cover pairwise conflicts, repeated occurrence identity,
 explicit ordering/barriers, reachability reduction, condition timing, caller
-affinity, registered try-function reuse, dependency cancellation, deterministic
+affinity, registered fallible-function reuse, dependency cancellation, deterministic
 error selection, original panic payloads, deliberately allowed early independent
 effects, and repeated invocations with nested Rayon work.
+
+The registration timing schema is retained. `create_workload_ns` now covers
+upstream registration/order construction; DAG input capture and construction
+happen afterwards, within `add_to_world_ns`. Regroup preparation and tracking
+enablement are included in the latter total. These nested phase timings must
+not be compared to the older compiler phase boundaries without adjustment.

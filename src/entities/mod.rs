@@ -1,4 +1,6 @@
 mod iterator;
+#[cfg(test)]
+mod tests;
 
 pub use iterator::EntitiesIter;
 
@@ -304,7 +306,7 @@ impl Entities {
     pub fn spawn(&mut self, entity: EntityId) -> bool {
         if let Some(&old_entity) = self.data.get(entity.index() as usize) {
             if self.is_alive(old_entity) {
-                if old_entity.gen() <= entity.gen() {
+                if old_entity.generation() <= entity.generation() {
                     self.data[entity.uindex()] = entity;
 
                     true
@@ -312,7 +314,7 @@ impl Entities {
                     false
                 }
             } else if let Some((new, old)) = self.list {
-                if old_entity.gen() <= entity.gen() + 1 {
+                if old_entity.generation() <= entity.generation() + 1 {
                     // pop from removed list
                     if entity.uindex() == old {
                         if new == old {
@@ -386,6 +388,15 @@ impl Entities {
     pub fn take_on_deletion(&mut self) -> Option<Box<dyn FnMut(EntityId) + Send + Sync + 'static>> {
         self.on_deletion.take()
     }
+
+    /// Clones the entities and their recycling state, without the deletion callback.
+    pub(crate) fn clone_without_on_deletion(&self) -> Entities {
+        Entities {
+            data: self.data.clone(),
+            list: self.list,
+            on_deletion: None,
+        }
+    }
 }
 
 impl Storage for Entities {
@@ -419,13 +430,13 @@ impl Storage for Entities {
         let begin = self
             .data
             .iter()
-            .position(|id| id.gen() < EntityId::max_gen())
+            .position(|id| id.generation() < EntityId::max_gen())
             .unwrap();
         let end = self
             .data
             .iter()
             .rev()
-            .position(|id| id.gen() < EntityId::max_gen())
+            .position(|id| id.generation() < EntityId::max_gen())
             .unwrap();
         self.list = Some((self.data.len() - end - 1, begin));
     }
@@ -459,11 +470,7 @@ impl Storage for Entities {
 
     #[inline]
     fn try_clone(&self, _other_current: TrackingTimestamp) -> Option<SBoxBuilder> {
-        Some(SBoxBuilder::new(Entities {
-            data: self.data.clone(),
-            list: self.list,
-            on_deletion: None,
-        }))
+        Some(SBoxBuilder::new(self.clone_without_on_deletion()))
     }
 
     #[inline]
@@ -476,83 +483,4 @@ impl Storage for Entities {
     ) {
         // Do nothing here so this function can be used to implement both clone component and clone entity.
     }
-}
-
-#[test]
-fn entities() {
-    let mut entities = Entities::new();
-
-    let key00 = entities.generate();
-    let key10 = entities.generate();
-
-    assert_eq!(key00.index(), 0);
-    assert_eq!(key00.gen(), 0);
-    assert_eq!(key10.index(), 1);
-    assert_eq!(key10.gen(), 0);
-
-    assert!(entities.delete_unchecked(key00));
-    assert!(!entities.delete_unchecked(key00));
-    let key01 = entities.generate();
-
-    assert_eq!(key01.index(), 0);
-    assert_eq!(key01.gen(), 1);
-
-    assert!(entities.delete_unchecked(key10));
-    assert!(entities.delete_unchecked(key01));
-    let key11 = entities.generate();
-    let key02 = entities.generate();
-
-    assert_eq!(key11.index(), 1);
-    assert_eq!(key11.gen(), 1);
-    assert_eq!(key02.index(), 0);
-    assert_eq!(key02.gen(), 2);
-
-    let last_key = EntityId::new_from_index_and_gen(0, EntityId::max_gen());
-    entities.data[0] = last_key;
-    assert!(entities.delete_unchecked(last_key));
-    assert_eq!(entities.list, None);
-    let dead = entities.generate();
-    assert_eq!(dead.index(), 2);
-    assert_eq!(dead.gen(), 0);
-}
-
-#[test]
-fn iterator() {
-    let mut entities = Entities::new();
-
-    entities.add_entity((), ());
-    entities.add_entity((), ());
-    entities.add_entity((), ());
-
-    let mut iter = entities.iter();
-
-    let id0 = iter.next().unwrap();
-    assert_eq!(id0.index(), 0);
-    assert_eq!(id0.gen(), 0);
-
-    let id1 = iter.next().unwrap();
-    assert_eq!(id1.index(), 1);
-    assert_eq!(id1.gen(), 0);
-
-    let id2 = iter.next().unwrap();
-    assert_eq!(id2.index(), 2);
-    assert_eq!(id2.gen(), 0);
-
-    assert!(iter.next().is_none());
-
-    entities.delete_unchecked(id0);
-    entities.delete_unchecked(id1);
-    entities.add_entity((), ());
-
-    let mut iter = entities.iter();
-
-    let id = iter.next().unwrap();
-    assert_eq!(id.index(), 0);
-    assert_eq!(id.gen(), 1);
-
-    let id = iter.next().unwrap();
-    assert_eq!(id.index(), 2);
-    assert_eq!(id.gen(), 0);
-
-    assert!(iter.next().is_none());
 }

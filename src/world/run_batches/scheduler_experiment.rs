@@ -1,15 +1,13 @@
 //! Disposable scheduling experiment. The ordinary scheduler remains the default.
 
 use crate::error::{Run, RunWorkload};
-use crate::scheduler::{Batches, Label};
+use crate::scheduler::{Batches, Label, Step};
 #[cfg(feature = "scheduler-registration-benchmark")]
 use crate::scheduler::registration_benchmark::validate_execution_mode;
 use crate::World;
 use alloc::boxed::Box;
 use alloc::format;
-use alloc::vec::Vec;
 use core::any::Any;
-use rayon::in_place_scope;
 use rayon::prelude::*;
 use std::env::{var, VarError};
 use std::fs::write;
@@ -107,30 +105,24 @@ impl World {
         batches: &Batches,
         #[cfg_attr(not(feature = "tracing"), allow(unused))] workload_name: &dyn Label,
     ) -> Result<(), RunWorkload> {
+        if !batches.regroups.is_empty() {
+            return self.run_batches_parallel_baseline(systems, system_names, batches, workload_name);
+        }
         #[cfg(feature = "tracing")]
         let parent_span = info_span!("workload", name = ?workload_name);
         #[cfg(feature = "tracing")]
         let _parent_span = parent_span.enter();
 
-        let run_batch = || -> Result<(), RunWorkload> {
-            for batch_index in 0..batches.parallel.len() {
-                self.run_one_batch_direct(
-                    systems,
-                    system_names,
-                    batches,
-                    batch_index,
-                    #[cfg(feature = "tracing")]
-                    &parent_span,
-                )?;
-            }
-            Ok(())
-        };
-
-        if let Some(thread_pool) = &self.thread_pool {
-            thread_pool.scope(|_| run_batch())
-        } else {
-            run_batch()
+        // Do not install the entire loop in the local pool: caller-bound steps
+        // must stay on the World's owner even when a local pool is configured.
+        for batch_index in 0..batches.parallel.len() {
+            self.run_one_batch_direct(
+                systems, system_names, batches, batch_index,
+                #[cfg(feature = "tracing")]
+                &parent_span,
+            )?;
         }
+        Ok(())
     }
 
     #[allow(clippy::type_complexity)]
@@ -142,130 +134,60 @@ impl World {
         batch_index: usize,
         #[cfg(feature = "tracing")] parent_span: &Span,
     ) -> Result<(), RunWorkload> {
-        self.run_one_batch_with(system_names, batches, batch_index, |index| {
-            self.run_single_system(
-                systems,
-                system_names,
+        self.run_one_batch_with(batches, batch_index, |step, run_if| {
+            self.run_step(
+                systems, system_names, batches,
                 #[cfg(feature = "tracing")]
                 parent_span,
-                index,
+                step, run_if,
             )
         })
     }
 
-    /// Identical fence logic with an optional caller-supplied body observer.
-    /// The ordinary path supplies its original call directly, without a
+    /// Fence logic with an optional caller-supplied step runner.
+    /// The ordinary path supplies the upstream condition/body call, without a
     /// per-system observer or environment lookup.
     pub(crate) fn run_one_batch_with<F>(
         &self,
-        system_names: &[Box<dyn Label>],
         batches: &Batches,
         batch_index: usize,
-        run_system: F,
+        run_step: F,
     ) -> Result<(), RunWorkload>
     where
-        F: Fn(usize) -> Result<(), RunWorkload> + Sync,
+        F: Fn(Step, usize) -> Result<(), RunWorkload> + Sync,
     {
         let batch = &batches.parallel[batch_index];
         let batch_run_if = &batches.parallel_run_if[batch_index];
-        // Preserve serial run_if evaluation, including failures before any
-        // body in this batch can be dispatched.
-        let run_if = (
-            if batch_run_if.0 == usize::MAX {
-                true
-            } else {
-                (batches.systems_run_if[batch_run_if.0])(self).map_err(|err| {
-                    let index = match batch.0 {
-                        Some(index) => index,
-                        None => unreachable!("run_if requires a caller-thread system"),
-                    };
-                    RunWorkload::Run((system_names[index].clone(), err))
-                })?
-            },
-            batch
-                .1
-                .iter()
-                .zip(&batch_run_if.1)
-                .map(|(&index, &run_if_index)| {
-                    if run_if_index == usize::MAX {
-                        Ok(true)
-                    } else {
-                        (batches.systems_run_if[run_if_index])(self)
-                            .map_err(|err| RunWorkload::Run((system_names[index].clone(), err)))
-                    }
-                })
-                .collect::<Result<Vec<_>, RunWorkload>>()?,
-        );
-
-        if batch.0.is_some() {
-            // Required caller-thread slots retain the original scope,
-            // wrapper, fallback, and error precedence.
-            let mut result = Ok(());
-            let mut start = 0;
-            let single_system = batch.0.filter(|_| run_if.0).or_else(|| {
-                let system = batch.1.first().copied().filter(|_| run_if.1[0]);
-                if system.is_some() {
-                    start = 1;
-                }
-                system
-            });
-            let scope_result: Result<(), RunWorkload> = in_place_scope(|scope| {
-                if start < batch.1.len() {
-                    scope.spawn(|_| {
-                        result = batch.1[start..]
-                            .par_iter()
-                            .zip(&run_if.1[start..])
-                            .try_for_each(|(&index, should_run)| {
-                                if *should_run {
-                                    run_system(index)
-                                } else {
-                                    Ok(())
-                                }
-                            });
-                    });
-                }
-                if let Some(index) = single_system {
-                    run_system(index)?;
-                }
-                Ok(())
-            });
-            scope_result?;
-            result?;
-            return Ok(());
+        if batch.0.is_some() || batch.1.iter().any(|step| matches!(step, Step::Regroup(_))) {
+            return self.run_one_batch_parallel(batch, batch_run_if, &run_step);
         }
 
         if batch.1.len() == 1 {
-            if run_if.1[0] {
-                run_system(batch.1[0])?;
-            }
-            return Ok(());
+            return run_step(batch.1[0], batch_run_if.1[0]);
         }
 
         // Drive the iterator on the caller: no scope.spawn wrapper and
         // no per-batch scope latch. Index zero cannot be skipped due to
         // a sibling error, and its error retains baseline precedence.
         let sibling_failed = AtomicBool::new(false);
-        batch
+        let run_parallel = || batch
             .1
             .par_iter()
-            .zip(&run_if.1)
+            .zip(&batch_run_if.1)
             .enumerate()
             .fold(
                 BatchOutcome::default,
-                |mut outcome, (position, (&index, eligible))| {
-                    if !eligible {
-                        return outcome;
-                    }
+                |mut outcome, (position, (&step, &run_if))| {
                     if position == 0 {
                         // A caller panic must not discard sibling bodies
                         // merely because Rayon placed them in the same leaf.
-                        match catch_unwind(AssertUnwindSafe(|| run_system(index))) {
+                        match catch_unwind(AssertUnwindSafe(|| run_step(step, run_if))) {
                             Ok(Ok(())) => {}
                             Ok(Err(error)) => outcome.direct_error = Some(error),
                             Err(panic) => outcome.direct_panic = Some(panic),
                         }
                     } else if !sibling_failed.load(Ordering::Relaxed) {
-                        if let Err(error) = run_system(index) {
+                        if let Err(error) = run_step(step, run_if) {
                             sibling_failed.store(true, Ordering::Relaxed);
                             outcome.sibling_error = Some(error);
                         }
@@ -274,8 +196,12 @@ impl World {
                 },
             )
             .reduce(BatchOutcome::default, BatchOutcome::merge)
-            .finish()?;
-        Ok(())
+            .finish();
+        if let Some(pool) = &self.thread_pool {
+            pool.install(run_parallel)
+        } else {
+            run_parallel()
+        }
     }
 }
 

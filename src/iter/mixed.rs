@@ -1,17 +1,54 @@
 use crate::entity_id::EntityId;
-use crate::iter::{
-    captain::ShiperatorCaptain, into_shiperator::strip_plus, output::ShiperatorOutput,
-    sailor::ShiperatorSailor,
+use crate::iter::plan::{
+    Coverage, CoverageSpan, NodeKind, NodeState, PlanBuilder, SegmentSchedule,
 };
+use crate::iter::shiperator::{fold_candidates, fold_candidates_with};
+use crate::iter::{EntityCursor, RawEntityIdAccess, SegmentEntry, SegmentRow};
+use crate::iter::{Shiperator, into_shiperator::strip_plus};
+use core::ptr::NonNull;
 
-const NON_CAPTAIN_FACTOR: f32 = 0.5;
+/// Weight of a sailor child next to a captain, the planner's estimates use it too.
+pub(crate) const NON_CAPTAIN_FACTOR: f32 = 0.5;
+
+/// [`Mixed::single_captain`] of a segment that needs the general resolver.
+pub(crate) const NO_SINGLE_CAPTAIN: u32 = u32::MAX;
+
+/// Loop a `Mixed` folds its current segment with.
+///
+/// It's selected once per segment, outside the loop.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum BulkStrategy {
+    /// Every child drives the segment and none can reject: no lookup, no coverage check.
+    Aligned,
+    /// A single captain, the other children are looked up. No coverage check.
+    SingleCaptain,
+    /// Several captains or a captain that can reject, sailors are looked up. No coverage check.
+    Partial,
+    /// Like `Partial` but candidates an earlier segment walked are rejected.
+    Checked,
+}
 
 /// Iterator over multiple storages.
 pub struct Mixed<S> {
     pub(crate) shiperator: S,
-    pub(crate) mask: u32,
+    /// Flags the immediate children acting as Captain in the current segment.\
+    /// Nested `Mixed`s have their own mask.
+    ///
+    /// Captains can usually skip costly checks.
+    pub(crate) captain_mask: u32,
+    /// Position of the captain when the current segment has a single captain and no coverage,
+    /// [`NO_SINGLE_CAPTAIN`] otherwise.
+    pub(crate) single_captain: u32,
+    /// Regions of our children's storages that earlier segments already walked.
+    ///
+    /// Candidates whose component falls in one of them are rejected.\
+    /// Points into the plan of the last segment we entered, empty for ordinary traversals.
+    pub(crate) coverage: NonNull<[Coverage]>,
 }
 
+// SAFE: Besides our children, which have to be `Send`, we only hold `coverage`. It points to
+// records plans never modify and plans are `Sync`, so reading them from another thread is fine.
+// The plan stays alive as long as the schedule of the iterator moving us along.
 unsafe impl<S: Send> Send for Mixed<S> {}
 
 impl<S: Clone> Clone for Mixed<S> {
@@ -19,179 +56,530 @@ impl<S: Clone> Clone for Mixed<S> {
     fn clone(&self) -> Self {
         Self {
             shiperator: self.shiperator.clone(),
-            mask: self.mask,
+            captain_mask: self.captain_mask,
+            single_captain: self.single_captain,
+            coverage: self.coverage,
         }
     }
 }
 
-impl<S: ShiperatorOutput> ShiperatorOutput for Mixed<S> {
-    type Out = S::Out;
+impl<S> Mixed<S> {
+    /// Returns a `Mixed` driven by the children `captain_mask` flags, without coverage.
+    #[inline]
+    pub(crate) fn new(shiperator: S, captain_mask: u32) -> Mixed<S> {
+        let mut mixed = Mixed {
+            shiperator,
+            captain_mask: 0,
+            single_captain: NO_SINGLE_CAPTAIN,
+            coverage: NonNull::from(&[][..]),
+        };
+        mixed.set_segment_state(captain_mask, &[]);
+
+        mixed
+    }
+
+    /// Installs the captain mask and coverage of a segment, along with the resolver they select.
+    ///
+    /// `coverage` has to stay alive while we resolve captain indices for this segment.
+    #[inline]
+    fn set_segment_state(&mut self, captain_mask: u32, coverage: &[Coverage]) {
+        self.captain_mask = captain_mask;
+        self.coverage = NonNull::from(coverage);
+
+        // Only the general resolver checks coverage.
+        self.single_captain = if captain_mask.count_ones() == 1 && coverage.is_empty() {
+            captain_mask.trailing_zeros()
+        } else {
+            NO_SINGLE_CAPTAIN
+        };
+    }
+
+    /// Returns the coverage records of the current segment.
+    ///
+    /// ### Safety
+    ///
+    /// The plan of the last segment we entered, if any, must still be alive.
+    #[inline]
+    unsafe fn coverage_records(&self) -> &[Coverage] {
+        // SAFE: `coverage` is either the empty slice `new` installed or records of the plan of
+        // the last segment we entered, which our caller keeps alive. Plans never modify their records.
+        unsafe { self.coverage.as_ref() }
+    }
+}
+
+/// Embeds the follow-ups of `mixed`'s captain child in `mixed`'s own rows.
+///
+/// `entities` are the child's, its states start at index `slot` of `mixed`'s rows.\
+/// Returns `entities` unchanged when the child has no follow-ups.
+#[inline]
+pub(crate) fn embed_captain_entities<S: Shiperator>(
+    mixed: &S,
+    slot: usize,
+    entities: RawEntityIdAccess,
+) -> RawEntityIdAccess {
+    // Single segments stop here, the rest stays out of their constructor.
+    let Some(schedule) = entities.schedule else {
+        return entities;
+    };
+
+    embed_follow_ups(mixed, slot, entities.cursor, schedule)
+}
+
+/// Embeds the captain child's `schedule` in `mixed`'s own rows, `cursor` is its first segment.
+///
+/// See [`embed_captain_entities`].
+#[inline(never)]
+fn embed_follow_ups<S: Shiperator>(
+    mixed: &S,
+    slot: usize,
+    cursor: EntityCursor,
+    schedule: SegmentSchedule,
+) -> RawEntityIdAccess {
+    // `mixed` is in its initial state, the captain child drives each follow-up in the same way.
+    let row = SegmentRow::of(mixed);
+    let mut plan = PlanBuilder::new(row.layout());
+    plan.push_child_follow_ups(&schedule, row.states(), slot);
+
+    RawEntityIdAccess {
+        cursor,
+        schedule: plan.finish(),
+    }
 }
 
 macro_rules! impl_shiperator_output {
     ($(($type: ident, $index: tt))+) => {
-        impl<$($type: ShiperatorOutput),+> ShiperatorOutput for Mixed<($($type,)+)> {
-            type Out = ($($type::Out,)+);
+        impl<$($type: Shiperator),+> Mixed<($($type,)+)> {
+            /// Resolves the current candidate of `entities` with child `CAPTAIN` as the only captain.
+            ///
+            /// Roles are fixed at compile time, all other children are sailors.\
+            /// It doesn't check coverage, `single_captain` only selects it for segments without any.
+            ///
+            /// ### Safety
+            ///
+            /// - `entities` must not be empty
+            /// - `index` must be the local index of the current candidate of `entities`
+            /// - the plan of the last segment we entered, if any, must still be alive
+            #[inline(always)]
+            unsafe fn single_captain_indices_of<const CAPTAIN: u32>(
+                &self,
+                entities: &EntityCursor,
+                index: usize,
+            ) -> Option<($($type::Index,)+)> {
+                // Check cheap filters first; keep tuple order for potentially costly joins.
+                let captain_indices = ($(
+                    if $index == CAPTAIN && $type::PREFER_CAPTAIN_FIRST {
+                        // SAFE: Our caller's guarantees are the captain's own.
+                        Some(unsafe { self.shiperator.$index.captain_indices_of(entities, index) }?)
+                    } else {
+                        None
+                    },
+                )+);
+
+                // SAFE: Our caller guarantees `entities` isn't empty.
+                let eid = entities.current();
+
+                // `$index == CAPTAIN` is a constant, each child keeps a single arm.
+                Some(($(
+                    if $index == CAPTAIN {
+                        match captain_indices.$index {
+                            Some(resolved) => resolved,
+                            // SAFE: Our caller's guarantees are the captain's own.
+                            None => unsafe { self.shiperator.$index.captain_indices_of(entities, index) }?,
+                        }
+                    } else {
+                        self.shiperator.$index.sailor_indices_of(eid)?
+                    },
+                )+))
+            }
+
+            /// Resolves the current candidate of `entities` with every child as a captain.
+            ///
+            /// Nothing is looked up and coverage isn't checked,
+            /// `bulk_strategy` only selects it for segments without any.
+            ///
+            /// ### Safety
+            ///
+            /// - `entities` must not be empty
+            /// - `index` must be the local index of the current candidate of `entities`
+            /// - the plan of the last segment we entered, if any, must still be alive
+            #[inline(always)]
+            unsafe fn aligned_indices_of(
+                &self,
+                entities: &EntityCursor,
+                index: usize,
+            ) -> Option<($($type::Index,)+)> {
+                // Windows always resolve, children are still allowed to reject.
+                // `bulk_strategy` selects this resolver only when none of them can,
+                // this isn't a promise the loop relies on.
+                // SAFE: Our caller's guarantees are the captains' own.
+                Some(($(
+                    unsafe { self.shiperator.$index.captain_indices_of(entities, index) }?,
+                )+))
+            }
+
+            /// Resolves the current candidate of `entities` for any captain mask,
+            /// without checking coverage.
+            ///
+            /// ### Safety
+            ///
+            /// - `entities` must not be empty
+            /// - `index` must be the local index of the current candidate of `entities`
+            /// - the plan of the last segment we entered, if any, must still be alive
+            #[inline(always)]
+            unsafe fn masked_indices_of(
+                &self,
+                entities: &EntityCursor,
+                index: usize,
+            ) -> Option<($($type::Index,)+)> {
+                // Captains can reject too, a tracking filter or a nested `Mixed` for example.
+                // Only sailors read the entity, a loop where every child drives doesn't load it.
+                Some(($(
+                    if self.captain_mask & (1 << $index) != 0 {
+                        // SAFE: Our caller's guarantees are the captain's own.
+                        unsafe { self.shiperator.$index.captain_indices_of(entities, index) }?
+                    } else {
+                        // SAFE: Our caller guarantees `entities` isn't empty.
+                        let eid = entities.current();
+
+                        self.shiperator.$index.sailor_indices_of(eid)?
+                    },
+                )+))
+            }
+
+            /// Resolves the current candidate of `entities` for any captain mask then rejects it
+            /// if an earlier segment already walked it.
+            ///
+            /// ### Safety
+            ///
+            /// - `entities` must not be empty
+            /// - `index` must be the local index of the current candidate of `entities`
+            /// - the plan of the last segment we entered, if any, must still be alive
+            #[inline(always)]
+            unsafe fn checked_captain_indices_of(
+                &self,
+                entities: &EntityCursor,
+                index: usize,
+            ) -> Option<($($type::Index,)+)> {
+                // SAFE: Our caller's guarantees are the resolver's own.
+                let indices = unsafe { self.masked_indices_of(entities, index) }?;
+
+                // All indices are resolved but no component reference exists yet.
+                // Rejecting here means a duplicate is never created, not even to be discarded.
+                // SAFE: Our caller keeps the plan of our last segment alive.
+                if unsafe { self.is_covered(&indices) } {
+                    return None;
+                }
+
+                Some(indices)
+            }
+
+            /// Returns `true` when one of `indices` points into a region an earlier segment owns.
+            ///
+            /// ### Safety
+            ///
+            /// The plan of the last segment we entered, if any, must still be alive.
+            #[inline]
+            unsafe fn is_covered(&self, indices: &($($type::Index,)+)) -> bool {
+                // SAFE: Our caller keeps the plan of our last segment alive.
+                let coverage = unsafe { self.coverage_records() };
+                if coverage.is_empty() {
+                    return false;
+                }
+
+                // A record is about one child's storage, we match it against that child's
+                // absolute index. Being present in that storage isn't enough, the component has
+                // to be in the region the earlier segment walked.
+                let storage_indices = [$($type::storage_index(&indices.$index)),+];
+
+                coverage.iter().any(|record| {
+                    let storage_index = storage_indices[record.child as usize]
+                        .expect("coverage records name plain component windows");
+
+                    (record.start..record.end).contains(&storage_index)
+                })
+            }
+
+            /// Returns the loop `fold_segment` uses for the current segment.
+            #[inline]
+            pub(crate) fn bulk_strategy(&self) -> BulkStrategy {
+                if self.coverage.len() != 0 {
+                    return BulkStrategy::Checked;
+                }
+
+                // Exactness is recursive: every child drives the segment and none of them,
+                // nested `Mixed`s' own children included, can reject.
+                // The mask alone isn't enough, a tracking filter or a nested `Mixed` with
+                // a sailor can drive the segment and still reject.
+                if self.is_exact_sized() {
+                    return BulkStrategy::Aligned;
+                }
+
+                if self.single_captain != NO_SINGLE_CAPTAIN {
+                    return BulkStrategy::SingleCaptain;
+                }
+
+                BulkStrategy::Partial
+            }
+
+            /// Folds the rest of the segment with child `CAPTAIN` as the only captain.
+            ///
+            /// ### Safety
+            ///
+            /// - `entities`' local indices must be local indices of our current segment
+            /// - `CAPTAIN` must be the position of our single captain and we must have no coverage
+            /// - the plan of the last segment we entered, if any, must still be alive
+            #[inline(always)]
+            unsafe fn fold_single_captain<const CAPTAIN: u32, const WITH_ID: bool, Acc, Fold>(
+                &self,
+                entities: &mut EntityCursor,
+                init: Acc,
+                f: Fold,
+            ) -> Acc
+            where
+                Fold: FnMut(Acc, Option<EntityId>, ($($type::Out,)+)) -> Acc,
+            {
+                // SAFE: `fold_candidates` only resolves non-empty cursors at their current
+                // candidate's local index, a local index of our segment per our caller.
+                // Our caller keeps our plan alive. The resolver's indices come from
+                // `captain_indices_of` and `sailor_indices_of`, valid for `get_data`.
+                unsafe {
+                    let start = entities.local_index();
+                    let range = start..start + entities.len();
+                    let accessors = ($(
+                        if $index == CAPTAIN {
+                            self.shiperator.$index.prepare_bulk(range.clone())
+                        } else {
+                            <$type as Shiperator>::get_data
+                        },
+                    )+);
+                    fold_candidates_with::<Self, WITH_ID, Acc, Fold, _, _>(self, entities, init, f,
+                        |entities, index| self.single_captain_indices_of::<CAPTAIN>(entities, index),
+                        |indices| ($(accessors.$index(&self.shiperator.$index, indices.$index),)+),
+                    )
+                }
+            }
         }
 
-        impl<$($type: ShiperatorCaptain),+> ShiperatorCaptain for Mixed<($($type,)+)> {
+        impl<$($type: Shiperator),+> Shiperator for Mixed<($($type,)+)> {
+            type Out = ($($type::Out,)+);
+            type Index = ($($type::Index,)+);
+            const HAS_CANDIDATE_PLAN: bool = false $(|| $type::HAS_CANDIDATE_PLAN)+;
+            const HAS_UNSTABLE_MEMBERSHIP: bool = false $(|| <$type as Shiperator>::HAS_UNSTABLE_MEMBERSHIP)+;
+            const CAN_SPLIT: bool = true $(&& <$type as Shiperator>::CAN_SPLIT)+;
+
+            fn merge_iteration_state(&mut self, other: &Self) {
+                $(self.shiperator.$index.merge_iteration_state(&other.shiperator.$index);)+
+            }
+
+            fn has_no_candidates(&self) -> bool { false $(|| self.shiperator.$index.has_no_candidates())+ }
+            fn unpick(&mut self) { $(self.shiperator.$index.unpick();)+ }
+
             #[inline]
-            fn has_stable_membership(&self) -> bool {
-                $(self.shiperator.$index.has_stable_membership())&&+
+            fn has_dense_candidates(&self) -> bool {
+                $(if self.captain_mask & (1 << $index) != 0 {
+                    return self.shiperator.$index.has_dense_candidates();
+                })+
+                false
             }
 
             #[inline]
-            fn can_split(&self) -> bool {
-                $(self.shiperator.$index.can_split())&&+
+            unsafe fn candidate_count(&self, start: usize, end: usize) -> usize {
+                $(if self.captain_mask & (1 << $index) != 0 {
+                    // SAFE: Active children share this segment's local indices.
+                    return unsafe { self.shiperator.$index.candidate_count(start, end) };
+                })+
+                end - start
             }
             #[inline]
-            unsafe fn get_captain_data(&self, index: usize) -> Self::Out {
-                ($(
-                    self.shiperator.$index.get_captain_data(index),
-                )+)
+            unsafe fn candidate_split_at(&self, start: usize, end: usize, count: usize) -> usize {
+                $(if self.captain_mask & (1 << $index) != 0 {
+                    // SAFE: This is the child whose candidates we count.
+                    return unsafe { self.shiperator.$index.candidate_split_at(start, end, count) };
+                })+
+                start + count
             }
 
+
             #[inline]
-            fn next_slice(&mut self) {
+            unsafe fn next_candidate_range(&self, index: usize, end: usize) -> core::ops::Range<usize> {
                 $(
-                    if self.mask & (1 << $index) != 0 {
-                        self.shiperator.$index.next_slice();
+                    if self.captain_mask & (1 << $index) != 0 {
+                        // SAFE: Captain children resolve the same local range as this Mixed.
+                        return unsafe { self.shiperator.$index.next_candidate_range(index, end) };
                     }
+                )+
+                index..end
+            }
+
+            #[inline]
+            fn node_count() -> usize {
+                1 $(+ $type::node_count())+
+            }
+
+            #[inline]
+            fn describe(&self, active: bool, row: &mut SegmentRow) {
+                let state = if active {
+                    // Rows refer to coverage through spans of their plan, the records a segment
+                    // installed can't be turned back into one. Composite constructors only
+                    // describe nodes in their initial, ordinary state.
+                    assert_eq!(self.coverage.len(), 0, "a Mixed with coverage can't be described");
+
+                    NodeState::Mixed {
+                        captain_mask: self.captain_mask,
+                        coverage: CoverageSpan::EMPTY,
+                    }
+                } else {
+                    NodeState::Sailor
+                };
+                row.push(NodeKind::Mixed { children: strip_plus!($(+{let _: $type; 1})+) }, state);
+
+                $(
+                    self.shiperator.$index.describe(active && self.captain_mask & (1 << $index) != 0, row);
                 )+
             }
 
-            #[inline]
-            fn set_slice(&mut self, slice: usize) {
-                $(if self.mask & (1 << $index) != 0 { self.shiperator.$index.set_slice(slice); })+
+            #[inline(always)]
+            unsafe fn enter_segment(&mut self, entry: &mut SegmentEntry<'_>) {
+                let (captain_mask, coverage) = entry.next_mixed();
+
+                // Captain children take their states, sailor children are skipped and left untouched.
+                $(
+                    if captain_mask & (1 << $index) != 0 {
+                        // SAFE: Our caller guarantees `entry` holds our subtree's states for the segment
+                        // about to be iterated. This child's states are next in preorder.
+                        // The plan they come from is the one our caller keeps alive.
+                        unsafe { self.shiperator.$index.enter_segment(entry) };
+                    } else {
+                        entry.skip($type::node_count());
+                    }
+                )+
+
+                // `coverage` lives in the plan `entry` reads from, our caller keeps it alive while
+                // we resolve captain indices. A row outside any plan only gives empty slices.
+                self.set_segment_state(captain_mask, coverage);
             }
 
-            #[inline]
-            fn slice_index(&self) -> usize {
-                $(if self.mask & (1 << $index) != 0 { return self.shiperator.$index.slice_index(); })+
-                0
+            #[inline(always)]
+            unsafe fn prepare_tracking(&mut self, range: Option<core::ops::Range<usize>>) {
+                $(
+                    let child_range = if self.captain_mask & (1 << $index) != 0 {
+                        range.clone()
+                    } else {
+                        None
+                    };
+                    // SAFE: Active children share local indices; sailors clear earlier preparation.
+                    unsafe { self.shiperator.$index.prepare_tracking(child_range) };
+                )+
             }
 
             #[inline]
             #[allow(clippy::cast_precision_loss)]
             fn sail_time(&self) -> usize {
-                strip_plus!($(+{
+                strip_plus!($(+({
                     let sail_time = self.shiperator.$index.sail_time() as f32;
 
-                    if self.mask & (1 << $index) != 0 {
+                    if self.captain_mask & (1 << $index) != 0 {
                         sail_time as usize
                     } else {
                         (sail_time * NON_CAPTAIN_FACTOR) as usize
                     }
-                }
-                )+)
+                }))+)
             }
 
             #[inline]
             fn is_exact_sized(&self) -> bool {
-                // True if mask flags all iterated storages
-                self.mask.count_ones() == strip_plus!($(+{let _: $type; 1})+)
+                // Direct access isn't enough: every child has to drive the segment without ever
+                // rejecting, and no candidate can be covered.
+                self.coverage.len() == 0
+                    $(&& self.captain_mask & (1 << $index) != 0 && self.shiperator.$index.is_exact_sized())+
             }
 
-            #[inline]
-            fn is_definitely_empty(&self, max_chunks: usize) -> bool {
-                false $(|| self.shiperator.$index.is_definitely_empty(max_chunks))+
-            }
-
-            #[inline]
-            fn unpick(&mut self) {
-                self.mask = 0;
-
-                $(
-                    self.shiperator.$index.unpick();
-                )+
-            }
-
-            #[inline]
-            fn has_no_candidates(&self) -> bool {
-                $(if self.shiperator.$index.has_no_candidates() { return true; })+
-                false
-            }
-            #[cfg(feature = "parallel")]
-            #[inline]
-            fn candidate_count(&self, start: usize, end: usize) -> usize {
-                $(if self.mask & (1 << $index) != 0 { return self.shiperator.$index.candidate_count(start, end); })+
-                end - start
-            }
-            #[cfg(feature = "parallel")]
-            #[inline]
-            fn candidate_count_at(&self, slice: usize, start: usize, end: usize) -> usize {
-                $(if self.mask & (1 << $index) != 0 { return self.shiperator.$index.candidate_count_at(slice, start, end); })+
-                end - start
-            }
-            #[cfg(feature = "parallel")]
-            #[inline]
-            fn candidate_midpoint(&self, start: usize, end: usize) -> usize {
-                $(if self.mask & (1 << $index) != 0 { return self.shiperator.$index.candidate_midpoint(start, end); })+
-                start + (end - start) / 2
-            }
-            #[inline]
-            fn next_possible(&self, index: usize) -> usize {
-                $(
-                    if self.mask & (1 << $index) != 0 {
-                        return self.shiperator.$index.next_possible(index);
+            #[inline(always)]
+            unsafe fn captain_indices_of(&self, entities: &EntityCursor, index: usize) -> Option<Self::Index> {
+                // SAFE: Our caller's guarantees are the resolvers' own.
+                unsafe {
+                    match self.single_captain {
+                        $($index => self.single_captain_indices_of::<$index>(entities, index),)+
+                        _ => self.checked_captain_indices_of(entities, index),
                     }
-                )+
-
-                index
-            }
-            #[inline]
-            fn next_possible_in(&self, index: usize, end: usize) -> usize {
-                $(if self.mask & (1 << $index) != 0 { return self.shiperator.$index.next_possible_in(index, end); })+
-                index.min(end)
-            }
-            #[inline]
-            fn previous_possible(&self, end: usize) -> usize {
-                $(if self.mask & (1 << $index) != 0 { return self.shiperator.$index.previous_possible(end); })+
-                end
-            }
-        }
-
-        impl<$($type: ShiperatorSailor),+> ShiperatorSailor for Mixed<($($type,)+)> {
-            type Index = ($($type::Index,)+);
-
-            #[inline]
-            unsafe fn get_sailor_data(&self, index: Self::Index) -> Self::Out {
-                ($(
-                    self.shiperator.$index.get_sailor_data(index.$index),
-                )+)
+                }
             }
 
+            // Membership ignores our captain mask and coverage. They describe the last segment we
+            // drove, a parent asking about an entity doesn't care which segment walked it.
             #[inline]
-            fn indices_of(&self, eid: EntityId, index: usize, ) -> Option<Self::Index> {
-                // A membership probe may come from another OR source. Only
-                // captain_indices_of is allowed to reuse this dense index.
-                Some(($(self.shiperator.$index.indices_of(eid, index)?,)+))
-            }
-
-            #[inline]
-            fn captain_indices_of(&self, eid: EntityId, index: usize) -> Option<Self::Index> {
+            fn sailor_indices_of(&self, eid: EntityId) -> Option<Self::Index> {
                 Some(($(
-                    if self.mask & (1 << $index) != 0 {
-                        if let Some(index) = self.shiperator.$index.captain_indices_of(eid, index) {
-                            index
-                        } else {
-                            return None
-                        }
+                    if let Some(index) = self.shiperator.$index.sailor_indices_of(eid) {
+                        index
                     } else {
-                        if let Some(index) = self.shiperator.$index.indices_of(eid, index) {
-                            index
-                        } else {
-                            return None
-                        }
+                        return None
                     },
                 )+))
             }
 
+            // A nested `Mixed` has its own coverage, it isn't a single storage.
             #[inline]
-            fn index_from_usize(index: usize) -> Self::Index {
-                ($(
-                    $type::index_from_usize(index),
-                )+)
+            fn storage_index(_index: &Self::Index) -> Option<usize> {
+                None
+            }
+
+            #[inline]
+            unsafe fn get_data(&self, index: Self::Index) -> Self::Out {
+                // SAFE: Each index was resolved by the matching shiperator, our caller upholds the rest.
+                unsafe {
+                    ($(
+                        self.shiperator.$index.get_data(index.$index),
+                    )+)
+                }
+            }
+
+            // The loop is picked once for the whole segment, each one only does the checks
+            // its segment needs.
+            // Not inlined so each loop is compiled on its own, it doesn't have to share registers
+            // with the iterator's segment state. It's called once per non-empty segment.
+            #[inline(never)]
+            unsafe fn fold_segment<const WITH_ID: bool, Acc, Fold>(
+                &self,
+                entities: &mut EntityCursor,
+                init: Acc,
+                f: Fold,
+            ) -> Acc
+            where
+                Fold: FnMut(Acc, Option<EntityId>, Self::Out) -> Acc,
+            {
+                // SAFE: `fold_candidates` only resolves non-empty cursors at their current
+                // candidate's local index, a local index of our segment per our caller.
+                // Our caller keeps our plan alive. Every resolver's indices come from our
+                // children's `captain_indices_of` and `sailor_indices_of`, valid for `get_data`.
+                unsafe {
+                    match self.bulk_strategy() {
+                        BulkStrategy::Aligned => {
+                            let start = entities.local_index();
+                            let range = start..start + entities.len();
+                            let accessors = ($(self.shiperator.$index.prepare_bulk(range.clone()),)+);
+                            fold_candidates_with::<Self, WITH_ID, Acc, Fold, _, _>(self, entities, init, f,
+                                |entities, index| self.aligned_indices_of(entities, index),
+                                |indices| ($(accessors.$index(&self.shiperator.$index, indices.$index),)+),
+                            )
+                        }
+                        // `single_captain` holds our only captain's position and we have no coverage.
+                        BulkStrategy::SingleCaptain => match self.single_captain {
+                            $($index => self.fold_single_captain::<$index, WITH_ID, Acc, Fold>(entities, init, f),)+
+                            _ => unreachable!("a single captain is one of our children"),
+                        },
+                        BulkStrategy::Partial => {
+                            fold_candidates::<Self, WITH_ID, Acc, Fold, _>(self, entities, init, f, |entities, index| {
+                                self.masked_indices_of(entities, index)
+                            })
+                        }
+                        BulkStrategy::Checked => {
+                            fold_candidates::<Self, WITH_ID, Acc, Fold, _>(self, entities, init, f, |entities, index| {
+                                self.checked_captain_indices_of(entities, index)
+                            })
+                        }
+                    }
+                }
             }
         }
     };

@@ -6,6 +6,7 @@ mod derive;
 mod iteration;
 #[cfg(feature = "serde1")]
 mod serde;
+mod tracking;
 mod workload;
 
 use std::iter::Sum;
@@ -299,17 +300,17 @@ fn par_update_pack() {
         assert_eq!(usizes.modified().iter().count(), 0);
 
         (&mut usizes).par_iter().for_each(|mut i| {
-            i.modify(|i| i.0 += 1);
+            i.modify(|value| value.0 += 1);
         });
 
         let mut iter = usizes.inserted().iter();
         assert_eq!(iter.next(), None);
 
         let mut iter = usizes.modified_mut().iter();
-        assert_eq!(iter.next().map(|x| *x.as_ref()), Some(USIZE(1)));
-        assert_eq!(iter.next().map(|x| *x.as_ref()), Some(USIZE(2)));
-        assert_eq!(iter.next().map(|x| *x.as_ref()), Some(USIZE(3)));
-        assert_eq!(iter.next().map(|x| *x.as_ref()), Some(USIZE(4)));
+        assert_eq!(iter.next().map(|x| *x), Some(USIZE(1)));
+        assert_eq!(iter.next().map(|x| *x), Some(USIZE(2)));
+        assert_eq!(iter.next().map(|x| *x), Some(USIZE(3)));
+        assert_eq!(iter.next().map(|x| *x), Some(USIZE(4)));
         assert!(iter.next().is_none());
     });
 }
@@ -360,10 +361,8 @@ fn par_multiple_update_pack() {
             assert_eq!(u32s.modified().iter().count(), 0);
 
             (&usizes, &mut u32s).par_iter().for_each(|(x, mut y)| {
-                y.modify(|y| {
-                    y.0 += x.0 as u32;
-                    y.0 -= x.0 as u32;
-                });
+                y.modify(|value| value.0 += x.0 as u32);
+                y.modify(|value| value.0 -= x.0 as u32);
             });
 
             let mut modified: Vec<_> = u32s.modified().iter().collect();
@@ -406,9 +405,9 @@ fn par_update_filter() {
     world.run(|mut usizes: ViewMut<USIZE, track::All>| {
         (&mut usizes)
             .par_iter()
-            .filter(|x| x.as_ref().0 % 2 == 0)
+            .filter(|x| x.0 % 2 == 0)
             .for_each(|mut i| {
-                i.modify(|i| i.0 += 1);
+                i.modify(|value| value.0 += 1);
             });
 
         let mut iter = usizes.inserted().iter();

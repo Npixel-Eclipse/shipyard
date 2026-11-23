@@ -1,13 +1,191 @@
 use crate::entity_id::EntityId;
-use crate::iter::{Shiperator, ShiperatorCaptain, ShiperatorSailor, WithId};
-use crate::sparse_set::RawEntityIdAccess;
-use alloc::vec::Vec;
+use crate::iter::with_id::with_id;
+use crate::iter::{Shiper, Shiperator, WithId};
 use core::num::NonZeroUsize;
+use rayon::iter::plumbing::{
+    Folder, Producer, UnindexedConsumer, UnindexedProducer, bridge_producer_consumer,
+    bridge_unindexed,
+};
 
-const MIN_SPLIT_LEN: usize = 16;
+/// Candidates a producer folds in bulk between two checks of its folder's `full`.
+///
+/// A folder that gets full mid-chunk still receives the rest of that chunk.
+/// Short-circuiting folders like `find_any`'s ignore these items, adapters in front of them
+/// like `inspect` still see them.
+pub(super) const FOLD_CHUNK: usize = 128;
+
+/// Pieces per thread a parallel traversal splits into at most, see [`min_piece_len`].
+const PIECES_PER_THREAD: usize = 4;
+
+/// Candidates a piece of a parallel traversal keeps at least, see [`min_piece_len`].
+const MIN_PIECE_LEN: usize = 32;
+
+/// Returns the number of candidates each piece of a parallel traversal keeps at least,
+/// for a traversal of `candidates` candidates.
+///
+/// Rayon splits again every time a piece is stolen. Down to single candidates, light work spends
+/// more time splitting than working and gets slower the more threads there are.
+/// We stop at a few pieces per thread, which is still enough to balance the work, and never go
+/// below a small floor so heavy work on a few entities still spreads over every thread.
+pub(super) fn min_piece_len(candidates: Option<usize>) -> usize {
+    let Some(candidates) = candidates else {
+        return MIN_PIECE_LEN;
+    };
+
+    let pieces = rayon::current_num_threads().saturating_mul(PIECES_PER_THREAD);
+
+    (candidates / pieces).max(MIN_PIECE_LEN)
+}
 
 #[allow(missing_docs)]
-pub struct ParShiperator<S>(pub(crate) Shiperator<S>, pub(crate) Option<NonZeroUsize>);
+pub struct ParShiperator<S>(pub(crate) Shiper<S>, pub(crate) Option<NonZeroUsize>);
+
+/// An explicit experiment threshold, separate from the automatic minimum-piece policy.
+struct ThresholdPiece<P> {
+    producer: P,
+    threshold: NonZeroUsize,
+}
+
+impl<P: UnindexedProducer + CandidateProducer> UnindexedProducer for ThresholdPiece<P> {
+    type Item = P::Item;
+
+    fn split(self) -> (Self, Option<Self>) {
+        if self
+            .producer
+            .candidate_work()
+            .is_some_and(|count| count <= self.threshold.get())
+        {
+            return (self, None);
+        }
+        let (left, right) = self.producer.split();
+        let threshold = self.threshold;
+        (
+            Self {
+                producer: left,
+                threshold,
+            },
+            right.map(|producer| Self {
+                producer,
+                threshold,
+            }),
+        )
+    }
+
+    fn fold_with<F>(self, folder: F) -> F
+    where
+        F: Folder<Self::Item>,
+    {
+        self.producer.fold_with(folder)
+    }
+}
+
+/// A piece of an unindexed parallel traversal, it stops splitting once it's small enough.
+pub(super) struct Piece<P> {
+    pub(super) producer: P,
+    /// Each half of a split keeps at least this many candidates, see [`min_piece_len`].
+    pub(super) min_len: usize,
+}
+
+pub(super) trait CandidateProducer {
+    fn candidate_work(&self) -> Option<usize>;
+}
+impl<S: Shiperator + Clone> CandidateProducer for Shiper<S> {
+    fn candidate_work(&self) -> Option<usize> {
+        Shiper::candidate_work(self)
+    }
+}
+impl<S: Shiperator + Clone> CandidateProducer for WithId<Shiper<S>> {
+    fn candidate_work(&self) -> Option<usize> {
+        self.0.candidate_work()
+    }
+}
+
+impl<P: UnindexedProducer + Iterator + CandidateProducer> UnindexedProducer for Piece<P> {
+    type Item = <P as UnindexedProducer>::Item;
+
+    #[inline]
+    fn split(self) -> (Self, Option<Self>) {
+        // Our producers' size hint counts their candidates left, follow-ups included.
+        // We can still split when they can't count them.
+        let too_small = self
+            .producer
+            .candidate_work()
+            .is_some_and(|candidates| candidates < 2 * self.min_len);
+        if too_small {
+            return (self, None);
+        }
+
+        let min_len = self.min_len;
+        let (left, right) = self.producer.split();
+
+        (
+            Piece {
+                producer: left,
+                min_len,
+            },
+            right.map(|producer| Piece { producer, min_len }),
+        )
+    }
+
+    #[inline]
+    fn fold_with<F>(self, folder: F) -> F
+    where
+        F: Folder<Self::Item>,
+    {
+        self.producer.fold_with(folder)
+    }
+}
+
+impl<S: Shiperator> Shiper<S> {
+    /// Folds every item left into `folder`, segment after segment, until it's full.
+    ///
+    /// `item` turns what `fold_segment` yields into the folder's items.
+    #[inline]
+    pub(super) fn fold_chunks<const WITH_ID: bool, T, F, M>(mut self, mut folder: F, item: M) -> F
+    where
+        F: Folder<T>,
+        M: Fn(Option<EntityId>, S::Out) -> T + Copy,
+    {
+        loop {
+            // A check per item would keep the bulk loops from vectorizing, so we only check
+            // between chunks. Rayon's own producers check after every item.
+            while !self.cursor.is_empty() {
+                if folder.full() {
+                    return folder;
+                }
+
+                let start = self.cursor.local_index();
+                // SAFE: This is the remaining range of our installed segment.
+                let range = unsafe {
+                    self.shiperator
+                        .next_candidate_range(start, start + self.cursor.len())
+                };
+                self.cursor.advance_by(range.start - start);
+                if self.cursor.is_empty() {
+                    break;
+                }
+                let chunk_len = (range.end - range.start).min(FOLD_CHUNK);
+                let (mut chunk, rest) = self.cursor.split_at(chunk_len);
+                self.cursor = rest;
+
+                // SAFE: `chunk` is a prefix of our cursor, so it holds candidates of the segment
+                // `shiperator` last entered, with that segment's local indices.
+                // We own the schedule holding the plan of that segment, if any.
+                folder = unsafe {
+                    self.shiperator.fold_segment::<WITH_ID, _, _>(
+                        &mut chunk,
+                        folder,
+                        move |folder, entity_id, out| folder.consume(item(entity_id, out)),
+                    )
+                };
+            }
+
+            if folder.full() || !self.enter_next_segment() {
+                return folder;
+            }
+        }
+    }
+}
 
 impl<S> ParShiperator<S> {
     /// Returns the [`EntityId`] alongside the component(s).
@@ -15,41 +193,19 @@ impl<S> ParShiperator<S> {
         WithId(self)
     }
 
-    /// Sets the candidate-count threshold at which this iterator stops splitting.
+    /// Stops splitting when a producer has at most `threshold` candidate slots.
     ///
-    /// A producer with at most `threshold` remaining candidate slots will not
-    /// split. Candidate slots are an upper bound before filtering and OR
-    /// deduplication, not the number of results or the dense-index span.
-    /// Rayon may stop splitting earlier, and queries that cannot safely split
-    /// still use a single producer. This is not a maximum task size.
+    /// Candidates are counted before tracking filters, joins and OR deduplication.
+    /// Rayon may stop earlier; the underlying producer still decides whether a split
+    /// is safe. The last call wins and [`Self::with_id`] preserves this setting.
     ///
-    /// This replaces the automatic threshold for this iterator only. Without
-    /// an override, it remains `max(candidates / (threads * 4), 16)`, using the
-    /// current Rayon pool when the iterator is consumed. Repeated calls use
-    /// the last value, which is preserved by [`Self::with_id`].
+    /// With no override the automatic minimum-piece policy and indexed fast path
+    /// remain unchanged. An explicit override uses an unindexed consumer and reports
+    /// `None` from `ParallelIterator::opt_len`, even for an otherwise exact traversal,
+    /// so candidate-threshold splits cannot violate indexed consumer requirements.
     ///
     /// # Panics
-    ///
     /// Panics if `threshold` is zero.
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// use rayon::prelude::*;
-    /// use shipyard::{track, Component, IntoIter, View, World};
-    ///
-    /// struct Value(usize);
-    /// impl Component for Value {
-    ///     type Tracking = track::Untracked;
-    /// }
-    ///
-    /// let mut world = World::new();
-    /// world.add_entity(Value(3));
-    /// let values = world.borrow::<View<Value>>()?;
-    /// let sum: usize = values.par_iter().with_split_threshold(8).map(|v| v.0).sum();
-    /// assert_eq!(sum, 3);
-    /// # Ok::<(), shipyard::error::GetStorage>(())
-    /// ```
     pub fn with_split_threshold(mut self, threshold: usize) -> Self {
         self.1 =
             Some(NonZeroUsize::new(threshold).expect("split threshold must be greater than zero"));
@@ -57,141 +213,160 @@ impl<S> ParShiperator<S> {
     }
 }
 
-fn configure_split<S: ShiperatorCaptain>(
-    producer: &mut Shiperator<S>,
-    threshold: Option<NonZeroUsize>,
-) {
-    if let Some(threshold) = threshold {
-        producer.min_split_len = threshold.get();
-        return;
-    }
-    let total_len = producer
-        .shiperator
-        .candidate_count(producer.start, producer.end)
-        .saturating_add(producer.pending_candidate_count());
-    let threads = rayon::current_num_threads().max(1);
-
-    producer.min_split_len = (total_len / (threads * 4)).max(MIN_SPLIT_LEN);
-}
-
-impl<S: ShiperatorCaptain> Shiperator<S> {
-    fn pending_candidate_count(&self) -> usize {
-        let mut count = 0usize;
-        let first = self.shiperator.slice_index() + 1;
-        for (offset, &(_, len)) in self.entities.follow_up_ptrs.iter().rev().enumerate() {
-            count =
-                count.saturating_add(self.shiperator.candidate_count_at(first + offset, 0, len));
-        }
-        count
+impl<S> WithId<ParShiperator<S>> {
+    /// Sets the candidate split threshold; see [`ParShiperator::with_split_threshold`].
+    ///
+    /// # Panics
+    /// Panics if `threshold` is zero.
+    pub fn with_split_threshold(self, threshold: usize) -> Self {
+        WithId(self.0.with_split_threshold(threshold))
     }
 }
 
-impl<S: ShiperatorCaptain + ShiperatorSailor + Send + Clone>
-    rayon::iter::plumbing::UnindexedProducer for Shiperator<S>
-{
+impl<S: Shiperator + Send + Clone> UnindexedProducer for Shiper<S> {
     type Item = S::Out;
 
-    fn split(mut self) -> (Self, Option<Self>) {
-        if !self.shiperator.can_split() {
-            return (self, None);
-        }
-        // Skip proven-empty sources before creating any parallel work for them.
-        let current_count = loop {
-            let count = self.shiperator.candidate_count(self.start, self.end);
-            if count != 0 {
-                break count;
-            }
-            self.start = self.end;
-            let Some(end) = self.entities.next_slice() else {
-                return (self, None);
-            };
-            self.start = 0;
-            self.end = end;
-            self.shiperator.next_slice();
-        };
-        let max_len = current_count.saturating_add(self.pending_candidate_count());
-        if max_len <= self.min_split_len.max(1) {
-            return (self, None);
-        }
+    #[inline]
+    fn split(self) -> (Self, Option<Self>) {
+        // We balance the whole traversal, follow-ups included, so a short current segment
+        // doesn't keep a long follow-up on a single thread.
+        self.split_remaining()
+    }
 
-        // Split at a source boundary first. Each child retains the exact source
-        // identity, then subdivides its own dense indices by candidate work.
-        if !self.entities.follow_up_ptrs.is_empty() {
-            let left = Shiperator {
-                shiperator: self.shiperator.clone(),
-                entities: RawEntityIdAccess::new(self.entities.ptr, Vec::new()),
-                is_exact_sized: self.is_exact_sized,
-                start: self.start,
-                end: self.end,
-                min_split_len: self.min_split_len,
-            };
-            self.end = self.entities.next_slice().unwrap();
-            self.start = 0;
-            self.shiperator.next_slice();
-            return (left, Some(self));
-        }
+    #[inline]
+    fn fold_with<F>(self, folder: F) -> F
+    where
+        F: Folder<Self::Item>,
+    {
+        // Rayon's `consume_iter` would drive us through `next`, we fold in bulk instead.
+        self.fold_chunks::<false, _, _, _>(folder, |_, out| out)
+    }
+}
 
-        let new_end = self.shiperator.candidate_midpoint(self.start, self.end);
-        let entities = RawEntityIdAccess::new(self.entities.ptr, Vec::new());
+/// Producer of a traversal whose items are all in the current segment and that can't reject,
+/// see [`Shiper::exact_len`].
+///
+/// `opt_len` reports a length only for these traversals and Rayon then requires us to drive
+/// consumers with their indexed methods. We do that with `bridge_producer_consumer`,
+/// which splits at the index it picks instead of letting us halve the segment.
+pub(super) struct ExactProducer<P> {
+    pub(super) producer: P,
+    /// Each half of a split keeps at least this many items, see [`min_piece_len`].
+    pub(super) min_len: usize,
+}
+
+impl<S: Shiperator + Send + Clone> Producer for ExactProducer<Shiper<S>> {
+    type Item = S::Out;
+    type IntoIter = Self;
+
+    #[inline]
+    fn into_iter(self) -> Self {
+        self
+    }
+
+    #[inline]
+    fn min_len(&self) -> usize {
+        self.min_len
+    }
+
+    #[inline]
+    fn split_at(self, index: usize) -> (Self, Self) {
+        // Every candidate yields an item, the item at `index` is the candidate at `index`.
+        let (left, right) = self.producer.split_current_segment_at(index);
+        let min_len = self.min_len;
 
         (
-            Shiperator {
-                shiperator: self.shiperator.clone(),
-                entities,
-                is_exact_sized: self.is_exact_sized,
-                start: self.start,
-                end: new_end,
-                min_split_len: self.min_split_len,
+            ExactProducer {
+                producer: left,
+                min_len,
             },
-            Some(Shiperator {
-                shiperator: self.shiperator,
-                entities: self.entities,
-                is_exact_sized: self.is_exact_sized,
-                start: new_end,
-                end: self.end,
-                min_split_len: self.min_split_len,
-            }),
+            ExactProducer {
+                producer: right,
+                min_len,
+            },
         )
     }
 
+    #[inline]
     fn fold_with<F>(self, folder: F) -> F
     where
-        F: rayon::iter::plumbing::Folder<Self::Item>,
+        F: Folder<Self::Item>,
     {
-        folder.consume_iter(self)
+        // Same as the unindexed producer.
+        self.producer
+            .fold_chunks::<false, _, _, _>(folder, |_, out| out)
     }
 }
 
-impl<S: ShiperatorCaptain + ShiperatorSailor + Send + Clone> rayon::iter::ParallelIterator
-    for ParShiperator<S>
-where
-    S::Out: Send,
-{
-    type Item = S::Out;
+impl<S: Shiperator + Send + Clone> Producer for ExactProducer<WithId<Shiper<S>>> {
+    type Item = (EntityId, S::Out);
+    type IntoIter = Self;
 
     #[inline]
-    fn drive_unindexed<C>(self, consumer: C) -> C::Result
+    fn into_iter(self) -> Self {
+        self
+    }
+
+    #[inline]
+    fn min_len(&self) -> usize {
+        self.min_len
+    }
+
+    #[inline]
+    fn split_at(self, index: usize) -> (Self, Self) {
+        let (left, right) = self.producer.0.split_current_segment_at(index);
+        let min_len = self.min_len;
+
+        (
+            ExactProducer {
+                producer: WithId(left),
+                min_len,
+            },
+            ExactProducer {
+                producer: WithId(right),
+                min_len,
+            },
+        )
+    }
+
+    #[inline]
+    fn fold_with<F>(self, folder: F) -> F
     where
-        C: rayon::iter::plumbing::UnindexedConsumer<Self::Item>,
+        F: Folder<Self::Item>,
     {
-        let ParShiperator(mut producer, threshold) = self;
-        configure_split(&mut producer, threshold);
-
-        rayon::iter::plumbing::bridge_unindexed(producer, consumer)
-    }
-
-    #[inline]
-    fn opt_len(&self) -> Option<usize> {
-        if self.0.is_exact_sized {
-            self.0.size_hint().1
-        } else {
-            None
-        }
+        self.producer
+            .0
+            .fold_chunks::<true, _, _, _>(folder, |entity_id, out| (with_id(entity_id), out))
     }
 }
 
-impl<S: ShiperatorCaptain + ShiperatorSailor + Send + Clone> rayon::iter::ParallelIterator
-    for WithId<ParShiperator<S>>
+// `Producer` needs its items as a double ended, exact size iterator.
+// We only hand producers to `bridge_producer_consumer`, which never asks for that iterator:
+// it only splits producers and folds them with our `fold_with`.
+impl<P: Iterator> Iterator for ExactProducer<P> {
+    type Item = P::Item;
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        self.producer.next()
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.producer.size_hint()
+    }
+}
+
+impl<P: Iterator> DoubleEndedIterator for ExactProducer<P> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        unreachable!("parallel traversals are never iterated backwards")
+    }
+}
+
+// `ExactProducer` only wraps exact traversals, their size hint is exact.
+impl<P: Iterator> ExactSizeIterator for ExactProducer<P> {}
+
+impl<S: Shiperator + Send + Clone> rayon::iter::ParallelIterator for WithId<ParShiperator<S>>
 where
     S::Out: Send,
 {
@@ -200,25 +375,77 @@ where
     #[inline]
     fn drive_unindexed<C>(self, consumer: C) -> C::Result
     where
-        C: rayon::iter::plumbing::UnindexedConsumer<Self::Item>,
+        C: UnindexedConsumer<Self::Item>,
     {
-        let WithId(ParShiperator(mut producer, threshold)) = self;
-        configure_split(&mut producer, threshold);
+        let WithId(ParShiperator(producer, threshold)) = self;
+        if let Some(threshold) = threshold {
+            return bridge_unindexed(
+                ThresholdPiece {
+                    producer: WithId(producer),
+                    threshold,
+                },
+                consumer,
+            );
+        }
+        let min_len = min_piece_len(producer.candidate_work());
+        let producer = WithId(producer);
 
-        rayon::iter::plumbing::bridge_unindexed(WithId(producer), consumer)
+        // This has to match `opt_len`, see `ParShiperator::drive_unindexed`.
+        match producer.0.exact_len() {
+            Some(len) => {
+                bridge_producer_consumer(len, ExactProducer { producer, min_len }, consumer)
+            }
+            None => bridge_unindexed(Piece { producer, min_len }, consumer),
+        }
+    }
+
+    #[inline]
+    fn opt_len(&self) -> Option<usize> {
+        if (self.0).1.is_some() {
+            return None;
+        }
+        (self.0).0.exact_len()
     }
 }
 
-impl<S> WithId<ParShiperator<S>> {
-    /// Sets the candidate-count split threshold for this iterator.
-    ///
-    /// See [`ParShiperator::with_split_threshold`] for details. Repeated calls
-    /// use the last value, including calls made before `with_id()`.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `threshold` is zero.
-    pub fn with_split_threshold(self, threshold: usize) -> Self {
-        WithId(self.0.with_split_threshold(threshold))
+impl<S: Shiperator + Send + Clone> rayon::iter::ParallelIterator for ParShiperator<S>
+where
+    S::Out: Send,
+{
+    type Item = S::Out;
+
+    #[inline]
+    fn drive_unindexed<C>(self, consumer: C) -> C::Result
+    where
+        C: UnindexedConsumer<Self::Item>,
+    {
+        let ParShiperator(producer, threshold) = self;
+        if let Some(threshold) = threshold {
+            return bridge_unindexed(
+                ThresholdPiece {
+                    producer,
+                    threshold,
+                },
+                consumer,
+            );
+        }
+        let min_len = min_piece_len(producer.candidate_work());
+
+        // Once `opt_len` reports a length, consumers like `collect`'s may only be split with their
+        // indexed methods. Both use `exact_len` on the same state so they always agree.
+        match producer.exact_len() {
+            Some(len) => {
+                bridge_producer_consumer(len, ExactProducer { producer, min_len }, consumer)
+            }
+            None => bridge_unindexed(Piece { producer, min_len }, consumer),
+        }
+    }
+
+    #[inline]
+    fn opt_len(&self) -> Option<usize> {
+        if self.1.is_some() {
+            return None;
+        }
+        self.0.exact_len()
     }
 }

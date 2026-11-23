@@ -10,7 +10,7 @@ use crate::world::World;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use rayon::{in_place_scope, Scope};
+use rayon::Scope;
 use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
 use std::sync::Mutex;
 #[cfg(feature = "tracing")]
@@ -90,6 +90,11 @@ impl World {
         #[cfg_attr(not(feature = "tracing"), allow(unused))] workload_name: &dyn Label,
     ) -> Result<(), RunWorkload> {
         ensure_order_witness_bound();
+        if batches.dag.is_none() || !batches.regroups.is_empty() {
+            // Regroup steps and invalid/unavailable plans use the upstream
+            // executor, including its conditions and caller-thread affinity.
+            return self.run_batches_parallel_baseline(systems, system_names, batches, workload_name);
+        }
         #[cfg(feature = "tracing")]
         let parent_span = info_span!("workload", name = ?workload_name);
         #[cfg(feature = "tracing")]
@@ -125,26 +130,10 @@ impl World {
                         )?,
                     }
                 }
-            } else {
-                // Fail closed without reentering a mode router.
-                for batch in 0..batches.parallel.len() {
-                    self.run_one_batch_direct(
-                        systems,
-                        system_names,
-                        batches,
-                        batch,
-                        #[cfg(feature = "tracing")]
-                        &parent_span,
-                    )?;
-                }
             }
             Ok(())
         };
-        if let Some(pool) = &self.thread_pool {
-            pool.scope(|_| run())
-        } else {
-            run()
-        }
+        run()
     }
 
     fn run_dag_graph(
@@ -169,7 +158,7 @@ impl World {
             #[cfg(feature = "tracing")]
             parent,
         };
-        in_place_scope(|scope| {
+        self.in_place_scope(|scope| {
             if let Some((&first, others)) = graph.roots.split_first() {
                 for &root in others {
                     if execution.admit() {

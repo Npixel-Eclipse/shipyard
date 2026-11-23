@@ -1,6 +1,6 @@
 //! Shipyard is an Entity Component System focused on usability and speed.
 //!
-//! The [user guide](https://leudz.github.io/shipyard/guide/0.11) is a great place to learn all about Shipyard!
+//! The [user guide](https://leudz.github.io/shipyard/guide/master) is a great place to learn all about Shipyard!
 //!
 //! ## Features
 //!
@@ -10,7 +10,7 @@
 //! - **serde1** &mdash; adds (de)serialization support with [serde](https://github.com/serde-rs/serde)
 //! - **std** *(default)* &mdash; lets Shipyard use the standard library
 //! - **thread_local** &mdash; adds methods and types required to work with `!Send` and `!Sync` components
-//! - **tracing** &mdash; reports workload and system execution
+//! - **tracing** &mdash; reports workload, system and regroup execution, and the steps a workload skips
 
 #![warn(elided_lifetimes_in_paths)]
 #![warn(trivial_casts)]
@@ -30,6 +30,8 @@
 #![allow(clippy::needless_lifetimes)]
 // The question mark operator can damage performance
 #![allow(clippy::question_mark)]
+// Map can throw the compiler off
+#![allow(clippy::manual_map)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![warn(missing_docs)]
 #![no_std]
@@ -72,14 +74,15 @@ mod public_transport;
 mod remove;
 /// Stores systems from all workloads and their scheduling.
 pub mod scheduler;
-#[cfg(feature = "scheduler-experiment")]
-pub mod tracking_observation;
+mod scratch;
 mod seal;
 /// Default component storage.
 pub mod sparse_set;
 mod storage;
 /// Module related to storage tracking, like insertion or modification.
 pub mod track;
+#[cfg(feature = "scheduler-experiment")]
+pub mod tracking_observation;
 mod unique;
 /// Contains all view types used to borrow components in a [`World`].
 pub mod views;
@@ -97,10 +100,11 @@ pub use entity_id::EntityId;
 pub use get::Get;
 #[doc(inline)]
 pub use iter::IntoIter;
-pub use r#mut::SafeMut;
 pub use remove::Remove;
+#[cfg(feature = "std")]
+pub use scheduler::IntoWorkloadTrySystem;
 #[doc(inline)]
-pub use scheduler::{IntoWorkload, Workload};
+pub use scheduler::{IntoSequentialWorkload, IntoWorkload, Workload};
 #[cfg(feature = "proc")]
 pub use shipyard_proc::{Borrow, BorrowInfo, Component, IntoIter, Label, Unique, WorldBorrow};
 pub use unique::UniqueStorage;
@@ -131,3 +135,5 @@ fn std_thread_id_generator() -> u64 {
 
     unsafe { *thread_id }
 }
+
+pub use r#mut::SafeMut;

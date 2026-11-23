@@ -1,6 +1,7 @@
 use super::*;
 use crate::scheduler::dag::DagNode;
-use crate::scheduler::SystemModificator;
+use crate::scheduler::{Step, SystemModificator};
+use crate::error::SystemError;
 use crate::track::Untracked;
 use crate::{AllStoragesViewMut, Component, ViewMut, Workload};
 use alloc::sync::Arc;
@@ -39,6 +40,13 @@ fn two_workers() -> World {
         panic!("test pool");
     };
     World::builder().with_local_thread_pool(pool).build()
+}
+
+fn assert_first_batch_is_fenced(world: &World) {
+    let scheduler = world.scheduler.borrow().expect("scheduler borrow");
+    let batches = scheduler.workload(&"test").expect("registered workload");
+    let plan = batches.dag.as_ref().expect("ordinary workload needs a DAG plan");
+    assert!(matches!(plan.epochs.first(), Some(DagEpoch::Fence(0))), "fallible batch must be fenced");
 }
 
 #[derive(Default)]
@@ -87,7 +95,7 @@ fn ready_successor_runs_before_unrelated_previous_batch_body_finishes() {
 }
 
 #[test]
-fn condition_is_evaluated_after_prior_batch_and_before_any_current_body() {
+fn condition_is_evaluated_after_prior_batch_and_before_its_own_body() {
     let world = two_workers();
     let state = Arc::new(AtomicUsize::new(0));
     let a = Arc::clone(&state);
@@ -99,11 +107,10 @@ fn condition_is_evaluated_after_prior_batch_and_before_any_current_body() {
         .with_system(move |_: ViewMut<X>| {
             a.store(1, Ordering::SeqCst);
         })
-        .with_system(move |_: ViewMut<X>| {
-            b.store(2, Ordering::SeqCst);
-        })
         .with_system(
-            (move || {
+            (move |_: ViewMut<X>| {
+                assert_eq!(b.load(Ordering::SeqCst), 1);
+                b.store(2, Ordering::SeqCst);
                 result.fetch_add(1, Ordering::SeqCst);
             })
             .run_if(move || predicate.load(Ordering::SeqCst) == 1),
@@ -116,7 +123,7 @@ fn condition_is_evaluated_after_prior_batch_and_before_any_current_body() {
 
 #[test]
 fn all_storages_stays_on_owner_and_explicit_barrier_is_preserved() {
-    let world = World::new();
+    let world = two_workers();
     let owner = current().id();
     let state = Arc::new(AtomicUsize::new(0));
     let before = Arc::clone(&state);
@@ -148,10 +155,13 @@ fn known_fallible_batch_keeps_later_independent_external_effects_unstarted() {
         let dependent = Arc::clone(&later);
         let independent = Arc::clone(&later);
         let workload = Workload::new("test")
-            .with_try_system(move |_: ViewMut<X>| -> Result<(), Error> {
+            .with_system(move |_: ViewMut<X>| -> Result<(), SystemError> {
                 assert!(!should_panic, "expected marked panic");
-                Err(Error::other("expected marked error"))
+                Err(Error::other("expected marked error").into())
             })
+            // Upstream packs every ready independent system into the first
+            // batch. This root puts the later Y effect in the next batch.
+            .with_system(|_: ViewMut<Y>| {})
             .with_system(move |_: ViewMut<X>| {
                 dependent.fetch_add(1, Ordering::SeqCst);
             })
@@ -159,6 +169,7 @@ fn known_fallible_batch_keeps_later_independent_external_effects_unstarted() {
                 independent.fetch_add(1, Ordering::SeqCst);
             });
         assert!(workload.add_to_world(&world).is_ok());
+        assert_first_batch_is_fenced(&world);
         let outcome = catch_unwind(AssertUnwindSafe(|| run(&world)));
         if should_panic {
             assert!(outcome.is_err());
@@ -170,22 +181,22 @@ fn known_fallible_batch_keeps_later_independent_external_effects_unstarted() {
 }
 
 #[test]
-fn reused_registered_try_function_retains_fallible_provenance() {
-    fn fail(_: ViewMut<X>) -> Result<(), Error> {
-        Err(Error::other("registered as try-system first"))
+fn reused_registered_fallible_function_retains_fallible_provenance() {
+    fn fail(_: ViewMut<X>) -> Result<(), SystemError> {
+        Err(Error::other("registered as fallible system first").into())
     }
     let world = two_workers();
     assert!(Workload::new("registered-first")
-        .with_try_system(fail)
+        .with_system(fail)
         .add_to_world(&world)
         .is_ok());
     let later = Arc::new(AtomicUsize::new(0));
     let dependent = Arc::clone(&later);
     let independent = Arc::clone(&later);
-    // The registry reuses the first TypeId's try-wrapper, although this
-    // occurrence's normal into_system conversion has no fallible marker.
+    // The registry reuses the first TypeId's fallible callable across workloads.
     assert!(Workload::new("test")
         .with_system(fail)
+        .with_system(|_: ViewMut<Y>| {})
         .with_system(move |_: ViewMut<X>| {
             dependent.fetch_add(1, Ordering::SeqCst);
         })
@@ -194,6 +205,7 @@ fn reused_registered_try_function_retains_fallible_provenance() {
         })
         .add_to_world(&world)
         .is_ok());
+    assert_first_batch_is_fenced(&world);
     assert!(run(&world).is_err());
     assert_eq!(later.load(Ordering::SeqCst), 0);
 }
@@ -366,7 +378,7 @@ fn reused_read_only_tracking_system_keeps_its_original_batch_boundaries() {
         let Ok(batches) = scheduler.workload(&"test") else {
             panic!("registered workload");
         };
-        assert_eq!(batches.parallel, vec![(None, vec![0, 1]), (None, vec![0, 0])]);
+        assert_eq!(batches.parallel, vec![(None, vec![Step::System(0), Step::System(1)]), (None, vec![Step::System(0), Step::System(0)])]);
         let Some(plan) = &batches.dag else {
             panic!("valid DAG plan");
         };
@@ -405,7 +417,7 @@ fn non_send_sync_borrow_remains_on_owner_thread() {
     impl Component for Local {
         type Tracking = Untracked;
     }
-    let world = World::new();
+    let world = two_workers();
     let owner = current().id();
     assert!(Workload::new("test")
         .with_system(move |_: NonSendSync<View<Local>>| {

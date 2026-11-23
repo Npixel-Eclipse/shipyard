@@ -1,9 +1,9 @@
 //! Types for displaying workload information.
 
+use crate::ShipHashMap;
 use crate::borrow::Mutability;
 use crate::scheduler::{AsLabel, Label};
 use crate::storage::StorageId;
-use crate::ShipHashMap;
 use alloc::borrow::Cow;
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -24,12 +24,14 @@ pub struct WorkloadInfo {
 
 /// Contains information related to a batch.
 ///
-/// A batch is a collection of system that can safely run in parallel.
+/// A batch is a collection of systems, and regroups in registered workloads, that can safely run in parallel.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde1", derive(serde::Serialize, serde::Deserialize))]
 pub struct BatchInfo {
     #[allow(missing_docs)]
     pub systems: (Option<SystemInfo>, Vec<SystemInfo>),
+    /// Regroups running in this batch, alongside its systems.
+    pub regroups: Vec<RegroupInfo>,
 }
 
 impl BatchInfo {
@@ -48,15 +50,33 @@ pub struct SystemInfo {
     #[allow(missing_docs)]
     pub borrow: Vec<TypeInfo>,
     /// Information explaining why this system could not be part of the previous batch.
+    ///
+    /// Only one reason is kept and it names the other system by callable index, see `unique_id`,
+    /// which doesn't tell its occurrences apart. [`SystemOccurrence`] has the facts behind every reason.
     pub conflict: Option<Conflict>,
-    /// Contains all ordering information the scheduler used to place this system
+    /// The systems this one has to run after, in an earlier batch, by [`SystemOccurrence::id`].
+    ///
+    /// Regroups aren't listed. [`SystemOccurrence::after`] lists them too, with why each one is there.
     pub after: Vec<usize>,
-    /// List of all after_all constraints
+    /// The `after_all` constraints that ordered this system, `other_system` being a [`SystemOccurrence::id`].
+    ///
+    /// Only the first matching label of each other system is listed, [`SystemOccurrence::after`] has all of them.
     pub after_all: Vec<BeforeAfterConstraint>,
-    /// List of all before_all constraints
+    /// The `before_all` constraints that ordered this system, `other_system` being a callable index,
+    /// see `unique_id`.
+    ///
+    /// Only the first matching label of each other system is listed,
+    /// the other system's [`SystemOccurrence::after`] has all of them.
     pub before_all: Vec<BeforeAfterConstraint>,
-    /// A unique identifier for this system within the workload
+    /// Index of the system's callable in the world's scheduler.
+    ///
+    /// Every occurrence of a system shares it, in this workload and in the others.
+    /// [`SystemOccurrence::id`] tells occurrences apart.
     pub unique_id: usize,
+    /// What the scheduler used to place this appearance of the system, see [`SystemOccurrence`].
+    ///
+    /// Unlike `unique_id`, shared by every appearance of a system, it tells them apart.
+    pub occurrence: SystemOccurrence,
 }
 
 impl core::fmt::Debug for SystemInfo {
@@ -69,8 +89,131 @@ impl core::fmt::Debug for SystemInfo {
             .field("after", &self.after)
             .field("after_all", &self.after_all)
             .field("before_all", &self.before_all)
+            .field("occurrence", &self.occurrence)
             .finish()
     }
+}
+
+/// One appearance of a system in a workload, and what the scheduler used to place it.
+///
+/// A system can be added to a workload several times, each time is an occurrence.
+/// Occurrences of the same system run the same function but are scheduled on their own:
+/// each has its own conditions, its own ordering, its own batch and its own [`SystemInfo`].
+///
+/// Occurrences and regroups are what the scheduler places in batches,
+/// [`OccurrenceRef`] points to one of them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde1", derive(serde::Serialize, serde::Deserialize))]
+pub struct SystemOccurrence {
+    /// Identifies the occurrence within its workload, see [`OccurrenceRef::System`].
+    ///
+    /// It's the occurrence's position among the workload's systems, in the order they were added,
+    /// nested workloads included. Two occurrences of the same system have different ids.
+    pub id: usize,
+    /// What the system's conditions borrow. [`SystemInfo::borrow`] is what the system itself borrows.
+    pub conditions: Vec<TypeInfo>,
+    /// What the scheduler compares to place the occurrence: what the system and its conditions borrow.
+    ///
+    /// A storage borrowed several times is listed once, exclusive if one of the borrows is,
+    /// not thread safe if one of them isn't.
+    pub footprint: Vec<TypeInfo>,
+    /// Whether the occurrence runs on the calling thread, a batch can only have one such job.
+    pub thread_bound: bool,
+    /// The occurrences that have to run in an earlier batch, sorted, each listed once.
+    pub after: Vec<Predecessor>,
+}
+
+/// What the scheduler used to place one regroup of a workload.
+///
+/// Regroups are placed like [system occurrences](SystemOccurrence),
+/// two regroups of the same storages are placed on their own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde1", derive(serde::Serialize, serde::Deserialize))]
+pub struct RegroupOccurrence {
+    /// Identifies the regroup within its workload, see [`OccurrenceRef::Regroup`].
+    ///
+    /// Two regroups of the same storages have different ids.
+    pub id: usize,
+    /// Whether the regroup runs on the calling thread, a batch can only have one such job.
+    pub thread_bound: bool,
+    /// The occurrences that have to run in an earlier batch, sorted, each listed once.
+    pub after: Vec<Predecessor>,
+}
+
+/// Points to a system occurrence or a regroup of the same workload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde1", derive(serde::Serialize, serde::Deserialize))]
+pub enum OccurrenceRef {
+    /// A [`SystemOccurrence::id`].
+    System(usize),
+    /// A [`RegroupOccurrence::id`].
+    Regroup(usize),
+}
+
+/// An occurrence that has to run in an earlier batch, and every reason why.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde1", derive(serde::Serialize, serde::Deserialize))]
+pub struct Predecessor {
+    #[allow(missing_docs)]
+    pub occurrence: OccurrenceRef,
+    /// Never empty, sorted, each listed once.
+    pub origins: Vec<OrderingOrigin>,
+}
+
+/// Why an occurrence has to run in an earlier batch than another.
+///
+/// Only hard ordering is listed, the sequential order alone doesn't keep two systems apart.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde1", derive(serde::Serialize, serde::Deserialize))]
+pub enum OrderingOrigin {
+    /// The predecessor comes first in the workload and they can't run at the same time.
+    Implicit,
+    /// A barrier separates them in the workload.
+    Barrier,
+    /// The predecessor is `before_all` this label, which the successor has.
+    BeforeAll(String),
+    /// The successor is `after_all` this label, which the predecessor has.
+    AfterAll(String),
+    /// They come from consecutive children of a sequential workload.
+    Sequential,
+    /// The predecessor's `WorkloadSystem::before` lists the successor.
+    Before,
+    /// The successor borrows from the storages the predecessor regroup moves.
+    Regroup,
+    /// The successor regroup moves storages the predecessor might have changed since the set's
+    /// previous regroup, the regroup is there for it.
+    Writes,
+    /// The successor regroup moves storages the predecessor borrows, without having changed them
+    /// since the set's previous regroup.
+    Borrows,
+}
+
+/// Contains information related to a regroup a workload runs between its systems.
+///
+/// The workload adds these itself, they aren't systems and can't be named.\
+/// A regroup runs on the world's thread when one of its storages isn't `thread_safe`,
+/// like a system in [`BatchInfo::systems`]'s first slot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde1", derive(serde::Serialize, serde::Deserialize))]
+pub struct RegroupInfo {
+    /// Every storage of the regrouped connected set, all borrowed exclusively.
+    pub borrow: Vec<TypeInfo>,
+    /// What makes the regroup run.
+    pub trigger: RegroupTrigger,
+    /// What the scheduler used to place this regroup.
+    pub occurrence: RegroupOccurrence,
+}
+
+/// Why a workload has a regroup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde1", derive(serde::Serialize, serde::Deserialize))]
+pub enum RegroupTrigger {
+    /// Runs each time the workload starts, for the changes made outside of it.
+    Entry,
+    /// Placed after a system borrowing a member of the set exclusively.
+    ///
+    /// Like every regroup it runs each time the workload reaches it, a set with nothing to move is cheap.
+    Pending,
 }
 
 /// Pinpoints the type and system that made a system unable to get into a batch.
@@ -81,7 +224,7 @@ pub enum Conflict {
     Borrow {
         #[allow(missing_docs)]
         type_info: TypeInfo,
-        #[allow(missing_docs)]
+        /// The other system's callable index, see [`SystemInfo::unique_id`].
         other_system: usize,
         #[allow(missing_docs)]
         other_type_info: TypeInfo,
@@ -90,11 +233,14 @@ pub enum Conflict {
     NotSendSync(TypeInfo),
     /// A `!Send` and/or `!Sync` type currently prevents any parrallelism.
     OtherNotSendSync {
-        #[allow(missing_docs)]
+        /// The other system's callable index, see [`SystemInfo::unique_id`].
         system: usize,
         #[allow(missing_docs)]
         type_info: TypeInfo,
     },
+    /// A regroup of the previous batch borrows the storage described by this `TypeInfo` exclusively,
+    /// the system waits for it.
+    Regroup(TypeInfo),
 }
 
 /// Identify a type.
@@ -265,7 +411,7 @@ impl<'a> Extend<&'a Box<dyn Label>> for DedupedLabels {
 #[derive(Clone, PartialEq, Eq, Debug)]
 #[cfg_attr(feature = "serde1", derive(serde::Serialize, serde::Deserialize))]
 pub struct BeforeAfterConstraint {
-    #[allow(missing_docs)]
+    /// The other system, see [`SystemInfo::after_all`] and [`SystemInfo::before_all`] for what the number is.
     pub other_system: usize,
     #[allow(missing_docs)]
     pub constraint: String,

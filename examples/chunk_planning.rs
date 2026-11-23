@@ -1,7 +1,8 @@
 //! Isolated iterator throughput probe, not a Battle FPS benchmark.
 //! `cargo run --release -p shipyard --example chunk_planning -- 16 1000`
 use rayon::prelude::*;
-use shipyard::{track, Component, Get, IntoIter, View, ViewMut, World};
+use shipyard::iter::{IntoShiperator, Shiperator};
+use shipyard::{Component, Get, IntoIter, View, ViewMut, World, track};
 use std::{hint::black_box, time::Instant};
 
 struct Value(usize);
@@ -58,6 +59,14 @@ fn main() {
             indices.iter().sum::<usize>()
         };
         pool.install(|| world.run(|markers: View<Marker>, values: View<Value>| {
+            // Inspect through the public constructor, outside the timed loops.
+            // The scan cost is a relative planning weight, not a match count
+            // or a time prediction. Actual matches remain checked by the sum.
+            let (plan_scan_cost, proven_empty) = if kind == 4 {
+                plan_summary((&markers, &values))
+            } else {
+                plan_summary((&markers, values.modified()))
+            };
             let query = || {
                 let sum: usize = if kind == 4 {
                     (&markers, &values).par_iter().map(|(_, v)| consume(v.0, kind == 5)).sum()
@@ -75,10 +84,18 @@ fn main() {
                 samples.push(started.elapsed().as_nanos() as f64 / iterations as f64);
             }
             samples.sort_by(f64::total_cmp);
-            println!("{name},threads={threads},slots={len},matches={},median_ns={:.0},min_ns={:.0},max_ns={:.0}",
+            println!("{name},threads={threads},slots={len},matches={},median_ns={:.0},min_ns={:.0},max_ns={:.0},plan_scan_cost={plan_scan_cost},proven_empty={proven_empty}",
                 indices.len(), samples[2], samples[0], samples[4]);
         }));
     }
+}
+
+fn plan_summary<Q: IntoShiperator>(query: Q) -> (usize, bool)
+where
+    <Q as IntoShiperator>::Shiperator: Shiperator,
+{
+    let (shiperator, _, _) = query.into_shiperator();
+    (shiperator.sail_time(), shiperator.has_no_candidates())
 }
 
 #[inline]

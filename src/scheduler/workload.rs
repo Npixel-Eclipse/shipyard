@@ -1,28 +1,36 @@
 mod create_workload;
+mod prepare;
+#[cfg(test)]
+mod tests;
+// Rustdoc doesn't set `test` when it collects doc tests, these checks need their own gate.
+#[cfg(doctest)]
+#[path = "workload/tests/compile_fail.rs"]
+mod compile_fail_tests;
 
-use crate::all_storages::AllStorages;
+use self::create_workload::create_workload;
+use crate::all_storages::{AllStorages, StorageMaps};
 use crate::component::{Component, Unique};
+#[cfg(feature = "std")]
+use crate::scheduler::IntoWorkloadTrySystem;
+#[cfg(feature = "scheduler-experiment")]
+use crate::scheduler::dag::finish_registration;
 use crate::scheduler::info::{DedupedLabels, TypeInfo, WorkloadInfo};
 use crate::scheduler::label::WorkloadLabel;
-use crate::scheduler::system::{ExtractWorkloadRunIf, WorkloadRunIfFn};
+use crate::scheduler::system::{ExtractWorkloadRunIf, WorkloadRunIf};
 use crate::scheduler::{
-    AsLabel, Batches, IntoWorkload, IntoWorkloadSystem, IntoWorkloadTrySystem, Label, Scheduler,
-    WorkloadSystem,
+    AsLabel, Batches, IntoWorkload, IntoWorkloadSystem, Label, Scheduler, WorkloadSystem,
 };
-use crate::storage::StorageId;
 use crate::unique::UniqueStorage;
 use crate::world::World;
-use crate::{error, ShipHashMap};
+use crate::{ShipHashMap, error};
 use alloc::boxed::Box;
 use core::any::TypeId;
+#[cfg(feature = "std")]
+use core::error::Error;
 // macro not module
 use alloc::vec;
 use alloc::vec::Vec;
 use core::any::type_name;
-#[cfg(not(feature = "std"))]
-use core::any::Any;
-#[cfg(feature = "std")]
-use std::error::Error;
 
 /// Used to create a [`Workload`].
 ///
@@ -47,6 +55,8 @@ pub struct ScheduledWorkload {
 
 impl ScheduledWorkload {
     /// Runs the workload.
+    ///
+    /// It doesn't regroup, see [`Workload::build`].
     ///
     /// ### Borrows
     ///
@@ -86,6 +96,9 @@ impl ScheduledWorkload {
 
 impl World {
     /// Creates a new workload and store it in the [`World`].
+    ///
+    /// Like [`Workload::add_to_world`], the workload regroups the world's groups it uses,
+    /// see [`WorldBuilder::with_group`](crate::world::WorldBuilder::with_group).
     pub fn add_workload<Views, R, W, F: FnOnce() -> W + 'static>(&self, workload: F)
     where
         W: IntoWorkload<Views, R>,
@@ -121,7 +134,7 @@ pub struct Workload {
     pub(super) name: Box<dyn Label>,
     pub(super) tags: Vec<Box<dyn Label>>,
     pub(super) systems: Vec<WorkloadSystem>,
-    pub(super) run_if: Option<Box<dyn WorkloadRunIfFn>>,
+    pub(super) run_if: Option<WorkloadRunIf>,
     pub(super) before_all: DedupedLabels,
     pub(super) after_all: DedupedLabels,
     pub(super) overwritten_name: bool,
@@ -190,9 +203,21 @@ impl Workload {
     }
     /// Moves all systems of `other` into `Self`, leaving `other` empty.
     /// This allows us to collect systems in different builders before joining them together.
+    ///
+    /// `other`'s barriers move along with its systems.\
+    /// Its conditions, tags and ordering requirements stay in `other`, [`merge`](Workload::merge) applies them to its systems first.
     pub fn append(mut self, other: &mut Self) -> Self {
+        // Barriers are positions in the systems list, `other`'s ones now start after our systems.
+        let systems_len = self.systems.len();
+        self.barriers.extend(
+            other
+                .barriers
+                .drain(..)
+                .map(|barrier| barrier + systems_len),
+        );
+
         for system in &mut other.systems {
-            system.unique_id += self.systems.len();
+            system.unique_id += systems_len;
         }
 
         self.systems.append(&mut other.systems);
@@ -205,28 +230,29 @@ impl Workload {
         self.propagate();
         other.propagate();
 
-        let systems_len = self.systems.len();
-        self.barriers.extend(
-            other
-                .barriers
-                .drain(..)
-                .map(|barrier| barrier + systems_len),
-        );
-
         self.append(&mut other)
     }
     /// Propagates all information into the systems.
     /// This includes `run_if`/`skip_if`, `tags`, `before`/`after` requirements.
     fn propagate(&mut self) {
         for system in &mut self.systems {
-            system.run_if = match (system.run_if.take(), self.run_if.clone()) {
-                (None, None) => None,
-                (None, Some(run_if)) => Some(run_if.to_non_clone()),
-                (Some(run_if), None) => Some(run_if),
-                (Some(system_run_if), Some(workload_run_if)) => Some(Box::new(move |world| {
-                    Ok(workload_run_if.clone().run(world)? && (system_run_if)(world)?)
-                })),
-            };
+            if let Some(workload_run_if) = &self.run_if {
+                // Each system gets its own copy of the condition, cloning gives it its own tracking cursor.
+                // We keep that copy across runs, so it sees the changes since this system's last evaluation.
+                let workload_fn = workload_run_if.system_fn.clone();
+                system.run_if = match system.run_if.take() {
+                    None => Some(workload_fn.to_non_clone()),
+                    Some(system_run_if) => Some(Box::new(move |world| {
+                        Ok(workload_fn.run(world)? && (system_run_if)(world)?)
+                    })),
+                };
+                system
+                    .run_if_borrow_constraints
+                    .extend(workload_run_if.borrow_constraints.iter().cloned());
+                system
+                    .tracking_to_enable
+                    .extend(workload_run_if.tracking_to_enable.iter().copied());
+            }
 
             system.tags.extend(self.tags.iter().cloned());
 
@@ -291,6 +317,87 @@ impl Workload {
     ///
     /// world.run_default_workload();
     /// ```
+    ///
+    /// ### Return value
+    ///
+    /// A system can return any type, the value is dropped.\
+    /// The exception is exactly `Result<(), SystemError>`, or an alias of it: an `Err` stops the workload
+    /// and is returned as [`RunWorkload::Run`](error::RunWorkload::Run).\
+    /// Any other type is dropped, including other `Result`s, use `?` to convert their error into a [`SystemError`](error::SystemError).
+    ///
+    /// ```
+    /// use shipyard::error::SystemError;
+    /// use shipyard::{Component, IntoIter, View, Workload, World};
+    ///
+    /// #[derive(Component)]
+    /// struct Health(u32);
+    ///
+    /// fn check(healths: View<Health>) -> Result<(), SystemError> {
+    ///     if healths.iter().any(|health| health.0 == 0) {
+    ///         return Err("a health reached zero".into());
+    ///     }
+    ///
+    ///     Ok(())
+    /// }
+    ///
+    /// let mut world = World::new();
+    ///
+    /// world.add_entity(Health(0));
+    ///
+    /// Workload::new("Check")
+    ///     .with_system(check)
+    ///     .add_to_world(&world)
+    ///     .unwrap();
+    ///
+    /// let error = world.run_workload("Check").unwrap_err();
+    ///
+    /// assert_eq!(
+    ///     error.custom_error().unwrap().to_string(),
+    ///     "a health reached zero"
+    /// );
+    /// ```
+    ///
+    /// ### Shared instance
+    ///
+    /// A world registers each function type once, the first time a workload containing it is added.\
+    /// Every later occurrence of that type runs this first instance.\
+    /// This matters for closures: different captures of the same closure type all run the first one.
+    ///
+    /// ```
+    /// use shipyard::{Workload, World};
+    /// use std::sync::Arc;
+    /// use std::sync::atomic::{AtomicU32, Ordering};
+    ///
+    /// // Every call returns the same closure type, only the captured counter differs.
+    /// fn counting(count: &Arc<AtomicU32>) -> impl Fn() + Send + Sync + 'static {
+    ///     let count = count.clone();
+    ///
+    ///     move || {
+    ///         count.fetch_add(1, Ordering::Relaxed);
+    ///     }
+    /// }
+    ///
+    /// let world = World::new();
+    /// let first = Arc::new(AtomicU32::new(0));
+    /// let second = Arc::new(AtomicU32::new(0));
+    ///
+    /// Workload::new("first")
+    ///     .with_system(counting(&first))
+    ///     .add_to_world(&world)
+    ///     .unwrap();
+    /// Workload::new("second")
+    ///     .with_system(counting(&second))
+    ///     .add_to_world(&world)
+    ///     .unwrap();
+    ///
+    /// world.run_workload("second").unwrap();
+    ///
+    /// // "second" ran the closure registered by "first".
+    /// assert_eq!(first.load(Ordering::Relaxed), 1);
+    /// assert_eq!(second.load(Ordering::Relaxed), 0);
+    /// ```
+    ///
+    /// To give each occurrence its own data, store it in the [`World`], in a unique for example.
     #[track_caller]
     pub fn with_system<B, R, S: IntoWorkloadSystem<B, R>>(mut self, system: S) -> Workload {
         let mut system = system.into_workload_system().unwrap();
@@ -300,50 +407,10 @@ impl Workload {
 
         self
     }
-    /// Adds a fallible system to the workload being created.
-    /// The workload's execution will stop if any error is encountered.
-    ///
-    /// ### Example:
-    /// ```
-    /// use shipyard::{Component, EntitiesViewMut, Get, IntoIter, View, ViewMut, Workload, World};
-    /// use shipyard::error::MissingComponent;
-    ///
-    /// #[derive(Component, Clone, Copy)]
-    /// struct U32(u32);
-    ///
-    /// #[derive(Component, Debug, PartialEq, Eq)]
-    /// struct USIZE(usize);
-    ///
-    /// fn add(mut usizes: ViewMut<USIZE>, u32s: View<U32>) {
-    ///     for (mut x, &y) in (&mut usizes, &u32s).iter() {
-    ///         x.0 += y.0 as usize;
-    ///     }
-    /// }
-    ///
-    /// fn check(usizes: View<USIZE>) -> Result<(), MissingComponent> {
-    ///     for (id, i) in usizes.iter().with_id() {
-    ///         assert!(usizes.get(id)? == i);
-    ///     }
-    ///
-    ///     Ok(())
-    /// }
-    ///
-    /// let mut world = World::new();
-    ///
-    /// world.add_entity((USIZE(0), U32(1)));
-    /// world.add_entity((USIZE(2), U32(3)));
-    /// world.add_entity((USIZE(4), U32(5)));
-    ///
-    /// Workload::new("Add & Check")
-    ///     .with_system(add)
-    ///     .with_try_system(check)
-    ///     .add_to_world(&world)
-    ///     .unwrap();
-    ///
-    /// world.run_default_workload();
-    /// ```
-    #[track_caller]
     #[cfg(feature = "std")]
+    /// Compatibility entry point for fallible 0.11.9 systems with arbitrary
+    /// error types. Native `with_system` keeps its upstream `SystemError` contract.
+    #[track_caller]
     pub fn with_try_system<
         B,
         Ok,
@@ -351,73 +418,21 @@ impl Workload {
         R: Into<Result<Ok, Err>>,
         S: IntoWorkloadTrySystem<B, R>,
     >(
-        mut self,
+        self,
         system: S,
     ) -> Self {
-        let mut system = system.into_workload_try_system::<Ok, Err>().unwrap();
-        system.unique_id += self.systems.len();
-
-        self.systems.push(system);
-
-        self
+        let system = match system.into_workload_try_system::<Ok, Err>() {
+            Ok(system) => system,
+            Err(error) => panic!("invalid fallible system: {error:?}"),
+        };
+        self.with_system(system)
     }
-    /// Adds a fallible system to the workload being created.
-    /// The workload's execution will stop if any error is encountered.
-    ///
-    /// ### Example:
-    /// ```
-    /// use shipyard::{EntitiesViewMut, Get, IntoIter, IntoWithId, View, ViewMut, Workload, World};
-    /// use shipyard::error::MissingComponent;
-    ///
-    /// fn add(mut usizes: ViewMut<usize>, u32s: View<u32>) {
-    ///     for (mut x, &y) in (&mut usizes, &u32s).iter() {
-    ///         *x += y as usize;
-    ///     }
-    /// }
-    ///
-    /// fn check(usizes: View<usize>) -> Result<(), MissingComponent> {
-    ///     for (id, i) in usizes.iter().with_id() {
-    ///         assert!(usizes.get(id)? == i);
-    ///     }
-    ///
-    ///     Ok(())
-    /// }
-    ///
-    /// let mut world = World::new();
-    ///
-    /// world.add_entity((0usize, 1u32));
-    /// world.add_entity((2usize, 3u32));
-    /// world.add_entity((4usize, 5u32));
-    ///
-    /// Workload::new("Add & Check")
-    ///     .with_system(add)
-    ///     .with_try_system(check)
-    ///     .add_to_world(&world)
-    ///     .unwrap();
-    ///
-    /// world.run_default_workload();
-    /// ```
-    #[track_caller]
-    #[cfg(not(feature = "std"))]
-    pub fn with_try_system<
-        B,
-        Ok,
-        Err: 'static + Send + Any,
-        R: Into<Result<Ok, Err>>,
-        S: IntoWorkloadTrySystem<B, R>,
-    >(
-        mut self,
-        system: S,
-    ) -> Self {
-        let mut system = system.into_workload_try_system::<Ok, Err>().unwrap();
-        system.unique_id += self.systems.len();
 
-        self.systems.push(system);
-
-        self
-    }
     /// Finishes the workload creation and stores it in the [`World`].
     /// Returns a struct with describing how the workload has been split in batches.
+    ///
+    /// The workload regroups the world's groups it uses, the regroups are planned here.\
+    /// See [`WorldBuilder::with_group`](crate::world::WorldBuilder::with_group) for when they run.
     ///
     /// ### Borrows
     ///
@@ -449,36 +464,83 @@ impl Workload {
             .borrow_mut()
             .map_err(|_| error::AddWorkload::Borrow)?;
 
+        // We borrow it before adding the workload, it can't be added without its regroups.
+        let all_storages = world
+            .all_storages()
+            .map_err(|_| error::AddWorkload::TrackingAllStoragesBorrow)?;
+
+        if workloads.contains_key(&self.name) {
+            return Err(error::AddWorkload::AlreadyExists);
+        }
+
         let mut tracking_to_enable = Vec::new();
 
         let name = self.name.dyn_clone();
 
-        let workload_info = create_workload::create_workload(
+        let registered = systems.len();
+
+        // We only publish the workload once every step that can fail succeeded,
+        // a rejected workload doesn't show up in `workloads`, `default` or `workloads_info`.
+        let built = create_workload::create_workload(
             self,
             systems,
             system_names,
             system_generators,
             lookup_table,
             &mut tracking_to_enable,
-            workloads,
-            default,
             #[cfg(feature = "scheduler-experiment")]
             dag_registered_fallible,
-        )?;
+        )
+        .and_then(|(mut batches, mut workload_info, dependencies)| {
+            prepare::prepare_regroups(
+                &mut batches,
+                &mut workload_info.batches_info,
+                &all_storages.grouping,
+                &dependencies,
+            );
 
-        let all_storages = world
-            .all_storages()
-            .map_err(|_| error::AddWorkload::TrackingAllStoragesBorrow)?;
+            for enable_tracking_fn in &tracking_to_enable {
+                (enable_tracking_fn)(&all_storages).map_err(|err| match err {
+                    error::GetStorage::StorageBorrow { name, id, borrow } => {
+                        error::AddWorkload::TrackingStorageBorrow { name, id, borrow }
+                    }
+                    _ => unreachable!(),
+                })?;
+            }
 
-        for enable_tracking_fn in &tracking_to_enable {
-            (enable_tracking_fn)(&all_storages).map_err(|err| match err {
-                error::GetStorage::StorageBorrow { name, id, borrow } => {
-                    error::AddWorkload::TrackingStorageBorrow { name, id, borrow }
-                }
-                _ => unreachable!(),
-            })?;
+            #[cfg(feature = "scheduler-experiment")]
+            finish_registration(
+                &*name,
+                system_names,
+                dag_registered_fallible,
+                &mut batches,
+                &workload_info,
+            );
+            Ok((batches, workload_info))
+        });
+
+        let (batches, workload_info) = match built {
+            Ok(built) => built,
+            Err(err) => {
+                // The rejected workload's callables can't stay registered, a later workload would reuse them.
+                // Callables are only ever appended and we hold the scheduler the whole time,
+                // so the ones from earlier workloads are exactly those below `registered`.
+                // Tracking enabled by the callbacks that succeeded stays enabled, that's harmless.
+                systems.truncate(registered);
+                #[cfg(feature = "scheduler-experiment")]
+                dag_registered_fallible.truncate(registered);
+                system_names.truncate(registered);
+                system_generators.truncate(registered);
+                lookup_table.retain(|_, index| *index < registered);
+
+                return Err(err);
+            }
+        };
+
+        if workloads.is_empty() {
+            *default = name.clone();
         }
-
+        workloads.insert(name.clone(), batches);
         workloads_info.insert(name, workload_info);
 
         Ok(())
@@ -520,7 +582,28 @@ impl Workload {
         Ok(())
     }
     /// Build the [`Workload`](super::Workload) from the [`Workload`].
+    ///
+    /// Unlike [`Workload::add_to_world`], the built workload doesn't regroup, it isn't tied to a world's groups.\
+    /// Iteration stays correct, but components added since the last regroup are slower to iterate.\
+    /// Call [`World::regroup`] or [`World::regroup_set`] when it matters.
     pub fn build(self) -> Result<(ScheduledWorkload, WorkloadInfo), error::AddWorkload> {
+        let (workload, workload_info, _) = self.build_unprepared()?;
+
+        Ok((workload, workload_info))
+    }
+
+    /// Builds the workload like [`Workload::build`], with what
+    /// [`prepare_regroups`](prepare::prepare_regroups) needs to add regroups to it.
+    fn build_unprepared(
+        self,
+    ) -> Result<
+        (
+            ScheduledWorkload,
+            WorkloadInfo,
+            create_workload::Dependencies,
+        ),
+        error::AddWorkload,
+    > {
         let mut workload = ScheduledWorkload {
             name: self.name.clone(),
             systems: Vec::new(),
@@ -531,29 +614,32 @@ impl Workload {
             batches: Batches::default(),
         };
 
-        let workload_name = self.name.clone();
-        let mut default: Box<dyn Label> = Box::new("");
-
-        let mut workloads = ShipHashMap::new();
         #[cfg(feature = "scheduler-experiment")]
         let mut dag_registered_fallible = Vec::new();
-
-        let workload_info = create_workload::create_workload(
+        #[allow(unused_mut)]
+        let (mut batches, workload_info, dependencies) = create_workload(
             self,
             &mut workload.systems,
             &mut workload.system_names,
             &mut workload.system_generators,
             &mut workload.lookup_table,
             &mut workload.tracking_to_enable,
-            &mut workloads,
-            &mut default,
             #[cfg(feature = "scheduler-experiment")]
             &mut dag_registered_fallible,
         )?;
 
-        workload.batches = workloads.remove(&workload_name).unwrap();
+        #[cfg(feature = "scheduler-experiment")]
+        finish_registration(
+            &*workload.name,
+            &workload.system_names,
+            &dag_registered_fallible,
+            &mut batches,
+            &workload_info,
+        );
 
-        Ok((workload, workload_info))
+        workload.batches = batches;
+
+        Ok((workload, workload_info, dependencies))
     }
 
     /// Stop parallelism between systems before and after the barrier.
@@ -567,1540 +653,19 @@ impl Workload {
 fn check_uniques_in_systems(
     system: &WorkloadSystem,
     unique_name: &str,
-    storages: &ShipHashMap<StorageId, crate::storage::SBox>,
+    storages: &StorageMaps,
 ) -> Option<Result<(), error::UniquePresence>> {
     let WorkloadSystem {
         borrow_constraints, ..
     } = system;
 
     for type_info in borrow_constraints {
-        if type_info.name.starts_with(unique_name) && !storages.contains_key(&type_info.storage_id)
+        if type_info.name.starts_with(unique_name)
+            && storages.unique(&type_info.storage_id).is_none()
         {
             return Some(Err(error::UniquePresence::Unique(type_info.clone())));
         }
     }
 
     None
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::component::{Component, Unique};
-    use crate::{
-        scheduler::Batches, scheduler::SystemModificator, scheduler::WorkloadModificator,
-        AllStoragesViewMut, IntoWorkload, UniqueView, UniqueViewMut, View, ViewMut, World,
-    };
-
-    struct Usize(usize);
-    #[allow(unused)]
-    struct U32(u32);
-    #[allow(unused)]
-    struct U16(u16);
-
-    impl Component for Usize {
-        type Tracking = crate::track::Untracked;
-    }
-    impl Component for U32 {
-        type Tracking = crate::track::Untracked;
-    }
-    impl Component for U16 {
-        type Tracking = crate::track::Untracked;
-    }
-    impl Unique for Usize {}
-    impl Unique for U32 {}
-    impl Unique for U16 {}
-
-    #[test]
-    fn single_immutable() {
-        fn system1(_: View<'_, Usize>) {}
-
-        let world = World::new();
-
-        Workload::new("System1")
-            .with_system(system1)
-            .add_to_world(&world)
-            .unwrap();
-
-        let scheduler = world.scheduler.borrow_mut().unwrap();
-        let label: Box<dyn Label> = Box::new("System1");
-        assert_eq!(scheduler.systems.len(), 1);
-        assert_eq!(scheduler.workloads.len(), 1);
-        assert_eq!(
-            scheduler.workloads.get(&label),
-            Some(&Batches {
-                parallel: vec![(None, vec![0])],
-                parallel_run_if: Vec::new(),
-                sequential: vec![0],
-                sequential_run_if: Vec::new(),
-                workload_run_if: None,
-                systems_run_if: Vec::new(),
-                #[cfg(feature = "scheduler-experiment")]
-                dag: None,
-            })
-        );
-        assert_eq!(&scheduler.default, &label);
-    }
-
-    #[test]
-    fn single_mutable() {
-        fn system1(_: ViewMut<'_, Usize>) {}
-
-        let world = World::new();
-
-        Workload::new("System1")
-            .with_system(system1)
-            .add_to_world(&world)
-            .unwrap();
-
-        let scheduler = world.scheduler.borrow_mut().unwrap();
-        let label: Box<dyn Label> = Box::new("System1");
-        assert_eq!(scheduler.systems.len(), 1);
-        assert_eq!(scheduler.workloads.len(), 1);
-        assert_eq!(
-            scheduler.workloads.get(&label),
-            Some(&Batches {
-                parallel: vec![(None, vec![0])],
-                parallel_run_if: Vec::new(),
-                sequential: vec![0],
-                sequential_run_if: Vec::new(),
-                workload_run_if: None,
-                systems_run_if: Vec::new(),
-                #[cfg(feature = "scheduler-experiment")]
-                dag: None,
-            })
-        );
-        assert_eq!(&scheduler.default, &label);
-    }
-
-    #[test]
-    fn multiple_immutable() {
-        fn system1(_: View<'_, Usize>) {}
-        fn system2(_: View<'_, Usize>) {}
-
-        let world = World::new();
-
-        Workload::new("Systems")
-            .with_system(system1)
-            .with_system(system2.into_workload_system().unwrap())
-            .add_to_world(&world)
-            .unwrap();
-
-        let scheduler = world.scheduler.borrow_mut().unwrap();
-        let label: Box<dyn Label> = Box::new("Systems");
-        assert_eq!(scheduler.systems.len(), 2);
-        assert_eq!(scheduler.workloads.len(), 1);
-        assert_eq!(
-            scheduler.workloads.get(&label),
-            Some(&Batches {
-                parallel: vec![(None, vec![0, 1])],
-                parallel_run_if: Vec::new(),
-                sequential: vec![0, 1],
-                sequential_run_if: Vec::new(),
-                workload_run_if: None,
-                systems_run_if: Vec::new(),
-                #[cfg(feature = "scheduler-experiment")]
-                dag: None,
-            })
-        );
-        assert_eq!(&scheduler.default, &label);
-    }
-
-    #[test]
-    fn multiple_mutable() {
-        fn system1(_: ViewMut<'_, Usize>) {}
-        fn system2(_: ViewMut<'_, Usize>) {}
-
-        let world = World::new();
-
-        Workload::new("Systems")
-            .with_system(system1)
-            .with_system(system2)
-            .add_to_world(&world)
-            .unwrap();
-
-        let scheduler = world.scheduler.borrow_mut().unwrap();
-        let label: Box<dyn Label> = Box::new("Systems");
-        assert_eq!(scheduler.systems.len(), 2);
-        assert_eq!(scheduler.workloads.len(), 1);
-        assert_eq!(
-            scheduler.workloads.get(&label),
-            Some(&Batches {
-                parallel: vec![(None, vec![0]), (None, vec![1])],
-                parallel_run_if: Vec::new(),
-                sequential: vec![0, 1],
-                sequential_run_if: Vec::new(),
-                workload_run_if: None,
-                systems_run_if: Vec::new(),
-                #[cfg(feature = "scheduler-experiment")]
-                dag: None,
-            })
-        );
-        assert_eq!(&scheduler.default, &label);
-    }
-
-    #[test]
-    fn multiple_mixed() {
-        fn system1(_: ViewMut<'_, Usize>) {}
-        fn system2(_: View<'_, Usize>) {}
-
-        let world = World::new();
-
-        Workload::new("Systems")
-            .with_system(system1)
-            .with_system(system2)
-            .add_to_world(&world)
-            .unwrap();
-
-        let scheduler = world.scheduler.borrow_mut().unwrap();
-        let label: Box<dyn Label> = Box::new("Systems");
-        assert_eq!(scheduler.systems.len(), 2);
-        assert_eq!(scheduler.workloads.len(), 1);
-        assert_eq!(
-            scheduler.workloads.get(&label),
-            Some(&Batches {
-                parallel: vec![(None, vec![0]), (None, vec![1])],
-                parallel_run_if: Vec::new(),
-                sequential: vec![0, 1],
-                sequential_run_if: Vec::new(),
-                workload_run_if: None,
-                systems_run_if: Vec::new(),
-                #[cfg(feature = "scheduler-experiment")]
-                dag: None,
-            })
-        );
-        assert_eq!(&scheduler.default, &label);
-
-        let world = World::new();
-
-        Workload::new("Systems")
-            .with_system(system2)
-            .with_system(system1)
-            .add_to_world(&world)
-            .unwrap();
-
-        let scheduler = world.scheduler.borrow_mut().unwrap();
-        let label: Box<dyn Label> = Box::new("Systems");
-        assert_eq!(scheduler.systems.len(), 2);
-        assert_eq!(scheduler.workloads.len(), 1);
-        assert_eq!(
-            scheduler.workloads.get(&label),
-            Some(&Batches {
-                parallel: vec![(None, vec![0]), (None, vec![1])],
-                parallel_run_if: Vec::new(),
-                sequential: vec![0, 1],
-                sequential_run_if: Vec::new(),
-                workload_run_if: None,
-                systems_run_if: Vec::new(),
-                #[cfg(feature = "scheduler-experiment")]
-                dag: None,
-            })
-        );
-        assert_eq!(&scheduler.default, &label);
-    }
-
-    #[test]
-    fn append_optimizes_batches() {
-        fn system_a1(_: View<'_, Usize>, _: ViewMut<'_, U32>) {}
-        fn system_a2(_: View<'_, Usize>, _: ViewMut<'_, U32>) {}
-        fn system_b1(_: View<'_, Usize>) {}
-
-        let world = World::new();
-
-        let mut group_a = Workload::new("Group A")
-            .with_system(system_a1)
-            .with_system(system_a2);
-
-        let mut group_b = Workload::new("Group B").with_system(system_b1);
-
-        Workload::new("Combined")
-            .append(&mut group_a)
-            .append(&mut group_b)
-            .add_to_world(&world)
-            .unwrap();
-
-        let scheduler = world.scheduler.borrow_mut().unwrap();
-        let label: Box<dyn Label> = Box::new("Combined");
-        assert_eq!(scheduler.systems.len(), 3);
-        assert_eq!(scheduler.workloads.len(), 1);
-        assert_eq!(
-            scheduler.workloads.get(&label),
-            Some(&Batches {
-                parallel: vec![(None, vec![0]), (None, vec![1, 2])],
-                parallel_run_if: Vec::new(),
-                sequential: vec![0, 1, 2],
-                sequential_run_if: Vec::new(),
-                workload_run_if: None,
-                systems_run_if: Vec::new(),
-                #[cfg(feature = "scheduler-experiment")]
-                dag: None,
-            })
-        );
-        assert_eq!(&scheduler.default, &label);
-    }
-
-    #[test]
-    fn all_storages() {
-        fn system1(_: View<'_, Usize>) {}
-        fn system2(_: AllStoragesViewMut<'_>) {}
-
-        let world = World::new();
-
-        Workload::new("Systems")
-            .with_system(system2)
-            .add_to_world(&world)
-            .unwrap();
-
-        let scheduler = world.scheduler.borrow_mut().unwrap();
-        let label: Box<dyn Label> = Box::new("Systems");
-        assert_eq!(scheduler.systems.len(), 1);
-        assert_eq!(scheduler.workloads.len(), 1);
-        assert_eq!(
-            scheduler.workloads.get(&label),
-            Some(&Batches {
-                parallel: vec![(Some(0), Vec::new())],
-                parallel_run_if: Vec::new(),
-                sequential: vec![0],
-                sequential_run_if: Vec::new(),
-                workload_run_if: None,
-                systems_run_if: Vec::new(),
-                #[cfg(feature = "scheduler-experiment")]
-                dag: None,
-            })
-        );
-        assert_eq!(&scheduler.default, &label);
-
-        let world = World::new();
-
-        Workload::new("Systems")
-            .with_system(system2)
-            .with_system(system2)
-            .add_to_world(&world)
-            .unwrap();
-
-        let scheduler = world.scheduler.borrow_mut().unwrap();
-        assert_eq!(scheduler.systems.len(), 1);
-        assert_eq!(scheduler.workloads.len(), 1);
-        assert_eq!(
-            scheduler.workloads.get(&label),
-            Some(&Batches {
-                parallel: vec![(Some(0), Vec::new()), (Some(0), Vec::new())],
-                parallel_run_if: Vec::new(),
-                sequential: vec![0, 0],
-                sequential_run_if: Vec::new(),
-                workload_run_if: None,
-                systems_run_if: Vec::new(),
-                #[cfg(feature = "scheduler-experiment")]
-                dag: None,
-            })
-        );
-        assert_eq!(&scheduler.default, &label);
-
-        let world = World::new();
-
-        Workload::new("Systems")
-            .with_system(system1)
-            .with_system(system2)
-            .add_to_world(&world)
-            .unwrap();
-
-        let scheduler = world.scheduler.borrow_mut().unwrap();
-        let label: Box<dyn Label> = Box::new("Systems");
-        assert_eq!(scheduler.systems.len(), 2);
-        assert_eq!(scheduler.workloads.len(), 1);
-        assert_eq!(
-            scheduler.workloads.get(&label),
-            Some(&Batches {
-                parallel: vec![(None, vec![0]), (Some(1), Vec::new())],
-                parallel_run_if: Vec::new(),
-                sequential: vec![0, 1],
-                sequential_run_if: Vec::new(),
-                workload_run_if: None,
-                systems_run_if: Vec::new(),
-                #[cfg(feature = "scheduler-experiment")]
-                dag: None,
-            })
-        );
-        assert_eq!(&scheduler.default, &label);
-
-        let world = World::new();
-
-        Workload::new("Systems")
-            .with_system(system2)
-            .with_system(system1)
-            .add_to_world(&world)
-            .unwrap();
-
-        let scheduler = world.scheduler.borrow_mut().unwrap();
-        assert_eq!(scheduler.systems.len(), 2);
-        assert_eq!(scheduler.workloads.len(), 1);
-        assert_eq!(
-            scheduler.workloads.get(&label),
-            Some(&Batches {
-                parallel: vec![(Some(0), Vec::new()), (None, vec![1])],
-                parallel_run_if: Vec::new(),
-                sequential: vec![0, 1],
-                sequential_run_if: Vec::new(),
-                workload_run_if: None,
-                systems_run_if: Vec::new(),
-                #[cfg(feature = "scheduler-experiment")]
-                dag: None,
-            })
-        );
-        assert_eq!(&scheduler.default, &label);
-    }
-
-    #[cfg(feature = "thread_local")]
-    #[test]
-    fn non_send() {
-        use crate::borrow::NonSend;
-
-        #[allow(unused)]
-        struct NotSend(*const ());
-        unsafe impl Sync for NotSend {}
-        impl Component for NotSend {
-            type Tracking = crate::track::Untracked;
-        }
-
-        fn sys1(_: NonSend<View<'_, NotSend>>) {}
-        fn sys2(_: NonSend<ViewMut<'_, NotSend>>) {}
-        fn sys3(_: View<'_, Usize>) {}
-        fn sys4(_: ViewMut<'_, Usize>) {}
-
-        let world = World::new();
-
-        Workload::new("Test")
-            .with_system(sys1)
-            .with_system(sys1)
-            .add_to_world(&world)
-            .unwrap();
-
-        let scheduler = world.scheduler.borrow_mut().unwrap();
-        let label: Box<dyn Label> = Box::new("Test");
-        assert_eq!(scheduler.systems.len(), 1);
-        assert_eq!(scheduler.workloads.len(), 1);
-        assert_eq!(
-            scheduler.workloads.get(&label),
-            Some(&Batches {
-                parallel: vec![(None, vec![0, 0])],
-                parallel_run_if: Vec::new(),
-                sequential: vec![0, 0],
-                sequential_run_if: Vec::new(),
-                workload_run_if: None,
-                systems_run_if: Vec::new(),
-                #[cfg(feature = "scheduler-experiment")]
-                dag: None,
-            })
-        );
-        assert_eq!(&scheduler.default, &label);
-        assert!(
-            scheduler.workloads_info[&label].batches_info[0].systems.1[0]
-                .conflict
-                .is_none()
-        );
-
-        let world = World::new();
-
-        Workload::new("Test")
-            .with_system(sys1)
-            .with_system(sys2)
-            .add_to_world(&world)
-            .unwrap();
-
-        let scheduler = world.scheduler.borrow_mut().unwrap();
-        assert_eq!(scheduler.systems.len(), 2);
-        assert_eq!(scheduler.workloads.len(), 1);
-        assert_eq!(
-            scheduler.workloads.get(&label),
-            Some(&Batches {
-                parallel: vec![(None, vec![0]), (Some(1), Vec::new())],
-                parallel_run_if: Vec::new(),
-                sequential: vec![0, 1],
-                sequential_run_if: Vec::new(),
-                workload_run_if: None,
-                systems_run_if: Vec::new(),
-                #[cfg(feature = "scheduler-experiment")]
-                dag: None,
-            })
-        );
-        assert_eq!(&scheduler.default, &label);
-
-        let world = World::new();
-
-        Workload::new("Test")
-            .with_system(sys2)
-            .with_system(sys1)
-            .add_to_world(&world)
-            .unwrap();
-
-        let scheduler = world.scheduler.borrow_mut().unwrap();
-        assert_eq!(scheduler.systems.len(), 2);
-        assert_eq!(scheduler.workloads.len(), 1);
-        assert_eq!(
-            scheduler.workloads.get(&label),
-            Some(&Batches {
-                parallel: vec![(Some(0), Vec::new()), (None, vec![1])],
-                parallel_run_if: Vec::new(),
-                sequential: vec![0, 1],
-                sequential_run_if: Vec::new(),
-                workload_run_if: None,
-                systems_run_if: Vec::new(),
-                #[cfg(feature = "scheduler-experiment")]
-                dag: None,
-            })
-        );
-        assert_eq!(&scheduler.default, &label);
-
-        let world = World::new();
-
-        Workload::new("Test")
-            .with_system(sys1)
-            .with_system(sys3)
-            .add_to_world(&world)
-            .unwrap();
-
-        let scheduler = world.scheduler.borrow_mut().unwrap();
-        assert_eq!(scheduler.systems.len(), 2);
-        assert_eq!(scheduler.workloads.len(), 1);
-        assert_eq!(
-            scheduler.workloads.get(&label),
-            Some(&Batches {
-                parallel: vec![(None, vec![0, 1])],
-                parallel_run_if: Vec::new(),
-                sequential: vec![0, 1],
-                sequential_run_if: Vec::new(),
-                workload_run_if: None,
-                systems_run_if: Vec::new(),
-                #[cfg(feature = "scheduler-experiment")]
-                dag: None,
-            })
-        );
-        assert_eq!(&scheduler.default, &label);
-        assert!(
-            scheduler.workloads_info[&label].batches_info[0].systems.1[0]
-                .conflict
-                .is_none()
-        );
-
-        let world = World::new();
-
-        Workload::new("Test")
-            .with_system(sys1)
-            .with_system(sys4)
-            .add_to_world(&world)
-            .unwrap();
-
-        let scheduler = world.scheduler.borrow_mut().unwrap();
-        assert_eq!(scheduler.systems.len(), 2);
-        assert_eq!(scheduler.workloads.len(), 1);
-        assert_eq!(
-            scheduler.workloads.get(&label),
-            Some(&Batches {
-                parallel: vec![(None, vec![0, 1])],
-                parallel_run_if: Vec::new(),
-                sequential: vec![0, 1],
-                sequential_run_if: Vec::new(),
-                workload_run_if: None,
-                systems_run_if: Vec::new(),
-                #[cfg(feature = "scheduler-experiment")]
-                dag: None,
-            })
-        );
-        assert_eq!(&scheduler.default, &label);
-    }
-
-    #[test]
-    fn unique_and_non_unique() {
-        fn system1(_: ViewMut<'_, Usize>) {}
-        fn system2(_: UniqueViewMut<'_, Usize>) {}
-
-        let world = World::new();
-
-        Workload::new("Systems")
-            .with_system(system1)
-            .with_system(system2)
-            .add_to_world(&world)
-            .unwrap();
-
-        let scheduler = world.scheduler.borrow_mut().unwrap();
-        let label: Box<dyn Label> = Box::new("Systems");
-        assert_eq!(scheduler.systems.len(), 2);
-        assert_eq!(scheduler.workloads.len(), 1);
-        assert_eq!(
-            scheduler.workloads.get(&label),
-            Some(&Batches {
-                parallel: vec![(None, vec![0, 1])],
-                parallel_run_if: Vec::new(),
-                sequential: vec![0, 1],
-                sequential_run_if: Vec::new(),
-                workload_run_if: None,
-                systems_run_if: Vec::new(),
-                #[cfg(feature = "scheduler-experiment")]
-                dag: None,
-            })
-        );
-        assert_eq!(&scheduler.default, &label);
-    }
-
-    #[test]
-    fn empty_workload() {
-        let world = World::new();
-
-        Workload::new("Systems").add_to_world(&world).unwrap();
-
-        let scheduler = world.scheduler.borrow_mut().unwrap();
-        let label: Box<dyn Label> = Box::new("Systems");
-        assert_eq!(scheduler.systems.len(), 0);
-        assert_eq!(scheduler.workloads.len(), 1);
-        assert_eq!(
-            scheduler.workloads.get(&label),
-            Some(&Batches {
-                parallel: vec![],
-                parallel_run_if: Vec::new(),
-                sequential: vec![],
-                sequential_run_if: Vec::new(),
-                workload_run_if: None,
-                systems_run_if: Vec::new(),
-                #[cfg(feature = "scheduler-experiment")]
-                dag: None,
-            })
-        );
-        assert_eq!(&scheduler.default, &label);
-    }
-
-    #[test]
-    fn append_ensures_multiple_batches_can_be_optimized_over() {
-        fn sys_a1(_: ViewMut<'_, Usize>, _: ViewMut<'_, U32>) {}
-        fn sys_a2(_: View<'_, Usize>, _: ViewMut<'_, U32>) {}
-        fn sys_b1(_: View<'_, Usize>) {}
-        fn sys_c1(_: View<'_, U16>) {}
-
-        let world = World::new();
-
-        let mut group_a = Workload::new("Group A")
-            .with_system(sys_a1)
-            .with_system(sys_a2);
-        let mut group_b = Workload::new("Group B").with_system(sys_b1);
-        let mut group_c = Workload::new("Group C").with_system(sys_c1);
-
-        Workload::new("Combined")
-            .append(&mut group_a)
-            .append(&mut group_b)
-            .append(&mut group_c)
-            .add_to_world(&world)
-            .unwrap();
-
-        let scheduler = world.scheduler.borrow_mut().unwrap();
-        let label: Box<dyn Label> = Box::new("Combined");
-        assert_eq!(scheduler.systems.len(), 4);
-        assert_eq!(scheduler.workloads.len(), 1);
-        assert_eq!(
-            scheduler.workloads.get(&label),
-            Some(&Batches {
-                parallel: vec![(None, vec![0]), (None, vec![1, 2, 3])],
-                parallel_run_if: Vec::new(),
-                sequential: vec![0, 1, 2, 3],
-                sequential_run_if: Vec::new(),
-                workload_run_if: None,
-                systems_run_if: Vec::new(),
-                #[cfg(feature = "scheduler-experiment")]
-                dag: None,
-            })
-        );
-        assert_eq!(&scheduler.default, &label);
-    }
-
-    #[test]
-    fn skip_if_missing_storage() {
-        let world = World::new();
-
-        Workload::new("test")
-            .skip_if_storage_empty::<Usize>()
-            .with_system(|| panic!())
-            .build()
-            .unwrap()
-            .0
-            .run_with_world(&world)
-            .unwrap();
-
-        Workload::new("test")
-            .skip_if_storage_empty::<Usize>()
-            .with_system(|| panic!())
-            .add_to_world(&world)
-            .unwrap();
-
-        world.run_default_workload().unwrap();
-    }
-
-    #[test]
-    fn system_skip_if_missing_storage() {
-        let world = World::new();
-
-        Workload::new("test")
-            .with_system((|| -> () { panic!() }).skip_if_storage_empty::<Usize>())
-            .build()
-            .unwrap()
-            .0
-            .run_with_world(&world)
-            .unwrap();
-
-        Workload::new("test")
-            .with_system((|| -> () { panic!() }).skip_if_storage_empty::<Usize>())
-            .add_to_world(&world)
-            .unwrap();
-
-        world.run_default_workload().unwrap();
-    }
-
-    #[test]
-    fn skip_if_empty_storage() {
-        let mut world = World::new();
-
-        let eid = world.add_entity((Usize(0),));
-        world.remove::<(Usize,)>(eid);
-
-        Workload::new("test")
-            .skip_if_storage_empty::<Usize>()
-            .with_system(|| -> () { panic!() })
-            .build()
-            .unwrap()
-            .0
-            .run_with_world(&world)
-            .unwrap();
-
-        Workload::new("test")
-            .skip_if_storage_empty::<Usize>()
-            .with_system(|| -> () { panic!() })
-            .add_to_world(&world)
-            .unwrap();
-
-        world.run_default_workload().unwrap();
-    }
-
-    #[test]
-    fn system_skip_if_empty_storage() {
-        let mut world = World::new();
-
-        let eid = world.add_entity((Usize(0),));
-        world.remove::<(Usize,)>(eid);
-
-        Workload::new("test")
-            .with_system((|| -> () { panic!() }).skip_if_storage_empty::<Usize>())
-            .build()
-            .unwrap()
-            .0
-            .run_with_world(&world)
-            .unwrap();
-
-        Workload::new("test")
-            .with_system((|| -> () { panic!() }).skip_if_storage_empty::<Usize>())
-            .add_to_world(&world)
-            .unwrap();
-
-        world.run_default_workload().unwrap();
-    }
-
-    #[test]
-    fn workload_merge_skip_if() {
-        let world = World::new();
-
-        world.add_unique(Usize(0));
-
-        world.add_workload(|| {
-            (
-                (|| -> () { panic!() })
-                    .into_workload()
-                    .skip_if_missing_unique::<U32>(),
-                (|mut u: UniqueViewMut<'_, Usize>| u.0 += 1).into_workload(),
-            )
-        });
-
-        world.run_default_workload().unwrap();
-
-        assert_eq!(world.borrow::<UniqueView<'_, Usize>>().unwrap().0, 1);
-    }
-
-    #[test]
-    fn before_after() {
-        fn a() {}
-        fn b() {}
-        fn c() {}
-        fn d() {}
-
-        let (workload, _) = Workload::new("")
-            .with_system(d.after_all(b))
-            .with_system(c.after_all(b))
-            .with_system(b.after_all(a))
-            .with_system(a)
-            .build()
-            .unwrap();
-
-        let batches = &workload.batches;
-        assert_eq!(batches.sequential, &[3, 2, 0, 1]);
-        assert_eq!(
-            batches.parallel,
-            &[(None, vec![3]), (None, vec![2]), (None, vec![0, 1])]
-        );
-
-        let (workload, _) = Workload::new("")
-            .with_system(a)
-            .with_system(b.after_all(a))
-            .with_system(c.after_all(b))
-            .build()
-            .unwrap();
-
-        let batches = &workload.batches;
-        assert_eq!(batches.sequential, &[0, 1, 2]);
-        assert_eq!(
-            batches.parallel,
-            &[(None, vec![0]), (None, vec![1]), (None, vec![2])]
-        );
-
-        let (workload, _) = Workload::new("")
-            .with_system(b.after_all(a))
-            .with_system(a)
-            .with_system(c.after_all(b))
-            .build()
-            .unwrap();
-
-        let batches = &workload.batches;
-        assert_eq!(batches.sequential, &[1, 0, 2]);
-        assert_eq!(
-            batches.parallel,
-            &[(None, vec![1]), (None, vec![0]), (None, vec![2])]
-        );
-    }
-
-    #[test]
-    fn before_after_no_anchor() {
-        fn a() {}
-        fn b() {}
-
-        let (workload, _) = Workload::new("")
-            .with_system(a.before_all(b))
-            .with_system(b.after_all(a))
-            .build()
-            .unwrap();
-
-        let batches = &workload.batches;
-        assert_eq!(batches.sequential, &[0, 1]);
-        assert_eq!(batches.parallel, &[(None, vec![0]), (None, vec![1])]);
-
-        let (workload, _) = Workload::new("")
-            .with_system(b.after_all(a))
-            .with_system(a.before_all(b))
-            .build()
-            .unwrap();
-
-        let batches = &workload.batches;
-        assert_eq!(batches.sequential, &[1, 0]);
-        assert_eq!(batches.parallel, &[(None, vec![1]), (None, vec![0])]);
-    }
-
-    #[test]
-    fn before_after_missing_system() {
-        fn a() {}
-        fn b() {}
-
-        let (workload, _) = Workload::new("")
-            .with_system(a.before_all(b))
-            .build()
-            .unwrap();
-
-        let batches = &workload.batches;
-        assert_eq!(batches.sequential, &[0]);
-        assert_eq!(batches.parallel, &[(None, vec![0])]);
-    }
-
-    #[test]
-    fn before_after_absent_system() {
-        fn a() {}
-        fn b() {}
-        fn c() {}
-
-        let (workload, _) = Workload::new("")
-            .with_system(a)
-            .with_system(c.after_all(b))
-            .build()
-            .unwrap();
-
-        // HashMap makes this error random between a and c
-        let batches = &workload.batches;
-        assert!(batches.sequential == [0, 1] || batches.sequential == [1, 0]);
-        assert_eq!(batches.parallel, &[(None, vec![0, 1])]);
-    }
-
-    #[test]
-    fn before_after_system_label() {
-        fn a() {}
-        fn b() {}
-        fn c() {}
-
-        let (workload, _) = Workload::new("")
-            .with_system(a.tag("a"))
-            .with_system(
-                b.tag("b")
-                    .before_all("a")
-                    .require_after("a")
-                    .require_before("c"),
-            )
-            .with_system(c.tag("c").before_all("b").require_after("b"))
-            .build()
-            .unwrap();
-
-        let batches = &workload.batches;
-        assert_eq!(batches.sequential, &[2, 1, 0]);
-        assert_eq!(
-            batches.parallel,
-            &[(None, vec![2]), (None, vec![1]), (None, vec![0])]
-        );
-
-        let (workload, _) = Workload::new("")
-            .with_system(c.tag("c").after_all("b"))
-            .with_system(b.tag("b").after_all("a"))
-            .with_system(a.tag("a"))
-            .build()
-            .unwrap();
-
-        let batches = &workload.batches;
-        assert_eq!(batches.sequential, &[2, 1, 0]);
-        assert_eq!(
-            batches.parallel,
-            &[(None, vec![2]), (None, vec![1]), (None, vec![0])]
-        );
-    }
-
-    #[test]
-    fn after_all_single_system() {
-        let (workload, _) = Workload::new("")
-            .with_system((|| {}).tag("this"))
-            .with_system((|_: AllStoragesViewMut<'_>| {}).after_all("this"))
-            .with_system((|_: View<'_, Usize>| {}).after_all("this"))
-            .build()
-            .unwrap();
-
-        let batches = &workload.batches;
-
-        assert_eq!(
-            batches,
-            &Batches {
-                parallel: vec![(None, vec![0]), (Some(1), vec![]), (None, vec![2])],
-                parallel_run_if: Vec::new(),
-                sequential: vec![0, 1, 2],
-                sequential_run_if: Vec::new(),
-                workload_run_if: None,
-                systems_run_if: Vec::new(),
-                #[cfg(feature = "scheduler-experiment")]
-                dag: None,
-            }
-        );
-    }
-
-    #[test]
-    fn sequential_workload() {
-        fn sys0() {}
-        fn sys1() {}
-        fn sys2() {}
-        fn workload1() -> Workload {
-            (sys0, sys1, sys2).into_sequential_workload()
-        }
-
-        let (workload, _) = workload1().rename("").build().unwrap();
-
-        let batches = &workload.batches;
-        assert_eq!(batches.sequential, &[0, 1, 2]);
-        assert_eq!(
-            batches.parallel,
-            &[(None, vec![0]), (None, vec![1]), (None, vec![2])]
-        );
-    }
-
-    #[test]
-    fn before_after_borrow_conflict() {
-        fn sys0(_: View<'_, U32>) {}
-        fn sys1(_: AllStoragesViewMut<'_>) {}
-
-        let (workload, _) = (sys0, sys1.before_all("not present"), sys0)
-            .into_workload()
-            .rename("")
-            .build()
-            .unwrap();
-
-        let batches = &workload.batches;
-        assert_eq!(
-            batches.parallel,
-            &[(None, vec![0]), (Some(1), Vec::new()), (None, vec![0])]
-        );
-        assert_eq!(batches.sequential, &[0, 1, 0]);
-    }
-
-    #[test]
-    fn contains() {
-        fn type_name_of<T: 'static>(_: &T) -> &'static str {
-            type_name::<T>()
-        }
-        fn type_id_of<T: 'static>(_: &T) -> TypeId {
-            TypeId::of::<T>()
-        }
-
-        fn w() -> Workload {
-            (|| {}).into_workload()
-        }
-        let world = World::builder()
-            .with_custom_lock::<parking_lot::RawRwLock>()
-            .build();
-        world.add_workload(w);
-        assert!(world.contains_workload(WorkloadLabel {
-            type_id: type_id_of(&w),
-            name: type_name_of(&w).as_label()
-        }));
-        assert!(world.contains_workload(w));
-        world.run_workload(w).unwrap();
-    }
-
-    #[test]
-    fn barrier() {
-        let workload = Workload::new("")
-            .with_system(|| {})
-            .with_system(|| {})
-            .with_barrier()
-            .with_system(|| {})
-            .with_system(|| {})
-            .with_barrier()
-            .with_system(|| {})
-            .with_system(|| {})
-            .build()
-            .unwrap();
-
-        assert_eq!(workload.1.batches_info.len(), 3);
-
-        let workload = Workload::new("")
-            .with_barrier()
-            .with_system(|| {})
-            .with_system(|| {})
-            .build()
-            .unwrap();
-
-        assert_eq!(workload.1.batches_info.len(), 1);
-
-        let workload = Workload::new("")
-            .with_system(|| {})
-            .with_system(|| {})
-            .with_barrier()
-            .build()
-            .unwrap();
-
-        assert_eq!(workload.1.batches_info.len(), 1);
-    }
-
-    #[test]
-    fn with_system_return_type() {
-        Workload::new("").with_system(|| 0usize).build().unwrap();
-    }
-
-    #[test]
-    fn try_system_run_if() {
-        fn try_sys() -> Result<(), error::MissingComponent> {
-            Err(error::MissingComponent {
-                id: crate::EntityId::dead(),
-                name: "",
-            })
-        }
-
-        let (workload, _) = Workload::new("")
-            .with_try_system(try_sys.into_workload_try_system().unwrap().run_if(|| true))
-            .build()
-            .unwrap();
-
-        let world = World::new();
-
-        assert!(workload
-            .run_with_world(&world)
-            .err()
-            .unwrap()
-            .custom_error()
-            .is_some());
-    }
-
-    /// Checks that cycles created using `after_all` are properly detected.
-    #[test]
-    fn cycle_detection_after_all() {
-        fn sys_a() {}
-        fn sys_b() {}
-        fn workload_cycle() -> Workload {
-            (sys_a.after_all(sys_b), sys_b.after_all(sys_a)).into_workload()
-        }
-
-        let result = workload_cycle().build();
-
-        assert!(matches!(
-            result,
-            Err(error::AddWorkload::ImpossibleRequirements(
-                error::ImpossibleRequirements::Cycle(_)
-            ))
-        ));
-    }
-
-    /// Checks that cycles created using `before_all` and `after_all` are properly detected.
-    ///
-    /// This also affects implicit ordering.\
-    /// Here `sys_b` is implicitely after `sys_a` and `sys_c` tries to be both before and after them.
-    #[test]
-    fn cycle_detection_before_after_all() {
-        fn sys_a() {}
-        fn sys_b() {}
-        fn sys_c() {}
-        fn workload_cycle() -> Workload {
-            (sys_a, sys_b, sys_c.before_all(sys_a).after_all(sys_b)).into_workload()
-        }
-
-        let result = workload_cycle().build();
-
-        assert!(matches!(
-            result,
-            Err(error::AddWorkload::ImpossibleRequirements(_))
-        ));
-    }
-
-    /// Checks that `before_all` cannot override `with_barrier`.
-    #[test]
-    fn cycle_barrier() {
-        fn sys_a() {}
-        fn sys_b() {}
-
-        let result = Workload::new("")
-            .with_system(sys_a)
-            .with_barrier()
-            .with_system(sys_b.before_all(sys_a))
-            .build();
-
-        assert!(matches!(
-            result,
-            Err(error::AddWorkload::ImpossibleRequirements(
-                error::ImpossibleRequirements::Cycle(_)
-            ))
-        ));
-    }
-
-    /// Checks that `before_all`, `after_all`, `with_barrier` and implicit ordering all play well together.
-    #[test]
-    fn complex_ordering() {
-        fn sys_a() {}
-        fn sys_b() {}
-        fn sys_c() {}
-        fn sys_d() {}
-
-        let (workload, _) = Workload::new("")
-            .with_system(sys_a)
-            .with_system(sys_b)
-            .with_system(sys_c.after_all(sys_a).before_all(sys_b))
-            .with_barrier()
-            .with_system(sys_d)
-            .build()
-            .unwrap();
-
-        let batches = &workload.batches;
-        assert_eq!(
-            batches.parallel,
-            &[
-                (None, vec![0]),
-                (None, vec![2]),
-                (None, vec![1]),
-                (None, vec![3])
-            ]
-        );
-        assert_eq!(batches.sequential, &[0, 2, 1, 3]);
-    }
-
-    #[test]
-    fn require_in_workload() {
-        fn sys_a() {}
-        fn sys_b() {}
-        fn sys_c() {}
-
-        Workload::new("")
-            .with_system(sys_a.require_in_workload(sys_b))
-            .with_system(sys_b)
-            .build()
-            .unwrap();
-        Workload::new("")
-            .with_system(sys_a)
-            .with_system(sys_b.require_in_workload(sys_a))
-            .build()
-            .unwrap();
-
-        let result = Workload::new("")
-            .with_system(sys_c)
-            .with_system(sys_a.require_in_workload(sys_b))
-            .with_system(sys_c)
-            .build();
-
-        assert_eq!(
-            result.err(),
-            Some(error::AddWorkload::MissingInWorkload(
-                sys_a.as_label(),
-                vec![sys_b.as_label()]
-            ))
-        );
-    }
-
-    #[test]
-    fn require_before() {
-        fn sys_a() {}
-        fn sys_b() {}
-
-        Workload::new("")
-            .with_system(sys_a.after_all(sys_b).require_before(sys_b))
-            .with_system(sys_b)
-            .build()
-            .unwrap();
-        Workload::new("")
-            .with_system(sys_a)
-            .with_system(sys_b.after_all(sys_a).require_before(sys_a))
-            .build()
-            .unwrap();
-        Workload::new("")
-            .with_system(sys_a)
-            .with_barrier()
-            .with_system(sys_b.require_before(sys_a))
-            .build()
-            .unwrap();
-        Workload::new("")
-            .with_system((|_: AllStoragesViewMut<'_>| {}).tag("sys_a"))
-            .with_system((|_: AllStoragesViewMut<'_>| {}).require_before("sys_a"))
-            .build()
-            .unwrap();
-
-        // These systems don't conflict and would run in parallel
-        let result = Workload::new("")
-            .with_system(sys_a)
-            .with_system(sys_b.require_before(sys_a))
-            .build();
-
-        assert_eq!(
-            result.err(),
-            Some(error::AddWorkload::MissingBefore(
-                sys_b.as_label(),
-                vec![sys_a.as_label()]
-            ))
-        );
-    }
-
-    #[test]
-    fn require_after() {
-        fn sys_a() {}
-        fn sys_b() {}
-
-        Workload::new("")
-            .with_system(sys_a)
-            .with_system(sys_b.before_all(sys_a).require_after(sys_a))
-            .build()
-            .unwrap();
-        Workload::new("")
-            .with_system(sys_a.before_all(sys_b).require_after(sys_b))
-            .with_system(sys_b)
-            .build()
-            .unwrap();
-        Workload::new("")
-            .with_system(sys_a.require_after(sys_b))
-            .with_barrier()
-            .with_system(sys_b)
-            .build()
-            .unwrap();
-        Workload::new("")
-            .with_system((|_: AllStoragesViewMut<'_>| {}).require_after("sys_a"))
-            .with_system((|_: AllStoragesViewMut<'_>| {}).tag("sys_a"))
-            .build()
-            .unwrap();
-
-        // These systems don't conflict and would run in parallel
-        let result = Workload::new("")
-            .with_system(sys_a.require_after(sys_b))
-            .with_system(sys_b)
-            .build();
-
-        assert_eq!(
-            result.err(),
-            Some(error::AddWorkload::MissingAfter(
-                sys_a.as_label(),
-                vec![sys_b.as_label()]
-            ))
-        );
-    }
-}
-
-/// Tests related to `WorkloadInfo` and not system ordering.
-#[cfg(test)]
-mod info_tests {
-    use super::*;
-    use crate::borrow::Mutability;
-    use crate::scheduler::info::{BeforeAfterConstraint, Conflict, SystemInfo};
-    use crate::scheduler::system_modificator::SystemModificator;
-    use crate::sparse_set::SparseSet;
-    use crate::views::{View, ViewMut};
-    use alloc::format;
-    use std::string::ToString;
-
-    #[allow(unused)]
-    struct Usize(usize);
-    impl Component for Usize {
-        type Tracking = crate::track::Untracked;
-    }
-    #[allow(unused)]
-    struct U32(u32);
-    impl Component for U32 {
-        type Tracking = crate::track::Untracked;
-    }
-
-    #[test]
-    fn before_all() {
-        fn sys_a() {}
-        fn sys_b() {}
-
-        let (_, info) = Workload::new("workload 1")
-            .with_system(sys_a)
-            .with_system(sys_b.before_all(sys_a))
-            .build()
-            .unwrap();
-
-        assert_eq!(info.name, "workload 1");
-        assert_eq!(info.batches_info.len(), 2);
-
-        let mut systems0 = info.batches_info[0].systems();
-        assert_eq!(
-            systems0.next(),
-            Some(&SystemInfo {
-                name: "System(shipyard::scheduler::workload::info_tests::before_all::sys_b)"
-                    .to_string(),
-                borrow: vec![],
-                conflict: None,
-                after: vec![],
-                after_all: vec![],
-                before_all: vec![BeforeAfterConstraint {
-                    other_system: 0,
-                    constraint:
-                        "System(shipyard::scheduler::workload::info_tests::before_all::sys_a)"
-                            .to_string()
-                }],
-                unique_id: 1
-            })
-        );
-        assert_eq!(systems0.next(), None);
-
-        let mut systems1 = info.batches_info[1].systems();
-        assert_eq!(
-            systems1.next(),
-            Some(&SystemInfo {
-                name: "System(shipyard::scheduler::workload::info_tests::before_all::sys_a)"
-                    .to_string(),
-                borrow: vec![],
-                conflict: None,
-                after: vec![1],
-                after_all: vec![],
-                before_all: vec![],
-                unique_id: 0
-            })
-        );
-        assert_eq!(systems1.next(), None);
-    }
-
-    #[test]
-    fn after_all() {
-        fn sys_a() {}
-        fn sys_b() {}
-
-        let (_, info) = Workload::new("workload 1")
-            .with_system(sys_a.after_all(sys_b))
-            .with_system(sys_b)
-            .build()
-            .unwrap();
-
-        assert_eq!(info.name, "workload 1");
-        assert_eq!(info.batches_info.len(), 2);
-
-        let mut systems0 = info.batches_info[0].systems();
-        assert_eq!(
-            systems0.next(),
-            Some(&SystemInfo {
-                name: "System(shipyard::scheduler::workload::info_tests::after_all::sys_b)"
-                    .to_string(),
-                borrow: vec![],
-                conflict: None,
-                after: vec![],
-                after_all: vec![],
-                before_all: vec![],
-                unique_id: 1
-            })
-        );
-        assert_eq!(systems0.next(), None);
-
-        let mut systems1 = info.batches_info[1].systems();
-        assert_eq!(
-            systems1.next(),
-            Some(&SystemInfo {
-                name: "System(shipyard::scheduler::workload::info_tests::after_all::sys_a)"
-                    .to_string(),
-                borrow: vec![],
-                conflict: None,
-                after: vec![1],
-                after_all: vec![BeforeAfterConstraint {
-                    other_system: 1,
-                    constraint:
-                        "System(shipyard::scheduler::workload::info_tests::after_all::sys_b)"
-                            .to_string()
-                }],
-                before_all: vec![],
-                unique_id: 0
-            })
-        );
-        assert_eq!(systems1.next(), None);
-    }
-
-    #[test]
-    fn borrow() {
-        fn sys_a(_: View<'_, Usize>, _: View<'_, U32>) {}
-        fn sys_b(_: ViewMut<'_, Usize>, _: View<'_, U32>) {}
-        fn sys_c(_: View<'_, Usize>) {}
-        fn sys_d(_: View<'_, Usize>) {}
-
-        let (_, info) = Workload::new("")
-            .with_system(sys_a)
-            .with_system(sys_b)
-            .with_system(sys_c)
-            .with_system(sys_d)
-            .build()
-            .unwrap();
-
-        let mut systems0 = info.batches_info[0].systems();
-        assert_eq!(
-            systems0.next(),
-            Some(&SystemInfo {
-                name: format!("{:?}", sys_a.as_label()),
-                borrow: vec![
-                    TypeInfo {
-                        name: type_name::<SparseSet::<Usize>>().into(),
-                        mutability: Mutability::Shared,
-                        storage_id: StorageId::of::<SparseSet<Usize>>(),
-                        thread_safe: true
-                    },
-                    TypeInfo {
-                        name: type_name::<SparseSet::<U32>>().into(),
-                        mutability: Mutability::Shared,
-                        storage_id: StorageId::of::<SparseSet<U32>>(),
-                        thread_safe: true
-                    }
-                ],
-                conflict: None,
-                after: vec![],
-                after_all: vec![],
-                before_all: vec![],
-                unique_id: 0
-            })
-        );
-
-        let mut systems1 = info.batches_info[1].systems();
-        assert_eq!(
-            systems1.next(),
-            Some(&SystemInfo {
-                name: format!("{:?}", sys_b.as_label()),
-                borrow: vec![
-                    TypeInfo {
-                        name: type_name::<SparseSet::<Usize>>().into(),
-                        mutability: Mutability::Exclusive,
-                        storage_id: StorageId::of::<SparseSet<Usize>>(),
-                        thread_safe: true
-                    },
-                    TypeInfo {
-                        name: type_name::<SparseSet::<U32>>().into(),
-                        mutability: Mutability::Shared,
-                        storage_id: StorageId::of::<SparseSet<U32>>(),
-                        thread_safe: true
-                    }
-                ],
-                conflict: Some(Conflict::Borrow {
-                    type_info: TypeInfo {
-                        name: type_name::<SparseSet::<Usize>>().into(),
-                        mutability: Mutability::Exclusive,
-                        storage_id: StorageId::of::<SparseSet<Usize>>(),
-                        thread_safe: true
-                    },
-                    other_system: 0,
-                    other_type_info: TypeInfo {
-                        name: type_name::<SparseSet::<Usize>>().into(),
-                        mutability: Mutability::Shared,
-                        storage_id: StorageId::of::<SparseSet<Usize>>(),
-                        thread_safe: true
-                    }
-                }),
-                after: vec![0],
-                after_all: vec![],
-                before_all: vec![],
-                unique_id: 1
-            })
-        );
-
-        let mut systems2 = info.batches_info[2].systems();
-        assert_eq!(
-            systems2.next(),
-            Some(&SystemInfo {
-                name: format!("{:?}", sys_c.as_label()),
-                borrow: vec![TypeInfo {
-                    name: type_name::<SparseSet::<Usize>>().into(),
-                    mutability: Mutability::Shared,
-                    storage_id: StorageId::of::<SparseSet<Usize>>(),
-                    thread_safe: true
-                },],
-                conflict: Some(Conflict::Borrow {
-                    type_info: TypeInfo {
-                        name: type_name::<SparseSet::<Usize>>().into(),
-                        mutability: Mutability::Shared,
-                        storage_id: StorageId::of::<SparseSet<Usize>>(),
-                        thread_safe: true
-                    },
-                    other_system: 1,
-                    other_type_info: TypeInfo {
-                        name: type_name::<SparseSet::<Usize>>().into(),
-                        mutability: Mutability::Exclusive,
-                        storage_id: StorageId::of::<SparseSet<Usize>>(),
-                        thread_safe: true
-                    }
-                }),
-                after: vec![1],
-                after_all: vec![],
-                before_all: vec![],
-                unique_id: 2
-            })
-        );
-        assert_eq!(
-            systems2.next(),
-            Some(&SystemInfo {
-                name: format!("{:?}", sys_d.as_label()),
-                borrow: vec![TypeInfo {
-                    name: type_name::<SparseSet::<Usize>>().into(),
-                    mutability: Mutability::Shared,
-                    storage_id: StorageId::of::<SparseSet<Usize>>(),
-                    thread_safe: true
-                },],
-                conflict: Some(Conflict::Borrow {
-                    type_info: TypeInfo {
-                        name: type_name::<SparseSet::<Usize>>().into(),
-                        mutability: Mutability::Shared,
-                        storage_id: StorageId::of::<SparseSet<Usize>>(),
-                        thread_safe: true
-                    },
-                    other_system: 1,
-                    other_type_info: TypeInfo {
-                        name: type_name::<SparseSet::<Usize>>().into(),
-                        mutability: Mutability::Exclusive,
-                        storage_id: StorageId::of::<SparseSet<Usize>>(),
-                        thread_safe: true
-                    }
-                }),
-                after: vec![1],
-                after_all: vec![],
-                before_all: vec![],
-                unique_id: 3
-            })
-        );
-    }
 }

@@ -1,6 +1,6 @@
 use crate::component::Component;
 use crate::entity_id::EntityId;
-use crate::ViewMut;
+use crate::views::ViewMut;
 use core::iter::{Copied, DoubleEndedIterator, ExactSizeIterator, FusedIterator, Iterator};
 use core::slice::Iter;
 
@@ -88,19 +88,19 @@ impl BulkReserve for () {}
 impl<T: Component, TRACK> BulkReserve for ViewMut<'_, T, TRACK> {
     #[inline]
     fn bulk_reserve(&mut self, new_entities: &[EntityId]) {
-        <&mut Self>::bulk_reserve(&mut &mut *self, new_entities);
-    }
-}
-
-impl<T: Component, TRACK> BulkReserve for &mut ViewMut<'_, T, TRACK> {
-    #[inline]
-    fn bulk_reserve(&mut self, new_entities: &[EntityId]) {
         if !new_entities.is_empty() {
             self.sparse_set
                 .sparse
                 .bulk_allocate(new_entities[0], new_entities[new_entities.len() - 1]);
             self.sparse_set.reserve(new_entities.len() - 1);
         }
+    }
+}
+
+impl<T: Component, TRACK> BulkReserve for &mut ViewMut<'_, T, TRACK> {
+    #[inline]
+    fn bulk_reserve(&mut self, new_entities: &[EntityId]) {
+        (*self).bulk_reserve(new_entities);
     }
 }
 

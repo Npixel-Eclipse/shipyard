@@ -3,11 +3,39 @@ use crate::all_storages::AllStorages;
 use crate::borrow::{NonSend, NonSendSync, NonSync};
 use crate::component::{Component, Unique};
 use crate::sparse_set::SparseSet;
-use crate::storage::StorageId;
+use crate::storage::{Storage, StorageId};
 use crate::unique::UniqueStorage;
 
 pub trait TupleClone {
     fn register_clone(all_storages: &mut AllStorages);
+}
+
+/// Gives `replacement` the group definitions of `destination`, the storage it's about to replace.
+///
+/// Each definition gets an empty range, so every component of `replacement` starts unevaluated,
+/// like after a clear. The source's layout never comes along, cloned storages have no range.
+pub(crate) fn adopt_groups(
+    destination: &dyn Storage,
+    replacement: &mut dyn Storage,
+    storage_id: StorageId,
+) {
+    let Some(destination_groups) = destination.groups() else {
+        return;
+    };
+    if !destination_groups.has_ranges() {
+        return;
+    }
+
+    // Only sparse sets have groups, and a clone has the same type as its original.
+    let groups = replacement
+        .groups_mut()
+        .expect("a grouped storage's clone can be grouped");
+
+    // Attaching keeps the canonical definitions, peers find this storage's ranges by pointer.
+    // On a fresh storage, the first attach also turns every component unevaluated.
+    for range in &destination_groups.ranges {
+        groups.attach(range.group.clone(), storage_id);
+    }
 }
 
 impl TupleClone for () {
@@ -17,7 +45,7 @@ impl TupleClone for () {
 impl<T: Component + Clone + Send + Sync> TupleClone for SparseSet<T> {
     fn register_clone(all_storages: &mut AllStorages) {
         all_storages
-            .exclusive_storage_or_insert_mut(StorageId::of::<SparseSet<T>>(), SparseSet::<T>::new)
+            .exclusive_component_or_insert_mut(StorageId::of::<SparseSet<T>>(), SparseSet::<T>::new)
             .register_clone();
     }
 }
@@ -26,7 +54,7 @@ impl<T: Component + Clone + Send + Sync> TupleClone for SparseSet<T> {
 impl<T: Component + Clone + Send + Sync> TupleClone for NonSend<SparseSet<T>> {
     fn register_clone(all_storages: &mut AllStorages) {
         all_storages
-            .exclusive_storage_or_insert_mut(StorageId::of::<NonSend<SparseSet<T>>>(), || {
+            .exclusive_component_or_insert_mut(StorageId::of::<NonSend<SparseSet<T>>>(), || {
                 NonSend(SparseSet::<T>::new())
             })
             .register_clone();
@@ -37,7 +65,7 @@ impl<T: Component + Clone + Send + Sync> TupleClone for NonSend<SparseSet<T>> {
 impl<T: Component + Clone + Send + Sync> TupleClone for NonSync<SparseSet<T>> {
     fn register_clone(all_storages: &mut AllStorages) {
         all_storages
-            .exclusive_storage_or_insert_mut(StorageId::of::<NonSync<SparseSet<T>>>(), || {
+            .exclusive_component_or_insert_mut(StorageId::of::<NonSync<SparseSet<T>>>(), || {
                 NonSync(SparseSet::<T>::new())
             })
             .register_clone();
@@ -48,7 +76,7 @@ impl<T: Component + Clone + Send + Sync> TupleClone for NonSync<SparseSet<T>> {
 impl<T: Component + Clone + Send + Sync> TupleClone for NonSendSync<SparseSet<T>> {
     fn register_clone(all_storages: &mut AllStorages) {
         all_storages
-            .exclusive_storage_or_insert_mut(StorageId::of::<NonSendSync<SparseSet<T>>>(), || {
+            .exclusive_component_or_insert_mut(StorageId::of::<NonSendSync<SparseSet<T>>>(), || {
                 NonSendSync(SparseSet::<T>::new())
             })
             .register_clone();
@@ -59,7 +87,7 @@ impl<T: Unique + Clone + Send + Sync> TupleClone for UniqueStorage<T> {
     #[track_caller]
     fn register_clone(all_storages: &mut AllStorages) {
         all_storages
-            .exclusive_storage_mut::<UniqueStorage<T>>()
+            .exclusive_unique_mut_by_id::<UniqueStorage<T>>(&StorageId::of::<UniqueStorage<T>>())
             .unwrap()
             .register_clone();
     }
@@ -70,7 +98,7 @@ impl<T: Unique + Clone + Sync> TupleClone for NonSend<UniqueStorage<T>> {
     #[track_caller]
     fn register_clone(all_storages: &mut AllStorages) {
         all_storages
-            .exclusive_storage_mut_by_id::<NonSend<UniqueStorage<T>>>(StorageId::of::<
+            .exclusive_unique_mut_by_id::<NonSend<UniqueStorage<T>>>(&StorageId::of::<
                 UniqueStorage<T>,
             >())
             .unwrap()
@@ -83,7 +111,7 @@ impl<T: Unique + Clone + Send> TupleClone for NonSync<UniqueStorage<T>> {
     #[track_caller]
     fn register_clone(all_storages: &mut AllStorages) {
         all_storages
-            .exclusive_storage_mut_by_id::<NonSync<UniqueStorage<T>>>(StorageId::of::<
+            .exclusive_unique_mut_by_id::<NonSync<UniqueStorage<T>>>(&StorageId::of::<
                 UniqueStorage<T>,
             >())
             .unwrap()
@@ -96,7 +124,7 @@ impl<T: Unique + Clone> TupleClone for NonSendSync<UniqueStorage<T>> {
     #[track_caller]
     fn register_clone(all_storages: &mut AllStorages) {
         all_storages
-            .exclusive_storage_mut_by_id::<NonSendSync<UniqueStorage<T>>>(StorageId::of::<
+            .exclusive_unique_mut_by_id::<NonSendSync<UniqueStorage<T>>>(&StorageId::of::<
                 UniqueStorage<T>,
             >())
             .unwrap()

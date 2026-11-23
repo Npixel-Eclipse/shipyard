@@ -1,10 +1,10 @@
 mod custom_delete_any;
 
+use crate::ShipHashSet;
 use crate::all_storages::AllStorages;
 use crate::storage::{Storage, StorageId};
 #[cfg(doc)]
 use crate::world::World;
-use crate::ShipHashSet;
 pub use custom_delete_any::CustomDeleteAny;
 
 /// Trait used as a bound for [`World::delete_any`] and [AllStorages::delete_any].
@@ -20,7 +20,7 @@ impl<T: 'static + Storage + CustomDeleteAny> TupleDeleteAny for T {
         let mut ids = ShipHashSet::new();
 
         let current = all_storages.get_current();
-        let storages = all_storages.storages.get_mut();
+        let storages = &mut all_storages.storages.get_mut().components_and_custom;
 
         if let Some(storage) = storages.get_mut(&StorageId::of::<T>()) {
             unsafe { &mut *storage.0 }
@@ -44,7 +44,7 @@ macro_rules! impl_delete_any {
                 let mut ids = ShipHashSet::new();
 
                 let current = all_storages.get_current();
-                let storages = all_storages.storages.get_mut();
+                let storages = &mut all_storages.storages.get_mut().components_and_custom;
 
                 $(
                     if let Some(storage) = storages.get_mut(&StorageId::of::<$storage>()) {

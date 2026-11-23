@@ -1,4 +1,5 @@
 use super::{Pos, Vel};
+use shipyard::SafeMut;
 use shipyard::*;
 
 #[allow(unused)]
@@ -6,7 +7,6 @@ use shipyard::*;
 fn ref_mut(ref mut vm_pos: ViewMut<Pos>) {
     let id = EntityId::dead();
     let pos: SafeMut<Pos> = vm_pos.get(id).unwrap();
-    let _ = pos.as_ref();
 }
 
 #[allow(unused)]

@@ -8,9 +8,11 @@ use alloc::boxed::Box;
 #[cfg(feature = "thread_local")]
 use alloc::sync::Arc;
 
-/// Abstract away `T` from `AtomicRefCell<T>` to be able to store
-/// different types in a `HashMap<TypeId, Storage>`.
-/// and box the `AtomicRefCell` so it doesn't move when the `HashMap` reallocates
+/// Owns a boxed `AtomicRefCell<dyn Storage>`, so storages of different types fit in the same registry.
+///
+/// The registry moves `SBox`es around: its index map, its vector of component and custom storages
+/// or its unique map reallocating, a removal moving the last vector slot. The box stays put, so
+/// borrows of the storage don't depend on where its `SBox` is.
 pub(crate) struct SBox(pub(crate) *mut AtomicRefCell<dyn Storage>);
 
 #[cfg(not(feature = "thread_local"))]
@@ -59,6 +61,17 @@ impl SBox {
         SBox(Box::into_raw(Box::new(AtomicRefCell::new_non_send_sync(
             value, thread_id,
         ))))
+    }
+
+    /// Returns the storage this box holds.
+    ///
+    /// The exclusive reference to the box makes runtime borrow checks unnecessary.
+    #[inline]
+    pub(crate) fn storage_mut(&mut self) -> &mut (dyn Storage + 'static) {
+        // SAFE: `self.0` comes from a `Box` this `SBox` owns, it lives as long as `self`.
+        // We borrow `self` mutably for as long as the reference lives, no other reference
+        // to this storage can exist.
+        unsafe { &mut *self.0 }.get_mut()
     }
 }
 

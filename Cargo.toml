@@ -2,7 +2,7 @@
 authors = ["leudz <dylan.ancel@gmail.com>"]
 categories = ["data-structures", "game-development", "concurrency", "no-std"]
 description = "Entity Component System"
-edition = "2021"
+edition = "2024"
 keywords = ["ecs", "entity", "component"]
 license = "MIT OR Apache-2.0"
 name = "shipyard"
@@ -24,7 +24,7 @@ rayon = { version = "1.11.0", optional = true }
 serde = { version = "1", optional = true, default-features = false, features = [
     "derive",
 ] }
-shipyard_proc = { version = "0.6", optional = true }
+shipyard_proc = { path = "shipyard_proc", version = "0.6.1", optional = true }
 tracing = { version = "0.1.44", default-features = false, optional = true }
 serde_json = { version = "1.0.145", optional = true }
 
@@ -33,19 +33,71 @@ default = ["parallel", "proc", "std"]
 extended_tuple = []
 parallel = ["rayon", "shipyard_proc/parallel", "hashbrown/rayon"]
 proc = ["shipyard_proc"]
-serde1 = ["serde", "hashbrown/serde"]
+serde1 = ["serde", "serde/alloc", "hashbrown/serde"]
 std = ["hashbrown/default-hasher"]
 thread_local = []
-# Local-only scheduling experiment; never enabled by the default feature set.
+# SparseArray uses 4KiB page size, with this feature it is lowered to 256B
+# The negative impact on iteration is around 5-10%
+memory_constrained = []
+# Local scheduling experiments remain opt-in.
 scheduler-experiment = ["std", "parallel", "dep:serde_json"]
-# Explicit registration control and timing, absent from ordinary feature sets.
 scheduler-registration-benchmark = ["scheduler-experiment", "serde1"]
 
 [dev-dependencies]
+anyhow = "1.0.100"
 bincode = "1.3.3"
+criterion = "0.8.2"
 parking_lot = "0.12.5"
 serde_json = "1.0.148"
 serde_derive = { version = "1", features = ["deserialize_in_place"] }
+
+[[bench]]
+name = "bench"
+harness = false
+
+[[bench]]
+name = "iteration"
+harness = false
+
+[[bench]]
+name = "workload_regroup"
+harness = false
+
+[[bench]]
+name = "regroup"
+harness = false
+
+[[bench]]
+name = "entity_deletion"
+harness = false
+
+[[bench]]
+name = "storage_access"
+harness = false
+
+[[bench]]
+name = "tracking_captain"
+harness = false
+
+[[bench]]
+name = "tracking_metadata"
+harness = false
+required-features = ["parallel", "std"]
+
+[[bench]]
+name = "tracking_mixed"
+harness = false
+required-features = ["parallel", "std"]
+
+[[bench]]
+name = "tracking_chunks"
+harness = false
+required-features = ["parallel", "std"]
+
+[[bench]]
+name = "tracking_plan"
+harness = false
+required-features = ["parallel", "std"]
 
 [package.metadata.docs.rs]
 all-features = true

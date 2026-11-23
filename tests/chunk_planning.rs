@@ -1,4 +1,4 @@
-use shipyard::{track, Component, EntityId, Get, IntoIter, View, ViewMut, World};
+use shipyard::{Component, EntityId, Get, IntoIter, View, ViewMut, World, track};
 
 #[derive(Debug)]
 struct Value(usize);
@@ -165,8 +165,8 @@ fn empty_tracking_does_not_prune_negation_optional_or_union() {
 
 #[test]
 fn or_propagates_empty_proofs_and_skips_each_sources_clean_chunks() {
-    use shipyard::iter::{IntoShiperator, ShiperatorCaptain};
-    let (world, ids) = setup(4097);
+    use shipyard::iter::{IntoShiperator, OneOfTwo, Shiperator};
+    let (mut world, ids) = setup(4097);
     world.run(|values: View<Value>, markers: View<Marker>| {
         assert_eq!(
             (values.inserted() | values.modified()).iter().size_hint(),
@@ -181,14 +181,57 @@ fn or_propagates_empty_proofs_and_skips_each_sources_clean_chunks() {
     });
     modify(&world, &ids, &[4096]);
     world.run(|values: View<Value>| {
-        let (mut captain, _, _) =
-            (values.inserted() | values.modified()).into_shiperator(&mut Default::default());
-        assert!(!captain.has_no_candidates());
-        assert!(captain.next_possible(0) >= ids.len());
-        captain.next_slice();
-        assert_eq!(captain.next_possible(0), 4096);
-        assert_eq!(captain.previous_possible(4096), 0);
-        assert_eq!(captain.previous_possible(4097), 4097);
+        let (inserted, _, _) = values.inserted().into_shiperator();
+        let (modified, _, _) = values.modified().into_shiperator();
+        let (union, _, _) = (values.inserted() | values.modified()).into_shiperator();
+        assert!(inserted.has_no_candidates());
+        assert_eq!(inserted.sail_time(), 0);
+        assert!(!modified.has_no_candidates());
+        assert!(!modified.has_dense_candidates());
+        // One candidate slot in the final partial chunk, plus one chunk's cost.
+        // This is scan work, not the number of matches.
+        assert_eq!(modified.sail_time(), 2);
+        assert!(!union.has_no_candidates());
+        assert!(!union.has_dense_candidates());
+        assert_eq!(union.sail_time(), 2);
+
+        // Upstream OR construction omits the empty first source and installs
+        // the first nonempty segment itself; callers no longer call next_slice.
+        let mut iter = (values.inserted() | values.modified()).iter().with_id();
+        assert!(matches!(iter.next(), Some((id, OneOfTwo::Two(value)))
+            if id == ids[4096] && value.0 == 4096));
+        assert!(iter.next().is_none());
+        assert!(iter.next_back().is_none());
+        let reverse: Vec<_> = (values.inserted() | values.modified())
+            .iter()
+            .with_id()
+            .rev()
+            .map(|(id, _)| id)
+            .collect();
+        assert_eq!(reverse, vec![ids[4096]]);
+    });
+
+    // When both branches have candidates, the normal iterator must advance
+    // across their segments while retaining first-source precedence and IDs.
+    let inserted = world.add_entity(Value(4097));
+    world.run(|values: View<Value>| {
+        let query = || values.inserted() | values.modified();
+        let actual: Vec<_> = query()
+            .iter()
+            .with_id()
+            .map(|(id, value)| {
+                let value = match value {
+                    OneOfTwo::One(value) | OneOfTwo::Two(value) => value.0,
+                };
+                (id, value)
+            })
+            .collect();
+        assert_eq!(actual, vec![(inserted, 4097), (ids[4096], 4096)]);
+        let mut partial = query().iter().with_id();
+        assert_eq!(partial.next_back().map(|(id, _)| id), Some(ids[4096]));
+        assert_eq!(partial.next().map(|(id, _)| id), Some(inserted));
+        assert!(partial.next().is_none());
+        assert!(partial.next_back().is_none());
     });
 }
 

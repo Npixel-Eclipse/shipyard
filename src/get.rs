@@ -1,8 +1,9 @@
 use crate::component::Component;
 use crate::entity_id::EntityId;
 use crate::error;
-use crate::r#mut::{ModFlag, Mut, SafeMut};
-use crate::sparse_set::{SparseSet, TRACKING_CHUNK_SHIFT};
+use crate::r#mut::{Mut, SafeMut};
+use crate::sparse_set::SparseSet;
+use crate::sparse_set::TRACKING_CHUNK_SIZE;
 use crate::tracking::Tracking;
 use crate::views::{View, ViewMut};
 use core::any::type_name;
@@ -80,26 +81,42 @@ impl<'a, 'b, T: Component, Track: Tracking> Get for &'b mut ViewMut<'a, T, Track
 
     #[inline]
     fn get(self, entity: EntityId) -> Result<Self::Out, error::MissingComponent> {
-        let index = self
-            .index_of(entity)
-            .ok_or_else(|| error::MissingComponent {
+        let Some(index) = self.index_of(entity) else {
+            return Err(error::MissingComponent {
                 id: entity,
                 name: type_name::<T>(),
-            })?;
+            });
+        };
 
         let SparseSet {
             data,
             modification_data,
-            modification_chunks,
+            modification_summary,
             is_tracking_modification,
             ..
         } = self.sparse_set;
 
+        let (flag, chunk) = if T::Tracking::track_modification() || *is_tracking_modification {
+            debug_assert!(index < modification_data.len());
+            debug_assert!(index / TRACKING_CHUNK_SIZE < modification_summary.len());
+            // SAFE: index_of found a live row. Declared or dynamically enabled modification
+            // tracking maintains a timestamp for each row and a summary for each chunk.
+            unsafe {
+                (
+                    Some(modification_data.get_unchecked_mut(index)),
+                    Some(
+                        modification_summary
+                            .writers()
+                            .get_unchecked(index / TRACKING_CHUNK_SIZE),
+                    ),
+                )
+            }
+        } else {
+            (None, None)
+        };
         Ok(SafeMut::new(Mut {
-            flag: is_tracking_modification.then(|| ModFlag {
-                slot: unsafe { modification_data.get_unchecked_mut(index) },
-                chunk: modification_chunks.get(index >> TRACKING_CHUNK_SHIFT),
-            }),
+            flag,
+            chunk,
             current: self.current,
             data: unsafe { data.get_unchecked_mut(index) },
         }))
@@ -110,9 +127,15 @@ macro_rules! impl_get_component {
     ($(($type: ident, $index: tt))+) => {
         impl<$($type: Get),+> Get for ($($type,)+) {
             type Out = ($($type::Out,)+);
+
             #[inline]
             fn get(self, entity: EntityId) -> Result<Self::Out, error::MissingComponent> {
-                Ok(($(self.$index.get(entity)?,)+))
+                Ok(($({
+                    match self.$index.get(entity) {
+                        Ok(component) => component,
+                        Err(err) => return Err(err)
+                    }
+                },)+))
             }
         }
     }

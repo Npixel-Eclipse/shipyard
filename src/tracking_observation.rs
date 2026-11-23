@@ -37,7 +37,14 @@ static SYSTEMS: OnceLock<RwLock<HashMap<u64, &'static str>>> = OnceLock::new();
 /// Only one World may execute observed workloads concurrently because tracking
 /// timestamps are local to a World. A collision fails instead of misattributing.
 pub fn set_observer(observer: fn(TrackingHit)) -> Result<(), &'static str> {
-    OBSERVER.set(observer).map_err(|_| "tracking observer already registered")
+    OBSERVER
+        .set(observer)
+        .map_err(|_| "tracking observer already registered")
+}
+
+#[inline]
+pub(crate) fn enabled() -> bool {
+    OBSERVER.get().is_some()
 }
 
 pub(crate) struct SystemGuard(u64);
@@ -45,33 +52,63 @@ pub(crate) struct SystemGuard(u64);
 impl Drop for SystemGuard {
     fn drop(&mut self) {
         if let Some(systems) = SYSTEMS.get() {
-            systems.write().unwrap_or_else(|p| p.into_inner()).remove(&self.0);
+            systems
+                .write()
+                .unwrap_or_else(|p| p.into_inner())
+                .remove(&self.0);
         }
     }
 }
 
-pub(crate) fn system_started(current: TrackingTimestamp, name: &'static str) -> Option<SystemGuard> {
+pub(crate) fn system_started(
+    current: TrackingTimestamp,
+    name: &'static str,
+) -> Option<SystemGuard> {
     OBSERVER.get()?;
-    let mut systems = SYSTEMS.get_or_init(|| RwLock::new(HashMap::new()))
-        .write().unwrap_or_else(|p| p.into_inner());
-    assert!(systems.insert(current.get(), name).is_none(),
-        "tracking observer encountered overlapping World timestamps");
+    let mut systems = SYSTEMS
+        .get_or_init(|| RwLock::new(HashMap::new()))
+        .write()
+        .unwrap_or_else(|p| p.into_inner());
+    assert!(
+        systems.insert(current.get(), name).is_none(),
+        "tracking observer encountered overlapping World timestamps"
+    );
     Some(SystemGuard(current.get()))
 }
 
 #[inline]
 pub(crate) fn hit<T>(kind: &'static str, entity: EntityId, current: TrackingTimestamp) {
-    let Some(observer) = OBSERVER.get() else { return; };
-    let Some(systems) = SYSTEMS.get() else { return; };
-    let system = systems.read().unwrap_or_else(|p| p.into_inner()).get(&current.get()).copied();
+    let Some(observer) = OBSERVER.get() else {
+        return;
+    };
+    let Some(systems) = SYSTEMS.get() else {
+        return;
+    };
+    let system = systems
+        .read()
+        .unwrap_or_else(|p| p.into_inner())
+        .get(&current.get())
+        .copied();
     if let Some(system) = system {
-        observer(TrackingHit { system, component: type_name::<T>(), kind,
-            entity: entity.inner(), current: current.get() });
+        observer(TrackingHit {
+            system,
+            component: type_name::<T>(),
+            kind,
+            entity: entity.inner(),
+            current: current.get(),
+        });
     }
 }
 
 #[inline]
-pub(crate) fn matched<T>(value: bool, kind: &'static str, entity: EntityId, current: TrackingTimestamp) -> bool {
-    if value { hit::<T>(kind, entity, current); }
+pub(crate) fn matched<T>(
+    value: bool,
+    kind: &'static str,
+    entity: EntityId,
+    current: TrackingTimestamp,
+) -> bool {
+    if value {
+        hit::<T>(kind, entity, current);
+    }
     value
 }

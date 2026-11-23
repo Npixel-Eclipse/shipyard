@@ -1,8 +1,6 @@
 use crate::all_storages::AllStorages;
 use crate::atomic_refcell::{ARef, SharedBorrow};
 use crate::component::Component;
-#[cfg(feature = "scheduler-experiment")]
-use crate::tracking_observation::{hit, matched};
 use crate::entity_id::EntityId;
 use crate::error;
 use crate::get::Get;
@@ -10,9 +8,12 @@ use crate::sparse_set::SparseSet;
 use crate::storage::StorageId;
 use crate::track;
 use crate::tracking::{
-    DeletionTracking, Inserted, InsertedOrModified, InsertionTracking, ModificationTracking,
-    Modified, RemovalTracking, Tracking, TrackingTimestamp,
+    DeletionTracking, Inserted, InsertedOrModified, InsertionOrModificationTracking,
+    InsertionTracking, ModificationTracking, Modified, RemovalTracking, Tracking,
+    TrackingTimestamp,
 };
+#[cfg(feature = "scheduler-experiment")]
+use crate::tracking_observation::{hit, matched};
 use core::fmt;
 use core::marker::PhantomData;
 use core::ops::Deref;
@@ -161,11 +162,11 @@ impl<'a, T: Component> View<'a, T, track::Untracked> {
     ///
     /// let all_storages = world.all_storages().unwrap();
     /// let scripting_storage =
-    ///     View::<ScriptingComponent>::new_for_custom_storage(StorageId::Custom(0), all_storages)
+    ///     View::<ScriptingComponent>::new_for_custom_storage(&StorageId::Custom(0), all_storages)
     ///         .unwrap();
     /// ```
     pub fn new_for_custom_storage(
-        storage_id: StorageId,
+        storage_id: &StorageId,
         all_storages: ARef<'a, &'a AllStorages>,
     ) -> Result<Self, error::CustomStorageView> {
         use crate::all_storages::CustomStorageAccess;
@@ -248,20 +249,30 @@ where
 
 impl<Track, T: Component> View<'_, T, Track>
 where
-    Track: InsertionTracking + ModificationTracking,
+    Track: InsertionOrModificationTracking,
 {
-    /// Wraps this view to be able to iterate *inserted* and *modified* components.
+    /// Wraps this view to iterate components with an enabled insertion or modification event.\
+    /// When both kinds are enabled, each matching component appears once.
     #[inline]
     pub fn inserted_or_modified(&self) -> InsertedOrModified<&Self> {
         InsertedOrModified(self)
     }
 
     /// Inside a workload returns `true` if `entity`'s component was inserted or modified since the last run of this system.\
-    /// Outside workloads returns `true` if `entity`'s component was inserted or modified since the last call to [`clear_all_inserted`](crate::ViewMut::clear_all_inserted).\
+    /// Outside workloads returns `true` if `entity`'s component was inserted or modified since the last clear call.\
     /// Returns `false` if `entity` does not have a component in this storage.
     #[inline]
     pub fn is_inserted_or_modified(&self, entity: EntityId) -> bool {
-        self.is_inserted(entity) || self.is_modified(entity)
+        let value = Track::is_inserted(self.sparse_set, entity, self.last_insertion, self.current)
+            || Track::is_modified(
+                self.sparse_set,
+                entity,
+                self.last_modification,
+                self.current,
+            );
+        #[cfg(feature = "scheduler-experiment")]
+        let value = matched::<T>(value, "inserted_or_modified", entity, self.current);
+        value
     }
 }
 
@@ -351,7 +362,11 @@ where
     /// Returns `false` if `entity` does not have a component in this storage.
     #[inline]
     pub fn is_removed_or_deleted(&self, entity: EntityId) -> bool {
-        self.is_deleted(entity) || self.is_removed(entity)
+        let value = Track::is_deleted(self, entity, self.last_removal_or_deletion, self.current)
+            || Track::is_removed(self, entity, self.last_removal_or_deletion, self.current);
+        #[cfg(feature = "scheduler-experiment")]
+        let value = matched::<T>(value, "removed_or_deleted", entity, self.current);
+        value
     }
 }
 

@@ -1,12 +1,12 @@
 //! Local registration measurements. No workload systems are run by this module.
+use crate::World;
 use crate::error::AddWorkload;
 use crate::scheduler::{Workload, WorkloadInfo};
-use crate::World;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::RefCell;
 use serde::Serialize;
-use std::env::{var, var_os, VarError};
+use std::env::{VarError, var, var_os};
 use std::sync::OnceLock;
 use std::thread_local;
 use std::time::Instant;
@@ -34,10 +34,15 @@ pub fn control() -> Control {
             Ok(value) if value == "no_graph" => Control::NoGraph,
             other => panic!("Invalid BATTLE_REGISTRATION_CONTROL: {other:?}"),
         };
-        assert_eq!(var("BATTLE_SCHEDULER_MODE").as_deref(), Ok("baseline"),
-            "Registration controls require explicit BATTLE_SCHEDULER_MODE=baseline");
-        assert!(var_os("BATTLE_SCHEDULER_PLAN_OUTPUT_DIR").is_none(),
-            "Registration measurements require plan output to be disabled");
+        assert_eq!(
+            var("BATTLE_SCHEDULER_MODE").as_deref(),
+            Ok("baseline"),
+            "Registration controls require explicit BATTLE_SCHEDULER_MODE=baseline"
+        );
+        assert!(
+            var_os("BATTLE_SCHEDULER_PLAN_OUTPUT_DIR").is_none(),
+            "Registration measurements require plan output to be disabled"
+        );
         selected
     })
 }
@@ -47,8 +52,10 @@ pub(crate) fn build_graph_enabled() -> bool {
 }
 
 pub(crate) fn validate_execution_mode(is_baseline: bool) {
-    assert!(control() == Control::Unset || is_baseline,
-        "Registration controls cannot be combined with direct/DAG execution");
+    assert!(
+        control() == Control::Unset || is_baseline,
+        "Registration controls cannot be combined with direct/DAG execution"
+    );
 }
 
 #[derive(Default, Debug, Serialize)]
@@ -85,8 +92,14 @@ pub struct Phases {
 }
 
 pub(crate) enum Phase {
-    InsertSystems, Requirements, DagInputCapture, BaselineBatches, DagPlanBuild,
-    DagEdges, DagReduction, CreateWorkload,
+    InsertSystems,
+    Requirements,
+    DagInputCapture,
+    BaselineBatches,
+    DagPlanBuild,
+    DagEdges,
+    DagReduction,
+    CreateWorkload,
 }
 
 thread_local! {
@@ -97,7 +110,11 @@ pub(crate) struct Timer(Option<Instant>);
 
 impl Timer {
     pub(crate) fn start() -> Self {
-        Self(ACTIVE.with(|state| state.borrow().is_some()).then(Instant::now))
+        Self(
+            ACTIVE
+                .with(|state| state.borrow().is_some())
+                .then(Instant::now),
+        )
     }
 
     pub(crate) fn finish(self, phase: Phase) {
@@ -137,7 +154,9 @@ pub(crate) fn record(nodes: usize, batches: usize, attempted: bool, success: boo
 struct ActiveGuard;
 impl Drop for ActiveGuard {
     fn drop(&mut self) {
-        ACTIVE.with(|state| { state.borrow_mut().take(); });
+        ACTIVE.with(|state| {
+            state.borrow_mut().take();
+        });
     }
 }
 
@@ -163,7 +182,9 @@ pub struct Sample {
 }
 
 /// Measure one actual registration in a fresh World, without executing systems.
-pub fn measure_registration(make_workload: impl FnOnce() -> Workload) -> Result<Sample, AddWorkload> {
+pub fn measure_registration(
+    make_workload: impl FnOnce() -> Workload,
+) -> Result<Sample, AddWorkload> {
     let selected = control();
     assert_ne!(selected, Control::Unset, "Select graph/no_graph explicitly");
     let start = Instant::now();
@@ -180,21 +201,37 @@ pub fn measure_registration(make_workload: impl FnOnce() -> Workload) -> Result<
     let start = Instant::now();
     workload.add_to_world(&world)?;
     let add_to_world_ns = start.elapsed().as_nanos();
-    let phases = ACTIVE.with(|state| state.borrow_mut().take())
+    let phases = ACTIVE
+        .with(|state| state.borrow_mut().take())
         .expect("registration phases remain available");
     let start = Instant::now();
     let info = world.workloads_info();
     let mut topology = Vec::new();
     for WorkloadInfo { batches_info, .. } in info.0.into_values() {
         for batch in batches_info {
-            topology.push(batch.systems.0.into_iter().chain(batch.systems.1)
-                .map(|system| system.name).collect());
+            topology.push(
+                batch
+                    .systems
+                    .0
+                    .into_iter()
+                    .chain(batch.systems.1)
+                    .map(|system| system.name)
+                    .collect(),
+            );
         }
     }
     let inspect_ns = start.elapsed().as_nanos();
     let start = Instant::now();
     drop(world);
     let world_drop_ns = start.elapsed().as_nanos();
-    Ok(Sample { control: selected, world_create_ns, workload_builder_ns, add_to_world_ns,
-        inspect_ns, world_drop_ns, phases, baseline_topology: topology })
+    Ok(Sample {
+        control: selected,
+        world_create_ns,
+        workload_builder_ns,
+        add_to_world_ns,
+        inspect_ns,
+        world_drop_ns,
+        phases,
+        baseline_topology: topology,
+    })
 }

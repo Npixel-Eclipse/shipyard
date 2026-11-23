@@ -1,27 +1,11 @@
-use crate::tracking::{AtomicTimestamp, TrackingTimestamp};
-use core::sync::atomic::Ordering;
-
-pub(crate) struct ModFlag<'a> {
-    pub(crate) slot: &'a mut TrackingTimestamp,
-    pub(crate) chunk: Option<&'a AtomicTimestamp>,
-}
-
-impl ModFlag<'_> {
-    #[inline]
-    pub(crate) fn set(&mut self, current: TrackingTimestamp) {
-        if *self.slot != current {
-            *self.slot = current;
-
-            if let Some(chunk) = self.chunk {
-                chunk.fetch_max(current.get(), Ordering::Relaxed);
-            }
-        }
-    }
-}
+use crate::sparse_set::ChunkTimestamp;
+use crate::tracking::TrackingTimestamp;
 
 /// Tracks component modification.
 pub struct Mut<'a, T: ?Sized> {
-    pub(crate) flag: Option<ModFlag<'a>>,
+    /// Cleared after the first mutable access; this item's timestamp stays fixed.
+    pub(crate) flag: Option<&'a mut TrackingTimestamp>,
+    pub(crate) chunk: Option<&'a ChunkTimestamp>,
     pub(crate) current: TrackingTimestamp,
     pub(crate) data: &'a mut T,
 }
@@ -42,6 +26,7 @@ impl<'a, T: ?Sized> Mut<'a, T> {
     pub fn map<U: ?Sized, F: FnOnce(&mut T) -> &mut U>(orig: Self, f: F) -> Mut<'a, U> {
         Mut {
             flag: orig.flag,
+            chunk: orig.chunk,
             current: orig.current,
             data: f(orig.data),
         }
@@ -49,6 +34,11 @@ impl<'a, T: ?Sized> Mut<'a, T> {
 }
 
 impl<'a, T: ?Sized> SafeMut<'a, T> {
+    #[cfg(test)]
+    pub(crate) fn has_chunk(&self) -> bool {
+        self.inner.chunk.is_some()
+    }
+
     pub(crate) fn new(inner: Mut<'a, T>) -> Self {
         Self { inner }
     }
@@ -104,8 +94,11 @@ impl<T: ?Sized> core::ops::Deref for SafeMut<'_, T> {
 impl<T: ?Sized> core::ops::DerefMut for Mut<'_, T> {
     #[inline]
     fn deref_mut(&mut self) -> &mut Self::Target {
-        if let Some(flag) = &mut self.flag {
-            flag.set(self.current);
+        if let Some(flag) = self.flag.take() {
+            *flag = self.current;
+            if let Some(chunk) = self.chunk {
+                chunk.mark(self.current);
+            }
         }
 
         self.data
@@ -129,8 +122,11 @@ impl<T: ?Sized> AsRef<T> for SafeMut<'_, T> {
 impl<T: ?Sized> AsMut<T> for Mut<'_, T> {
     #[inline]
     fn as_mut(&mut self) -> &mut T {
-        if let Some(flag) = &mut self.flag {
-            flag.set(self.current);
+        if let Some(flag) = self.flag.take() {
+            *flag = self.current;
+            if let Some(chunk) = self.chunk {
+                chunk.mark(self.current);
+            }
         }
 
         self.data

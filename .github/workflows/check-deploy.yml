@@ -13,17 +13,26 @@ jobs:
   changes:
     runs-on: ubuntu-latest
     outputs:
-      code: ${{ steps.filter.outputs.code }}
-      deploy: ${{ steps.filter.outputs.deploy }}
+      code: ${{ github.event_name == 'workflow_dispatch' || steps.filter.outputs.code == 'true' }}
+      deploy: ${{ github.event_name == 'workflow_dispatch' || steps.filter.outputs.deploy == 'true' }}
+      visualizer: ${{ github.event_name == 'workflow_dispatch' || steps.filter.outputs.visualizer == 'true' }}
     steps:
     - uses: actions/checkout@v3
     - uses: dorny/paths-filter@v2
       id: filter
+      if: github.event_name != 'workflow_dispatch'
       with:
         filters: |
           code:
             - 'src/**'
             - 'tests/**'
+            - 'shipyard_proc/**'
+            - 'benches/**'
+            - 'Cargo.toml'
+            - '.github/**'
+          visualizer:
+            - 'visualizer/**'
+            - 'src/**'
             - 'Cargo.toml'
             - '.github/**'
           deploy:
@@ -60,13 +69,16 @@ jobs:
     runs-on: ubuntu-latest
     needs: changes
     if: needs.changes.outputs.code == 'true'
+    strategy:
+      matrix:
+        features: [std, "std,thread_local"]
     steps:
       - uses: actions/checkout@v3
       - uses: dtolnay/rust-toolchain@nightly
         with:
           components: miri
 
-      - run: cargo miri test --tests --lib --no-default-features --features=std
+      - run: "cargo miri test --lib --no-default-features --features=${{ matrix.features }} tests::miri::"
   clippy:
     runs-on: ubuntu-latest
     needs: changes
@@ -89,20 +101,30 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - run: cargo test --all-features
+  bench-test:
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    steps:
+      - uses: actions/checkout@v3
+      - uses: dtolnay/rust-toolchain@stable
+
+      # Runs the fixture checks and every routine once, it doesn't time anything.
+      - run: cargo bench --bench iteration -- --test
   guide_master:
     runs-on: ubuntu-latest
     needs: changes
-    if: github.event_name == 'push' && needs.changes.outputs.deploy == 'true'
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && needs.changes.outputs.deploy == 'true')
     steps:
       - uses: actions/checkout@v3
       - uses: dtolnay/rust-toolchain@stable
 
       - name: download mdbook
-        uses: peaceiris/actions-mdbook@v1
+        uses: peaceiris/actions-mdbook@v2
         with:
-          mdbook-version: "0.4.34"
+          mdbook-version: "0.5.4"
 
-      - run: cargo install mdbook-linkcheck
+      - run: cargo install mdbook-linkcheck2
 
       - run: mdbook build -d guide_master
         working-directory: ./guide/master
@@ -115,13 +137,13 @@ jobs:
   guide_0_5_0:
     runs-on: ubuntu-latest
     needs: changes
-    if: github.event_name == 'push' && needs.changes.outputs.deploy == 'true'
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && needs.changes.outputs.deploy == 'true')
     steps:
       - uses: actions/checkout@v3
       - uses: dtolnay/rust-toolchain@stable
 
       - name: download mdbook
-        uses: peaceiris/actions-mdbook@v1
+        uses: peaceiris/actions-mdbook@v2
         with:
           mdbook-version: "0.4.34"
 
@@ -138,13 +160,13 @@ jobs:
   guide_0_6:
     runs-on: ubuntu-latest
     needs: changes
-    if: github.event_name == 'push' && needs.changes.outputs.deploy == 'true'
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && needs.changes.outputs.deploy == 'true')
     steps:
       - uses: actions/checkout@v3
       - uses: dtolnay/rust-toolchain@stable
 
       - name: download mdbook
-        uses: peaceiris/actions-mdbook@v1
+        uses: peaceiris/actions-mdbook@v2
         with:
           mdbook-version: "0.4.34"
 
@@ -161,13 +183,13 @@ jobs:
   guide_0_7:
     runs-on: ubuntu-latest
     needs: changes
-    if: github.event_name == 'push' && needs.changes.outputs.deploy == 'true'
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && needs.changes.outputs.deploy == 'true')
     steps:
       - uses: actions/checkout@v3
       - uses: dtolnay/rust-toolchain@stable
 
       - name: download mdbook
-        uses: peaceiris/actions-mdbook@v1
+        uses: peaceiris/actions-mdbook@v2
         with:
           mdbook-version: "0.4.34"
 
@@ -184,13 +206,13 @@ jobs:
   guide_0_8:
     runs-on: ubuntu-latest
     needs: changes
-    if: github.event_name == 'push' && needs.changes.outputs.deploy == 'true'
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && needs.changes.outputs.deploy == 'true')
     steps:
       - uses: actions/checkout@v3
       - uses: dtolnay/rust-toolchain@stable
 
       - name: download mdbook
-        uses: peaceiris/actions-mdbook@v1
+        uses: peaceiris/actions-mdbook@v2
         with:
           mdbook-version: "0.4.34"
 
@@ -207,13 +229,13 @@ jobs:
   guide_0_9:
     runs-on: ubuntu-latest
     needs: changes
-    if: github.event_name == 'push' && needs.changes.outputs.deploy == 'true'
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && needs.changes.outputs.deploy == 'true')
     steps:
       - uses: actions/checkout@v3
       - uses: dtolnay/rust-toolchain@stable
 
       - name: download mdbook
-        uses: peaceiris/actions-mdbook@v1
+        uses: peaceiris/actions-mdbook@v2
         with:
           mdbook-version: "0.4.34"
 
@@ -230,13 +252,13 @@ jobs:
   guide_0_10:
     runs-on: ubuntu-latest
     needs: changes
-    if: github.event_name == 'push' && needs.changes.outputs.deploy == 'true'
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && needs.changes.outputs.deploy == 'true')
     steps:
       - uses: actions/checkout@v3
       - uses: dtolnay/rust-toolchain@stable
 
       - name: download mdbook
-        uses: peaceiris/actions-mdbook@v1
+        uses: peaceiris/actions-mdbook@v2
         with:
           mdbook-version: "0.4.34"
 
@@ -253,17 +275,17 @@ jobs:
   guide_0_11:
     runs-on: ubuntu-latest
     needs: changes
-    if: github.event_name == 'push' && needs.changes.outputs.deploy == 'true'
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && needs.changes.outputs.deploy == 'true')
     steps:
       - uses: actions/checkout@v3
       - uses: dtolnay/rust-toolchain@stable
 
       - name: download mdbook
-        uses: peaceiris/actions-mdbook@v1
+        uses: peaceiris/actions-mdbook@v2
         with:
-          mdbook-version: "0.4.34"
+          mdbook-version: "0.5.4"
 
-      - run: cargo install mdbook-linkcheck
+      - run: cargo install mdbook-linkcheck2
 
       - run: mdbook build -d guide_0_11
         working-directory: ./guide/0.11
@@ -276,7 +298,7 @@ jobs:
   bunny_demo:
     runs-on: ubuntu-latest
     needs: changes
-    if: github.event_name == 'push' && needs.changes.outputs.deploy == 'true'
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && needs.changes.outputs.deploy == 'true')
     steps:
       - uses: actions/checkout@v3
       - uses: dtolnay/rust-toolchain@stable
@@ -298,7 +320,7 @@ jobs:
   square_eater:
     runs-on: ubuntu-latest
     needs: changes
-    if: github.event_name == 'push' && needs.changes.outputs.deploy == 'true'
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && needs.changes.outputs.deploy == 'true')
     steps:
       - uses: actions/checkout@v3
       - uses: dtolnay/rust-toolchain@stable
@@ -314,21 +336,24 @@ jobs:
   visualizer:
     runs-on: ubuntu-latest
     needs: changes
-    if: github.event_name == 'push' && needs.changes.outputs.deploy == 'true'
+    # Bundled on manual runs and PRs touching the visualizer too; publishing is gated below.
+    if: needs.changes.outputs.visualizer == 'true' || (github.event_name == 'push' && needs.changes.outputs.deploy == 'true')
     steps:
       - uses: actions/checkout@v3
       - uses: dtolnay/rust-toolchain@stable
         with:
           target: wasm32-unknown-unknown
-      - uses: jetli/trunk-action@v0.4.0
-      # GH pages doesn't use the same url naming as trunk's default
-      # https://github.com/thedodd/trunk/issues/268
-      - run: trunk build --public-url "/shipyard/visualizer/" --release true -d visualizer/dist visualizer/index.html
+      - uses: cargo-bins/cargo-binstall@main
+      # Keep the CLI version in sync with the `dioxus` dependency in visualizer/Cargo.toml
+      - run: cargo binstall dioxus-cli@0.7.10 --no-confirm --locked
+      # Visualizer/Dioxus.toml sets the `/shipyard/visualizer/` base path used by GitHub Pages
+      - run: dx bundle --platform web --release --out-dir dist
+        working-directory: ./visualizer
       - name: save visualizer
         uses: actions/upload-artifact@v4
         with:
           name: visualizer
-          path: visualizer/dist
+          path: visualizer/dist/public
   deploy:
     runs-on: ubuntu-latest
     needs: [
@@ -338,6 +363,7 @@ jobs:
       miri,
       clippy,
       all-features,
+      bench-test,
       guide_master,
       guide_0_11,
       guide_0_10,
@@ -350,7 +376,9 @@ jobs:
       square_eater,
       visualizer
     ]
-    if: github.event_name == 'push' && needs.changes.outputs.deploy == 'true'
+    if: >-
+      (github.event_name == 'push' && needs.changes.outputs.deploy == 'true') ||
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master')
     steps:
       - name: load guide master
         uses: actions/download-artifact@v4

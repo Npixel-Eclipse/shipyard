@@ -1,23 +1,25 @@
 mod batches;
 #[cfg(feature = "scheduler-experiment")]
 pub(crate) mod dag;
-#[cfg(feature = "scheduler-experiment")]
-pub(crate) mod order_witness;
 pub mod info;
-#[cfg(feature = "scheduler-registration-benchmark")]
-pub mod registration_benchmark;
 mod into_workload;
 mod into_workload_run_if;
 mod into_workload_system;
+#[cfg(feature = "std")]
 mod into_workload_try_system;
 mod label;
+#[cfg(feature = "scheduler-experiment")]
+pub(crate) mod order_witness;
+#[cfg(feature = "scheduler-registration-benchmark")]
+pub mod registration_benchmark;
 mod system;
 mod system_modificator;
 mod workload;
 mod workload_modificator;
 
-pub use into_workload::IntoWorkload;
+pub use into_workload::{IntoSequentialWorkload, IntoWorkload};
 pub use into_workload_system::IntoWorkloadSystem;
+#[cfg(feature = "std")]
 pub use into_workload_try_system::IntoWorkloadTrySystem;
 pub use label::{AsLabel, Label};
 pub use system::WorkloadSystem;
@@ -25,12 +27,12 @@ pub use system_modificator::SystemModificator;
 pub use workload::{ScheduledWorkload, Workload};
 pub use workload_modificator::WorkloadModificator;
 
-pub(crate) use batches::Batches;
+pub(crate) use batches::{Batches, RegroupStep, Step};
 pub(crate) use info::TypeInfo;
 
 use crate::scheduler::info::WorkloadInfo;
 use crate::world::World;
-use crate::{error, ShipHashMap};
+use crate::{ShipHashMap, error};
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::any::TypeId;

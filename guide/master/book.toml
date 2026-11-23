@@ -1,7 +1,6 @@
 [book]
 authors = ["Dylan Ancel", "David Komer"]
 language = "en"
-multilingual = false
 src = "src"
 title = "Shipyard User's Guide"
 
@@ -13,4 +12,5 @@ create-missing = false
 git-repository-url = "https://github.com/leudz/shipyard"
 edit-url-template = "https://github.com/leudz/shipyard/edit/master/guide/master/{path}"
 
-[output.linkcheck]
+[output.linkcheck2]
+follow-web-links = true

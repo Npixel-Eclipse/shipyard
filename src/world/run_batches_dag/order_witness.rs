@@ -1,5 +1,6 @@
 use super::{Batches, DagEpoch, Label, RunWorkload, SystemFn, World};
 use crate::scheduler::order_witness::OrderWitness;
+use crate::scheduler::Step;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
@@ -46,7 +47,13 @@ impl World {
                         }
                     }
                     DagEpoch::Fence(batch) => {
-                        self.run_one_batch_with(names, batches, *batch, |system| {
+                        self.run_one_batch_with(batches, *batch, |step, run_if| {
+                            let Step::System(system) = step else {
+                                unreachable!("a validated order witness cannot contain regroups");
+                            };
+                            if !self.should_run(batches, names, system, run_if)? {
+                                return Ok(());
+                            }
                             let occurrence = witness.batch_occurrences[*batch].iter().copied()
                                 .find(|&id| witness.occurrence_systems[id] == system)
                                 .expect("validated fence occurrence missing");

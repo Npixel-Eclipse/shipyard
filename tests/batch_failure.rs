@@ -1,7 +1,8 @@
-//! Preserve the pre-backfill failure boundary, including independent external effects.
+//! Preserve the failure boundary between actual batches, including external effects.
 #![cfg(all(feature = "parallel", feature = "std"))]
 
 use shipyard::{track, Component, ViewMut, Workload, World};
+use shipyard::error::SystemError;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc,
@@ -24,10 +25,13 @@ fn assert_failure_boundary(panic_first: bool) -> Result<(), Box<dyn std::error::
     let later_y = Arc::clone(&later_effects);
     // Borrow conflicts form A -> B and C -> D. C represents a producer/other external write.
     let (workload, _) = Workload::new("failure-boundary")
-        .with_try_system(move |_: ViewMut<X>| -> Result<(), std::io::Error> {
+        .with_system(move |_: ViewMut<X>| -> Result<(), SystemError> {
             assert!(!panic_first, "expected first-system panic");
-            Err(std::io::Error::other("expected first-system error"))
+            Err(std::io::Error::other("expected first-system error").into())
         })
+        // Independent roots may share the first batch in the current scheduler.
+        // Give Y its own predecessor so the observable effect is in a later batch.
+        .with_system(|_: ViewMut<Y>| {})
         .with_system(move |_: ViewMut<X>| {
             later_x.fetch_add(1, Ordering::SeqCst);
         })

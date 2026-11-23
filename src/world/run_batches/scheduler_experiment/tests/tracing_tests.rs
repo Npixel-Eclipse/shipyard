@@ -2,6 +2,8 @@ use super::*;
 use core::fmt::Debug;
 use std::collections::BTreeMap;
 use std::sync::atomic::AtomicU64;
+use std::env::{current_exe, var};
+use std::process::Command;
 use tracing::field::{Field, Visit};
 use tracing::span::{Attributes, Id, Record};
 use tracing::subscriber::set_global_default;
@@ -103,6 +105,21 @@ impl Subscriber for Collector {
 
 #[test]
 fn tracing_keeps_system_names_parent_and_balanced_lifetimes() {
+    // Upstream regroup tracing tests install their own process-global subscriber.
+    // A fresh process avoids replacing or racing it while still observing Rayon.
+    const CHILD: &str = "SHIPYARD_DIRECT_TRACING_TEST_CHILD";
+    let full_name = concat!(module_path!(), "::tracing_keeps_system_names_parent_and_balanced_lifetimes");
+    let name = full_name.split_once("::").expect("crate-qualified test name").1;
+    if var(CHILD).as_deref() != Ok(name) {
+        let output = Command::new(current_exe().expect("test executable"))
+            .args(["--exact", name, "--nocapture", "--test-threads=1"])
+            .env(CHILD, name)
+            .output().expect("isolated tracing test");
+        assert!(output.status.success(), "stdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"), "child filter matched no test");
+        return;
+    }
     let state = Arc::new(State::default());
     set_global_default(Collector(state.clone())).expect("one global tracing test collector");
     for workers in [1, 4] {

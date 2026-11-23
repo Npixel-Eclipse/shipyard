@@ -1,19 +1,21 @@
 use crate::all_storages::AllStorages;
 use crate::atomic_refcell::{ARef, ARefMut, ExclusiveBorrow, SharedBorrow};
 use crate::component::Component;
-#[cfg(feature = "scheduler-experiment")]
-use crate::tracking_observation::{hit, matched};
 use crate::entity_id::EntityId;
 use crate::error;
 use crate::get::Get;
 use crate::r#mut::SafeMut;
-use crate::sparse_set::{flag_modification_chunk, SparseSet, SparseSetDrain};
+use crate::sparse_set::TRACKING_CHUNK_SIZE;
+use crate::sparse_set::{SparseSet, SparseSetDrain};
 use crate::storage::StorageId;
 use crate::track;
 use crate::tracking::{
-    DeletionTracking, Inserted, InsertedOrModified, InsertionTracking, ModificationTracking,
-    Modified, RemovalOrDeletionTracking, RemovalTracking, Tracking, TrackingTimestamp,
+    DeletionTracking, Inserted, InsertedOrModified, InsertionOrModificationTracking,
+    InsertionTracking, ModificationTracking, Modified, RemovalOrDeletionTracking, RemovalTracking,
+    Tracking, TrackingTimestamp,
 };
+#[cfg(feature = "scheduler-experiment")]
+use crate::tracking_observation::{hit, matched};
 use crate::views::view::View;
 use core::fmt;
 use core::marker::PhantomData;
@@ -153,11 +155,11 @@ impl<'a, T: Component> ViewMut<'a, T, track::Untracked> {
     ///
     /// let all_storages = world.all_storages().unwrap();
     /// let scripting_storage =
-    ///     ViewMut::<ScriptingComponent>::new_for_custom_storage(StorageId::Custom(0), all_storages)
+    ///     ViewMut::<ScriptingComponent>::new_for_custom_storage(&StorageId::Custom(0), all_storages)
     ///         .unwrap();
     /// ```
     pub fn new_for_custom_storage(
-        storage_id: StorageId,
+        storage_id: &StorageId,
         all_storages: ARef<'a, &'a AllStorages>,
     ) -> Result<Self, error::CustomStorageView> {
         use crate::all_storages::CustomStorageAccess;
@@ -338,6 +340,42 @@ where
     }
 }
 
+#[cfg(feature = "thread_local")]
+impl<Track, T: Component + Sync> crate::borrow::NonSend<ViewMut<'_, T, Track>>
+where
+    Track: InsertionTracking,
+{
+    /// Removes the *inserted* flag on all components of this storage.
+    #[inline]
+    pub fn clear_all_inserted(self) {
+        self.0.sparse_set.private_clear_all_inserted(self.0.current);
+    }
+}
+
+#[cfg(feature = "thread_local")]
+impl<Track, T: Component + Send> crate::borrow::NonSync<ViewMut<'_, T, Track>>
+where
+    Track: InsertionTracking,
+{
+    /// Removes the *inserted* flag on all components of this storage.
+    #[inline]
+    pub fn clear_all_inserted(self) {
+        self.0.sparse_set.private_clear_all_inserted(self.0.current);
+    }
+}
+
+#[cfg(feature = "thread_local")]
+impl<Track, T: Component> crate::borrow::NonSendSync<ViewMut<'_, T, Track>>
+where
+    Track: InsertionTracking,
+{
+    /// Removes the *inserted* flag on all components of this storage.
+    #[inline]
+    pub fn clear_all_inserted(self) {
+        self.0.sparse_set.private_clear_all_inserted(self.0.current);
+    }
+}
+
 impl<Track, T: Component> ViewMut<'_, T, Track>
 where
     Track: ModificationTracking,
@@ -374,23 +412,70 @@ where
     }
 }
 
+#[cfg(feature = "thread_local")]
+impl<Track, T: Component + Sync> crate::borrow::NonSend<ViewMut<'_, T, Track>>
+where
+    Track: ModificationTracking,
+{
+    /// Removes the *modified* flag on all components of this storage.
+    #[inline]
+    pub fn clear_all_modified(self) {
+        self.0.sparse_set.private_clear_all_modified(self.0.current);
+    }
+}
+
+#[cfg(feature = "thread_local")]
+impl<Track, T: Component + Send> crate::borrow::NonSync<ViewMut<'_, T, Track>>
+where
+    Track: ModificationTracking,
+{
+    /// Removes the *modified* flag on all components of this storage.
+    #[inline]
+    pub fn clear_all_modified(self) {
+        self.0.sparse_set.private_clear_all_modified(self.0.current);
+    }
+}
+
+#[cfg(feature = "thread_local")]
+impl<Track, T: Component> crate::borrow::NonSendSync<ViewMut<'_, T, Track>>
+where
+    Track: ModificationTracking,
+{
+    /// Removes the *modified* flag on all components of this storage.
+    #[inline]
+    pub fn clear_all_modified(self) {
+        self.0.sparse_set.private_clear_all_modified(self.0.current);
+    }
+}
+
 impl<Track, T: Component> ViewMut<'_, T, Track>
 where
-    Track: InsertionTracking + ModificationTracking,
+    Track: InsertionOrModificationTracking,
 {
     /// Inside a workload returns `true` if `entity`'s component was inserted or modified since the last run of this system.\
-    /// Outside workloads returns `true` if `entity`'s component was inserted or modified since the last call to [`clear_all_inserted`](ViewMut::clear_all_inserted).\
+    /// Outside workloads returns `true` if `entity`'s component was inserted or modified since the last clear call.\
     /// Returns `false` if `entity` does not have a component in this storage.
     #[inline]
     pub fn is_inserted_or_modified(&self, entity: EntityId) -> bool {
-        self.is_inserted(entity) || self.is_modified(entity)
+        let value = Track::is_inserted(self.sparse_set, entity, self.last_insertion, self.current)
+            || Track::is_modified(
+                self.sparse_set,
+                entity,
+                self.last_modification,
+                self.current,
+            );
+        #[cfg(feature = "scheduler-experiment")]
+        let value = matched::<T>(value, "inserted_or_modified", entity, self.current);
+        value
     }
-    /// Wraps this view to be able to iterate *inserted* and *modified* components.
+    /// Wraps this view to iterate components with an enabled insertion or modification event.\
+    /// When both kinds are enabled, each matching component appears once.
     #[inline]
     pub fn inserted_or_modified(&self) -> InsertedOrModified<&Self> {
         InsertedOrModified(self)
     }
-    /// Wraps this view to be able to iterate *inserted* and *modified* components.
+    /// Wraps this view to mutably iterate components with an enabled insertion or modification event.\
+    /// When both kinds are enabled, each matching component appears once.
     #[inline]
     pub fn inserted_or_modified_mut(&mut self) -> InsertedOrModified<&mut Self> {
         InsertedOrModified(self)
@@ -400,6 +485,48 @@ where
     pub fn clear_all_inserted_and_modified(self) {
         self.sparse_set
             .private_clear_all_inserted_and_modified(self.current);
+    }
+}
+
+#[cfg(feature = "thread_local")]
+impl<Track, T: Component + Sync> crate::borrow::NonSend<ViewMut<'_, T, Track>>
+where
+    Track: InsertionOrModificationTracking,
+{
+    /// Removes the *inserted* and *modified* flags on all components of this storage.
+    #[inline]
+    pub fn clear_all_inserted_and_modified(self) {
+        self.0
+            .sparse_set
+            .private_clear_all_inserted_and_modified(self.0.current);
+    }
+}
+
+#[cfg(feature = "thread_local")]
+impl<Track, T: Component + Send> crate::borrow::NonSync<ViewMut<'_, T, Track>>
+where
+    Track: InsertionOrModificationTracking,
+{
+    /// Removes the *inserted* and *modified* flags on all components of this storage.
+    #[inline]
+    pub fn clear_all_inserted_and_modified(self) {
+        self.0
+            .sparse_set
+            .private_clear_all_inserted_and_modified(self.0.current);
+    }
+}
+
+#[cfg(feature = "thread_local")]
+impl<Track, T: Component> crate::borrow::NonSendSync<ViewMut<'_, T, Track>>
+where
+    Track: InsertionOrModificationTracking,
+{
+    /// Removes the *inserted* and *modified* flags on all components of this storage.
+    #[inline]
+    pub fn clear_all_inserted_and_modified(self) {
+        self.0
+            .sparse_set
+            .private_clear_all_inserted_and_modified(self.0.current);
     }
 }
 
@@ -559,7 +686,7 @@ impl<'a, T: Component, Track> core::ops::IndexMut<EntityId> for ViewMut<'a, T, T
         let SparseSet {
             data,
             modification_data,
-            modification_chunks,
+            modification_summary,
             is_tracking_modification,
             ..
         } = self.sparse_set;
@@ -567,8 +694,8 @@ impl<'a, T: Component, Track> core::ops::IndexMut<EntityId> for ViewMut<'a, T, T
         if *is_tracking_modification {
             unsafe {
                 *modification_data.get_unchecked_mut(index) = self.current;
+                modification_summary[index / TRACKING_CHUNK_SIZE].mark_mut(self.current);
             };
-            flag_modification_chunk(modification_chunks, index, self.current);
         }
 
         unsafe { data.get_unchecked_mut(index) }
