@@ -2,7 +2,7 @@
 
 ## 0.11.9 custom-features 통합 (2026-11-23)
 
-`2fb4fdd`의 새 `Shiperator`/구간 계획·grouping·tracking 청크 구현을 기준으로 이전 회귀 동작과 이식한다. 기존 아래 측정값은 이 통합본의 성능 검증 결과가 아니다.
+`2fb4fdd`의 새 `Shiperator`/구간 계획·grouping·tracking 청크 구현에 기존 호환 동작을 이식한다. 아래 측정값은 이전 리비전에서 수집했다.
 
 - 기본 병렬 순회는 upstream의 후보량 기반 자동 분할과 exact traversal의 indexed 경로를 유지한다. 명시적 `with_split_threshold(n)`만 unindexed producer를 사용하고 `opt_len()`은 `None`이다. 0은 거부하고 마지막 설정이 적용되며 `with_id()`도 설정을 보존한다. 후보량은 join/OR 중복 제거 전 상한이며, mutable tracking OR의 분할 금지는 override보다 우선한다.
 - `Modified`, `InsertedOrModified`, 중첩 OR 연산자 및 View 재대여 수명 분리를 유지한다. 수정 가능한 추적 조건을 포함한 OR는 다른 producer의 timestamp를 읽지 않도록 단일 producer로 실행한다. 일반 mutable OR와 읽기 전용 tracking OR의 병렬 분할은 유지한다.
