@@ -28,6 +28,8 @@ pub(crate) struct DagNode {
 pub(crate) struct DagGraph {
     pub(crate) nodes: Vec<DagNode>,
     pub(crate) roots: Vec<usize>,
+    #[cfg(feature = "workload-order")]
+    pub(crate) occurrences: Vec<usize>,
 }
 
 pub(crate) enum DagEpoch {
@@ -230,7 +232,12 @@ impl DagGraph {
             .enumerate()
             .filter_map(|(id, node)| (node.predecessors == 0).then_some(id))
             .collect();
-        Some(Self { nodes, roots })
+        Some(Self {
+            nodes,
+            roots,
+            #[cfg(feature = "workload-order")]
+            occurrences: occurrences.to_vec(),
+        })
     }
 }
 

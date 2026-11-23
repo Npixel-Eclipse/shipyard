@@ -35,6 +35,7 @@ proc = ["shipyard_proc"]
 serde1 = ["serde", "serde/alloc", "hashbrown/serde"]
 std = ["hashbrown/default-hasher"]
 thread_local = []
+workload-order = ["parallel"]
 # SparseArray uses 4KiB page size, with this feature it is lowered to 256B
 # The negative impact on iteration is around 5-10%
 memory_constrained = []

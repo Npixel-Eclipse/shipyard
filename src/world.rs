@@ -23,6 +23,8 @@ use crate::memory_usage::WorldMemoryUsage;
 use crate::r#mut::SafeMut;
 use crate::reserve::BulkEntityIter;
 use crate::scheduler::info::WorkloadsInfo;
+#[cfg(feature = "workload-order")]
+use crate::scheduler::WorkloadExecutionOrder;
 use crate::scheduler::{AsLabel, Batches, Label, Scheduler};
 use crate::sparse_set::{BulkAddEntity, TupleAddComponent, TupleDelete, TupleRemove};
 use crate::storage::{Storage, StorageId};
@@ -1351,6 +1353,20 @@ impl World {
                 .map(|(name, workload_info)| (format!("{:?}", name), workload_info.clone()))
                 .collect(),
         )
+    }
+
+    #[cfg(feature = "workload-order")]
+    #[doc(hidden)]
+    pub fn workload_execution_order<T>(
+        &self,
+        label: impl AsLabel<T>,
+    ) -> Result<WorkloadExecutionOrder, error::RunWorkload> {
+        let scheduler = self
+            .scheduler
+            .borrow()
+            .map_err(|_| error::RunWorkload::Scheduler)?;
+        let batches = scheduler.workload(&*label.as_label())?;
+        Ok(WorkloadExecutionOrder::from_batches(batches))
     }
 
     /// Enable insertion tracking for the given components.

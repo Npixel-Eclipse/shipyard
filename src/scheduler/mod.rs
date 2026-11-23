@@ -1,6 +1,8 @@
 mod batches;
 #[cfg(feature = "parallel")]
 pub(crate) mod dag;
+#[cfg(feature = "workload-order")]
+mod workload_order;
 pub mod info;
 mod into_workload;
 mod into_workload_run_if;
@@ -22,6 +24,8 @@ pub use system::WorkloadSystem;
 pub use system_modificator::SystemModificator;
 pub use workload::{ScheduledWorkload, Workload};
 pub use workload_modificator::WorkloadModificator;
+#[cfg(feature = "workload-order")]
+pub use workload_order::WorkloadExecutionOrder;
 
 pub(crate) use batches::{Batches, RegroupStep, Step};
 pub(crate) use info::TypeInfo;

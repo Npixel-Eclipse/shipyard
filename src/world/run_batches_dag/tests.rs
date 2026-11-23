@@ -78,6 +78,17 @@ fn ready_successor_runs_before_unrelated_previous_batch_body_finishes() {
         .with_system(|_: ViewMut<'_, X>| {})
         .with_system(move |_: ViewMut<'_, X>| child.set());
     assert!(workload.add_to_world(&world).is_ok());
+    #[cfg(feature = "workload-order")]
+    {
+        let Ok(order) = world.workload_execution_order("test") else {
+            panic!("registered execution order");
+        };
+        assert!(!order.happens_before(0, 2));
+        assert!(order.happens_before(1, 2));
+        assert!(!order.happens_before(2, 1));
+        assert!(!order.happens_before(2, 2));
+        assert!(!order.happens_before(1, 3));
+    }
     assert!(run(&world).is_ok());
     assert!(
         observed.load(Ordering::SeqCst),
@@ -135,6 +146,15 @@ fn all_storages_stays_on_owner_and_explicit_barrier_is_preserved() {
             assert_eq!(after.load(Ordering::SeqCst), 2);
         });
     assert!(workload.add_to_world(&world).is_ok());
+    #[cfg(feature = "workload-order")]
+    {
+        let Ok(order) = world.workload_execution_order("test") else {
+            panic!("registered execution order");
+        };
+        assert!(order.happens_before(0, 1));
+        assert!(order.happens_before(1, 2));
+        assert!(order.happens_before(0, 2));
+    }
     assert!(run(&world).is_ok());
 }
 
@@ -276,6 +296,8 @@ fn concurrent_errors_choose_lowest_node_and_do_not_release_successors() {
             },
         ],
         roots: vec![0, 1],
+        #[cfg(feature = "workload-order")]
+        occurrences: vec![0, 1, 2],
     };
     #[cfg(feature = "tracing")]
     let span = Span::none();
