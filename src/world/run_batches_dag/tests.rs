@@ -81,11 +81,11 @@ fn ready_successor_runs_before_unrelated_previous_batch_body_finishes() {
     let slow_signal = Arc::clone(&child);
     let slow_observed = Arc::clone(&observed);
     let workload = Workload::new("test")
-        .with_system(move |_: ViewMut<Y>| {
+        .with_system(move |_: ViewMut<'_, Y>| {
             slow_observed.store(slow_signal.wait(), Ordering::SeqCst);
         })
-        .with_system(|_: ViewMut<X>| {})
-        .with_system(move |_: ViewMut<X>| child.set());
+        .with_system(|_: ViewMut<'_, X>| {})
+        .with_system(move |_: ViewMut<'_, X>| child.set());
     assert!(workload.add_to_world(&world).is_ok());
     assert!(run(&world).is_ok());
     assert!(
@@ -104,11 +104,11 @@ fn condition_is_evaluated_after_prior_batch_and_before_its_own_body() {
     let called = Arc::new(AtomicUsize::new(0));
     let result = Arc::clone(&called);
     let workload = Workload::new("test")
-        .with_system(move |_: ViewMut<X>| {
+        .with_system(move |_: ViewMut<'_, X>| {
             a.store(1, Ordering::SeqCst);
         })
         .with_system(
-            (move |_: ViewMut<X>| {
+            (move |_: ViewMut<'_, X>| {
                 assert_eq!(b.load(Ordering::SeqCst), 1);
                 b.store(2, Ordering::SeqCst);
                 result.fetch_add(1, Ordering::SeqCst);
@@ -134,7 +134,7 @@ fn all_storages_stays_on_owner_and_explicit_barrier_is_preserved() {
             before.store(1, Ordering::SeqCst);
         })
         .with_barrier()
-        .with_system(move |_: AllStoragesViewMut| {
+        .with_system(move |_: AllStoragesViewMut<'_>| {
             assert_eq!(current().id(), owner);
             assert_eq!(during.load(Ordering::SeqCst), 1);
             during.store(2, Ordering::SeqCst);
@@ -155,17 +155,17 @@ fn known_fallible_batch_keeps_later_independent_external_effects_unstarted() {
         let dependent = Arc::clone(&later);
         let independent = Arc::clone(&later);
         let workload = Workload::new("test")
-            .with_system(move |_: ViewMut<X>| -> Result<(), SystemError> {
+            .with_system(move |_: ViewMut<'_, X>| -> Result<(), SystemError> {
                 assert!(!should_panic, "expected marked panic");
                 Err(Error::other("expected marked error").into())
             })
             // Upstream packs every ready independent system into the first
             // batch. This root puts the later Y effect in the next batch.
-            .with_system(|_: ViewMut<Y>| {})
-            .with_system(move |_: ViewMut<X>| {
+            .with_system(|_: ViewMut<'_, Y>| {})
+            .with_system(move |_: ViewMut<'_, X>| {
                 dependent.fetch_add(1, Ordering::SeqCst);
             })
-            .with_system(move |_: ViewMut<Y>| {
+            .with_system(move |_: ViewMut<'_, Y>| {
                 independent.fetch_add(1, Ordering::SeqCst);
             });
         assert!(workload.add_to_world(&world).is_ok());
@@ -182,7 +182,7 @@ fn known_fallible_batch_keeps_later_independent_external_effects_unstarted() {
 
 #[test]
 fn reused_registered_fallible_function_retains_fallible_provenance() {
-    fn fail(_: ViewMut<X>) -> Result<(), SystemError> {
+    fn fail(_: ViewMut<'_, X>) -> Result<(), SystemError> {
         Err(Error::other("registered as fallible system first").into())
     }
     let world = two_workers();
@@ -196,11 +196,11 @@ fn reused_registered_fallible_function_retains_fallible_provenance() {
     // The registry reuses the first TypeId's fallible callable across workloads.
     assert!(Workload::new("test")
         .with_system(fail)
-        .with_system(|_: ViewMut<Y>| {})
-        .with_system(move |_: ViewMut<X>| {
+        .with_system(|_: ViewMut<'_, Y>| {})
+        .with_system(move |_: ViewMut<'_, X>| {
             dependent.fetch_add(1, Ordering::SeqCst);
         })
-        .with_system(move |_: ViewMut<Y>| {
+        .with_system(move |_: ViewMut<'_, Y>| {
             independent.fetch_add(1, Ordering::SeqCst);
         })
         .add_to_world(&world)
@@ -220,14 +220,14 @@ fn unexpected_panic_propagates_original_payload_but_early_independent_effect_is_
     let independent_count = Arc::new(AtomicUsize::new(0));
     let independent = Arc::clone(&independent_count);
     let workload = Workload::new("test")
-        .with_system(move |_: ViewMut<X>| {
+        .with_system(move |_: ViewMut<'_, X>| {
             assert!(wait.wait(), "independent root must have been admitted");
             panic!("original DAG panic payload");
         })
-        .with_system(move |_: ViewMut<X>| {
+        .with_system(move |_: ViewMut<'_, X>| {
             dependent.fetch_add(1, Ordering::SeqCst);
         })
-        .with_system(move |_: ViewMut<Y>| {
+        .with_system(move |_: ViewMut<'_, Y>| {
             independent.fetch_add(1, Ordering::SeqCst);
             independent_done.set();
         });
@@ -351,12 +351,12 @@ fn reused_read_only_tracking_system_keeps_its_original_batch_boundaries() {
     impl Component for Tracked {
         type Tracking = All;
     }
-    fn unrelated(_: ViewMut<X>) {}
+    fn unrelated(_: ViewMut<'_, X>) {}
 
     let mut world = two_workers();
     let counts = Arc::new(Mutex::new(Vec::new()));
     let observed = Arc::clone(&counts);
-    let read_tracked = move |values: View<Tracked>| {
+    let read_tracked = move |values: View<'_, Tracked>| {
         let count = values.inserted_or_modified().iter().count();
         let Ok(mut observations) = observed.lock() else {
             panic!("tracking observations");
@@ -413,14 +413,16 @@ fn non_send_sync_borrow_remains_on_owner_thread() {
     use crate::borrow::NonSendSync;
     use crate::View;
     use std::rc::Rc;
-    struct Local(Rc<()>);
+    struct Local {
+        _not_send_sync: Rc<()>,
+    }
     impl Component for Local {
         type Tracking = Untracked;
     }
     let world = two_workers();
     let owner = current().id();
     assert!(Workload::new("test")
-        .with_system(move |_: NonSendSync<View<Local>>| {
+        .with_system(move |_: NonSendSync<View<'_, Local>>| {
             assert_eq!(current().id(), owner);
         })
         .add_to_world(&world)

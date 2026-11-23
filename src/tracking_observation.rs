@@ -19,11 +19,15 @@ use std::sync::{OnceLock, RwLock};
 /// One positive query observation. Entity is EntityId::inner(), not a game ID.
 #[derive(Clone, Copy, Debug)]
 pub struct TrackingHit {
+    /// Registered workload system type name associated with this query's timestamp.
+    /// Inner Rayon tasks retain the identity of the system that borrowed their views.
     pub system: &'static str,
+    /// Fully qualified Rust component type name, as returned by `type_name::<T>()`.
     pub component: &'static str,
     /// inserted, modified, inserted_or_modified, deleted, removed, or
     /// removed_or_deleted. Union filters retain their union kind.
     pub kind: &'static str,
+    /// Raw `EntityId::inner()` including its generation; this is not a game entity handle.
     pub entity: u64,
     /// System-start tracking timestamp, not elapsed time or a tick number.
     pub current: u64,

@@ -128,7 +128,7 @@ fn tracing_keeps_system_names_parent_and_balanced_lifetimes() {
             .build()
             .expect("trace pool");
         let systems: Vec<System> = (0..8)
-            .map(|_| Box::new(|_: &World| Ok(())) as System)
+            .map(|_| -> System { Box::new(|_: &World| Ok(())) })
             .collect();
         let mut batch = batches(vec![(None, (0..8).collect())]);
         batch.parallel_run_if[0].1[3] = 0;

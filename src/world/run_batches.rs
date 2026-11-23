@@ -2,7 +2,7 @@ use crate::error;
 use crate::scheduler::{Batches, Label, RegroupStep, Step};
 use crate::world::World;
 use alloc::boxed::Box;
-#[cfg(feature = "parallel")]
+#[cfg(any(feature = "parallel", feature = "tracing"))]
 use alloc::vec::Vec;
 
 #[cfg(feature = "scheduler-experiment")]
@@ -111,7 +111,10 @@ impl World {
     /// Runs `op` on the current thread, in a scope whose spawned jobs run in the world's pool,
     /// or the global pool when the world doesn't have one.
     #[cfg(feature = "parallel")]
-    fn in_place_scope<'scope, R>(&self, op: impl FnOnce(&rayon::Scope<'scope>) -> R) -> R {
+    pub(super) fn in_place_scope<'scope, R>(
+        &self,
+        op: impl FnOnce(&rayon::Scope<'scope>) -> R,
+    ) -> R {
         match &self.thread_pool {
             Some(thread_pool) => thread_pool.in_place_scope(op),
             None => rayon::in_place_scope(op),
@@ -201,7 +204,7 @@ impl World {
     ///
     /// `usize::MAX` means the system has no condition.
     #[inline]
-    fn should_run(
+    pub(super) fn should_run(
         &self,
         batches: &Batches,
         system_names: &[Box<dyn Label>],
@@ -218,7 +221,7 @@ impl World {
 
     #[allow(clippy::type_complexity)]
     #[inline]
-    fn run_single_system(
+    pub(super) fn run_single_system(
         &self,
         systems: &[Box<dyn Fn(&World) -> Result<(), error::Run> + Send + Sync>],
         system_names: &[Box<dyn Label>],
@@ -279,7 +282,7 @@ impl World {
 
 /// Returns the names of the storages `regroup` borrows, its whole connected set.
 #[cfg(feature = "tracing")]
-fn set_names(regroup: &RegroupStep) -> alloc::vec::Vec<&str> {
+fn set_names(regroup: &RegroupStep) -> Vec<&str> {
     regroup
         .borrow
         .iter()

@@ -1,7 +1,8 @@
 #![cfg(feature = "std")]
 
+use shipyard::scheduler::SystemModificator;
 use shipyard::track::Untracked;
-use shipyard::{Component, IntoWorkloadTrySystem, SystemModificator, View, Workload, World};
+use shipyard::{Component, IntoWorkloadTrySystem, View, Workload, World};
 use std::io::Error;
 
 struct Marker;

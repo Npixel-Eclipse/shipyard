@@ -96,11 +96,8 @@ fn split_offsets() {
 
     assert_eq!((left.local_index(), left.len()), (3, 2));
     assert_eq!((right.local_index(), right.len()), (5, 3));
-    // SAFE: Both halves are nonempty.
-    unsafe {
-        assert_eq!(left.current(), entities[3]);
-        assert_eq!(right.current(), entities[5]);
-    }
+    assert_eq!(left.current(), entities[3]);
+    assert_eq!(right.current(), entities[5]);
 }
 
 /// Asserts that splitting at either end gives an empty half and a half with every entity,

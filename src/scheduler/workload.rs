@@ -481,7 +481,7 @@ impl Workload {
 
         // We only publish the workload once every step that can fail succeeded,
         // a rejected workload doesn't show up in `workloads`, `default` or `workloads_info`.
-        let built = create_workload::create_workload(
+        let built = create_workload(
             self,
             systems,
             system_names,

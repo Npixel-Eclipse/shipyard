@@ -15,7 +15,7 @@ type System = Box<dyn Fn(&World) -> Result<(), Run> + Send + Sync>;
 
 fn names(count: usize) -> Vec<Box<dyn Label>> {
     (0..count)
-        .map(|id| Box::new(format!("{id}")) as Box<dyn Label>)
+        .map(|id| -> Box<dyn Label> { Box::new(format!("{id}")) })
         .collect()
 }
 
@@ -67,7 +67,7 @@ fn exactly_once_nested_parallel_and_next_batch_barrier() {
         let hits = Arc::new((0..9).map(|_| AtomicUsize::new(0)).collect::<Vec<_>>());
         let nested = Arc::new(AtomicUsize::new(0));
         let mut systems: Vec<System> = (0..8)
-            .map(|id| {
+            .map(|id| -> System {
                 let hits = hits.clone();
                 let nested = nested.clone();
                 Box::new(move |_: &World| {
@@ -76,7 +76,7 @@ fn exactly_once_nested_parallel_and_next_batch_barrier() {
                     });
                     hits[id].fetch_add(1, Ordering::SeqCst);
                     Ok(())
-                }) as System
+                })
             })
             .collect();
         let last_hits = hits.clone();
@@ -102,25 +102,25 @@ fn run_if_runs_once_immediately_before_its_own_body() {
     let evaluated = Arc::new(Mutex::new(Vec::new()));
     let hits = Arc::new((0..4).map(|_| AtomicUsize::new(0)).collect::<Vec<_>>());
     let systems: Vec<System> = (0..4)
-        .map(|id| {
+        .map(|id| -> System {
             let hits = hits.clone();
             let evaluated = evaluated.clone();
             Box::new(move |_: &World| {
                 assert_eq!(evaluated.lock().expect("evaluated lock").iter().filter(|&&seen| seen == id).count(), 1);
                 hits[id].fetch_add(1, Ordering::SeqCst);
                 Ok(())
-            }) as System
+            })
         })
         .collect();
     let mut batch = batches(vec![(None, (0..4).collect())]);
     batch.parallel_run_if[0].1 = (0..4).collect();
     batch.systems_run_if = (0..4)
-        .map(|id| {
+        .map(|id| -> Box<dyn Fn(&World) -> Result<bool, Run> + Send + Sync> {
             let evaluated = evaluated.clone();
             Box::new(move |_: &World| {
                 evaluated.lock().expect("evaluated lock").push(id);
                 Ok(id % 2 == 1)
-            }) as Box<dyn Fn(&World) -> Result<bool, Run> + Send + Sync>
+            })
         })
         .collect();
     run(&systems, &batch, 4).expect("filtered workload");
@@ -139,12 +139,12 @@ fn run_if_runs_once_immediately_before_its_own_body() {
 fn run_if_failure_skips_its_body_and_later_batches_but_joins_its_siblings() {
     let hits = Arc::new(AtomicUsize::new(0));
     let systems: Vec<System> = (0..3)
-        .map(|_| {
+        .map(|_| -> System {
             let hits = hits.clone();
             Box::new(move |_: &World| {
                 hits.fetch_add(1, Ordering::SeqCst);
                 Ok(())
-            }) as System
+            })
         })
         .collect();
     let mut batch = batches(vec![(None, vec![0, 1]), (None, vec![2])]);
@@ -274,7 +274,7 @@ fn regroup_workloads_use_baseline_and_preserve_regroup_borrow_errors() {
         let hits = Arc::new(AtomicUsize::new(0));
         let body_hits = Arc::clone(&hits);
         Workload::new("regroup")
-            .with_system(move |a: View<A>, b: View<B>| {
+            .with_system(move |a: View<'_, A>, b: View<'_, B>| {
                 assert_eq!((&a, &b).iter().count(), 1);
                 body_hits.fetch_add(1, Ordering::SeqCst);
             })
@@ -290,7 +290,7 @@ fn regroup_workloads_use_baseline_and_preserve_regroup_borrow_errors() {
                 world.run_batches_direct(&scheduler.systems, &scheduler.system_names, batches, &"regroup")
             }
         };
-        let borrowed = world.borrow::<ViewMut<B>>().expect("hold grouped storage");
+        let borrowed = world.borrow::<ViewMut<'_, B>>().expect("hold grouped storage");
         assert!(matches!(execute(), Err(RunWorkload::Regroup(_))));
         assert_eq!(hits.load(Ordering::SeqCst), 0);
         drop(borrowed);

@@ -5,6 +5,7 @@ use crate::iter::IntoIter;
 use crate::scheduler::IntoWorkloadSystem;
 use crate::scheduler::info::WorkloadInfo;
 use alloc::sync::Arc;
+use core::error::Error;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 /// Returns a world with the AB group and an unevaluated entity in it.
@@ -162,7 +163,7 @@ fn custom_error(world: &World, name: &'static str) -> bool {
 /// When the workload didn't stop because of a system's error.
 fn system_failure(
     result: Result<(), error::RunWorkload>,
-) -> (Box<dyn Label>, Box<dyn core::error::Error + Send + Sync>) {
+) -> (Box<dyn Label>, Box<dyn Error + Send + Sync>) {
     match result {
         Err(error::RunWorkload::Run((label, error::Run::Custom(returned)))) => {
             (label, returned.into_inner())
@@ -172,9 +173,7 @@ fn system_failure(
 }
 
 /// Returns the name of the `MissingComponent` held by `returned`, `None` if it holds another error.
-fn missing_name(
-    returned: &(dyn core::error::Error + Send + Sync + 'static),
-) -> Option<&'static str> {
+fn missing_name(returned: &(dyn Error + Send + Sync + 'static)) -> Option<&'static str> {
     returned
         .downcast_ref::<error::MissingComponent>()
         .map(|missing| missing.name)

@@ -25,20 +25,20 @@ fn assert_failure_boundary(panic_first: bool) -> Result<(), Box<dyn std::error::
     let later_y = Arc::clone(&later_effects);
     // Borrow conflicts form A -> B and C -> D. C represents a producer/other external write.
     let (workload, _) = Workload::new("failure-boundary")
-        .with_system(move |_: ViewMut<X>| -> Result<(), SystemError> {
+        .with_system(move |_: ViewMut<'_, X>| -> Result<(), SystemError> {
             assert!(!panic_first, "expected first-system panic");
             Err(std::io::Error::other("expected first-system error").into())
         })
         // Independent roots may share the first batch in the current scheduler.
         // Give Y its own predecessor so the observable effect is in a later batch.
-        .with_system(|_: ViewMut<Y>| {})
-        .with_system(move |_: ViewMut<X>| {
+        .with_system(|_: ViewMut<'_, Y>| {})
+        .with_system(move |_: ViewMut<'_, X>| {
             later_x.fetch_add(1, Ordering::SeqCst);
         })
-        .with_system(move |_: ViewMut<Y>| {
+        .with_system(move |_: ViewMut<'_, Y>| {
             independent.fetch_add(1, Ordering::SeqCst);
         })
-        .with_system(move |_: ViewMut<Y>| {
+        .with_system(move |_: ViewMut<'_, Y>| {
             later_y.fetch_add(1, Ordering::SeqCst);
         })
         .build()?;

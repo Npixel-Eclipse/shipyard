@@ -1,8 +1,6 @@
 use crate::all_storages::AllStorages;
 use crate::borrow::{BorrowInfo, Mutability, WorldBorrow};
-use crate::error;
-#[cfg(feature = "scheduler-experiment")]
-use crate::error::SystemError;
+use crate::error::{self, SystemError};
 #[cfg(feature = "scheduler-experiment")]
 use crate::scheduler::dag::Fallible;
 use crate::scheduler::info::DedupedLabels;
@@ -46,7 +44,7 @@ fn workload_result<R: 'static>(output: R) -> Result<(), error::Run> {
     let output: &mut dyn Any = &mut output;
 
     match output
-        .downcast_mut::<Option<Result<(), error::SystemError>>>()
+        .downcast_mut::<Option<Result<(), SystemError>>>()
         .and_then(Option::take)
     {
         Some(Err(error)) => Err(error::Run::Custom(error)),
