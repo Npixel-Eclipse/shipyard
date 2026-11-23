@@ -26,7 +26,6 @@ serde = { version = "1", optional = true, default-features = false, features = [
 ] }
 shipyard_proc = { path = "shipyard_proc", version = "0.6.1", optional = true }
 tracing = { version = "0.1.44", default-features = false, optional = true }
-serde_json = { version = "1.0.145", optional = true }
 
 [features]
 default = ["parallel", "proc", "std"]
@@ -39,9 +38,6 @@ thread_local = []
 # SparseArray uses 4KiB page size, with this feature it is lowered to 256B
 # The negative impact on iteration is around 5-10%
 memory_constrained = []
-# Local scheduling experiments remain opt-in.
-scheduler-experiment = ["std", "parallel", "dep:serde_json"]
-scheduler-registration-benchmark = ["scheduler-experiment", "serde1"]
 
 [dev-dependencies]
 anyhow = "1.0.100"

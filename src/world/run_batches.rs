@@ -5,78 +5,10 @@ use alloc::boxed::Box;
 #[cfg(any(feature = "parallel", feature = "tracing"))]
 use alloc::vec::Vec;
 
-#[cfg(feature = "scheduler-experiment")]
-mod scheduler_experiment;
-
 impl World {
-    /// Runs the batches in order, the steps of a batch in parallel.
-    ///
-    /// The batch loop stays on the calling thread, even with a local pool:
-    /// the calling-thread step has to run on the world's thread.
+    /// Runs a DAG fence, retaining caller affinity and the condition/body boundary.
     #[cfg(feature = "parallel")]
-    #[allow(clippy::type_complexity)]
-    pub(crate) fn run_batches_parallel(
-        &self,
-        systems: &[Box<dyn Fn(&World) -> Result<(), error::Run> + Send + Sync + 'static>],
-        system_names: &[Box<dyn Label>],
-        batches: &Batches,
-        #[cfg_attr(not(feature = "tracing"), allow(unused))] workload_name: &dyn Label,
-    ) -> Result<(), error::RunWorkload> {
-        #[cfg(feature = "scheduler-experiment")]
-        match scheduler_experiment::mode() {
-            scheduler_experiment::Mode::Baseline => {}
-            scheduler_experiment::Mode::Direct => {
-                return self.run_batches_direct(systems, system_names, batches, workload_name);
-            }
-            scheduler_experiment::Mode::Dag => {
-                return self.run_batches_dag(systems, system_names, batches, workload_name);
-            }
-        }
-        self.run_batches_parallel_baseline(systems, system_names, batches, workload_name)
-    }
-
-    #[cfg(feature = "parallel")]
-    #[allow(clippy::type_complexity)]
-    pub(crate) fn run_batches_parallel_baseline(
-        &self,
-        systems: &[Box<dyn Fn(&World) -> Result<(), error::Run> + Send + Sync + 'static>],
-        system_names: &[Box<dyn Label>],
-        batches: &Batches,
-        #[cfg_attr(not(feature = "tracing"), allow(unused))] workload_name: &dyn Label,
-    ) -> Result<(), error::RunWorkload> {
-        #[cfg(feature = "tracing")]
-        let parent_span = tracing::info_span!("workload", name = ?workload_name);
-        #[cfg(feature = "tracing")]
-        let _parent_span = parent_span.enter();
-
-        let run_step = |step, run_if_index| {
-            #[cfg(feature = "tracing")]
-            {
-                self.run_step(
-                    systems,
-                    system_names,
-                    batches,
-                    &parent_span,
-                    step,
-                    run_if_index,
-                )
-            }
-            #[cfg(not(feature = "tracing"))]
-            {
-                self.run_step(systems, system_names, batches, step, run_if_index)
-            }
-        };
-
-        for (batch, batch_run_if) in batches.parallel.iter().zip(&batches.parallel_run_if) {
-            self.run_one_batch_parallel(batch, batch_run_if, &run_step)?;
-        }
-
-        Ok(())
-    }
-
-    /// The upstream caller-slot, condition/body and error precedence contract.
-    #[cfg(feature = "parallel")]
-    fn run_one_batch_parallel<F>(
+    pub(super) fn run_one_batch_parallel<F>(
         &self,
         batch: &(Option<Step>, Vec<Step>),
         batch_run_if: &(usize, Vec<usize>),
@@ -159,7 +91,7 @@ impl World {
     /// `usize::MAX` when it doesn't have one. Regroups never have one.
     #[allow(clippy::type_complexity)]
     #[inline]
-    fn run_step(
+    pub(super) fn run_step(
         &self,
         systems: &[Box<dyn Fn(&World) -> Result<(), error::Run> + Send + Sync>],
         system_names: &[Box<dyn Label>],

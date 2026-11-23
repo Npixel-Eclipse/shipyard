@@ -12,7 +12,7 @@ use crate::all_storages::{AllStorages, StorageMaps};
 use crate::component::{Component, Unique};
 #[cfg(feature = "std")]
 use crate::scheduler::IntoWorkloadTrySystem;
-#[cfg(feature = "scheduler-experiment")]
+#[cfg(feature = "parallel")]
 use crate::scheduler::dag::finish_registration;
 use crate::scheduler::info::{DedupedLabels, TypeInfo, WorkloadInfo};
 use crate::scheduler::label::WorkloadLabel;
@@ -450,7 +450,7 @@ impl Workload {
     #[allow(clippy::blocks_in_conditions)]
     pub fn add_to_world(self, world: &World) -> Result<(), error::AddWorkload> {
         let Scheduler {
-            #[cfg(feature = "scheduler-experiment")]
+            #[cfg(feature = "parallel")]
             dag_registered_fallible,
             systems,
             system_names,
@@ -488,7 +488,7 @@ impl Workload {
             system_generators,
             lookup_table,
             &mut tracking_to_enable,
-            #[cfg(feature = "scheduler-experiment")]
+            #[cfg(feature = "parallel")]
             dag_registered_fallible,
         )
         .and_then(|(mut batches, mut workload_info, dependencies)| {
@@ -508,14 +508,8 @@ impl Workload {
                 })?;
             }
 
-            #[cfg(feature = "scheduler-experiment")]
-            finish_registration(
-                &*name,
-                system_names,
-                dag_registered_fallible,
-                &mut batches,
-                &workload_info,
-            );
+            #[cfg(feature = "parallel")]
+            finish_registration(&dependencies.fallible, &mut batches, &workload_info);
             Ok((batches, workload_info))
         });
 
@@ -527,7 +521,7 @@ impl Workload {
                 // so the ones from earlier workloads are exactly those below `registered`.
                 // Tracking enabled by the callbacks that succeeded stays enabled, that's harmless.
                 systems.truncate(registered);
-                #[cfg(feature = "scheduler-experiment")]
+                #[cfg(feature = "parallel")]
                 dag_registered_fallible.truncate(registered);
                 system_names.truncate(registered);
                 system_generators.truncate(registered);
@@ -587,7 +581,10 @@ impl Workload {
     /// Iteration stays correct, but components added since the last regroup are slower to iterate.\
     /// Call [`World::regroup`] or [`World::regroup_set`] when it matters.
     pub fn build(self) -> Result<(ScheduledWorkload, WorkloadInfo), error::AddWorkload> {
-        let (workload, workload_info, _) = self.build_unprepared()?;
+        #[allow(unused_mut)]
+        let (mut workload, workload_info, _dependencies) = self.build_unprepared()?;
+        #[cfg(feature = "parallel")]
+        finish_registration(&_dependencies.fallible, &mut workload.batches, &workload_info);
 
         Ok((workload, workload_info))
     }
@@ -614,28 +611,18 @@ impl Workload {
             batches: Batches::default(),
         };
 
-        #[cfg(feature = "scheduler-experiment")]
+        #[cfg(feature = "parallel")]
         let mut dag_registered_fallible = Vec::new();
-        #[allow(unused_mut)]
-        let (mut batches, workload_info, dependencies) = create_workload(
+        let (batches, workload_info, dependencies) = create_workload(
             self,
             &mut workload.systems,
             &mut workload.system_names,
             &mut workload.system_generators,
             &mut workload.lookup_table,
             &mut workload.tracking_to_enable,
-            #[cfg(feature = "scheduler-experiment")]
+            #[cfg(feature = "parallel")]
             &mut dag_registered_fallible,
         )?;
-
-        #[cfg(feature = "scheduler-experiment")]
-        finish_registration(
-            &*workload.name,
-            &workload.system_names,
-            &dag_registered_fallible,
-            &mut batches,
-            &workload_info,
-        );
 
         workload.batches = batches;
 

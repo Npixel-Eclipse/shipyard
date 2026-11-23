@@ -1,5 +1,7 @@
 use super::*;
 use crate::error;
+#[cfg(feature = "parallel")]
+use crate::scheduler::dag::finish_registration;
 use crate::scheduler::info::RegroupTrigger;
 use crate::scheduler::workload::prepare::prepare_regroups;
 use crate::views::EntitiesViewMut;
@@ -36,6 +38,8 @@ pub(super) fn prepare(workload: Workload, world: &World) -> ScheduledWorkload {
         &all_storages.grouping,
         &dependencies,
     );
+    #[cfg(feature = "parallel")]
+    finish_registration(&dependencies.fallible, &mut scheduled.batches, &info);
 
     scheduled
 }

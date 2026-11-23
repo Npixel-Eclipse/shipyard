@@ -8,8 +8,6 @@ use crate::scheduler::label::SystemLabel;
 use crate::scheduler::{AsLabel, TypeInfo, WorkloadSystem};
 use crate::storage::StorageId;
 use crate::tracking::TrackingTimestamp;
-#[cfg(feature = "scheduler-experiment")]
-use crate::tracking_observation::system_started;
 use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -21,12 +19,12 @@ use core::sync::atomic::{AtomicU64, Ordering};
 #[cfg(feature = "std")]
 use std::error::Error;
 
-#[cfg(feature = "scheduler-experiment")]
+#[cfg(feature = "parallel")]
 use super::dag::Fallible;
 
 // Preserve try-system provenance without changing the public WorkloadSystem layout.
 fn mark_fallible(#[allow(unused_mut)] mut system: WorkloadSystem) -> WorkloadSystem {
-    #[cfg(feature = "scheduler-experiment")]
+    #[cfg(feature = "parallel")]
     system.tags.push(Box::new(TypeId::of::<Fallible>()));
     system
 }
@@ -212,8 +210,6 @@ macro_rules! impl_into_workload_try_system {
                     system_fn: Box::new(move |world: &World| {
                         let current = world.get_current();
                         let last_run = TrackingTimestamp::new(last_run.swap(current.get(), Ordering::Acquire));
-                        #[cfg(feature = "scheduler-experiment")]
-                        let _observation = system_started(current, type_name::<Func>());
                         Ok(drop((&&self)($(<$type as WorldBorrow>::world_borrow(&world, Some(last_run), current)?),+).into().map_err(Run::from_custom)?))
                     }),
                     type_id: TypeId::of::<Func>(),
@@ -292,8 +288,6 @@ macro_rules! impl_into_workload_try_system {
                     system_fn: Box::new(move |world: &World| {
                         let current = world.get_current();
                         let last_run = TrackingTimestamp::new(last_run.swap(current.get(), Ordering::Acquire));
-                        #[cfg(feature = "scheduler-experiment")]
-                        let _observation = system_started(current, type_name::<Func>());
                         Ok(drop((&&self)($(<$type as WorldBorrow>::world_borrow(&world, Some(last_run), current)?),+).into().map_err(Run::from_custom)?))
                     }),
                     type_id: TypeId::of::<Func>(),

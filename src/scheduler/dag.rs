@@ -1,27 +1,13 @@
-//! Registration-time DAG for the explicitly enabled local scheduler experiment.
+//! Builds the parallel workload DAG at registration.
 
 use crate::all_storages::AllStorages;
 use crate::borrow::Mutability;
-use crate::scheduler::Label;
 use crate::scheduler::info::WorkloadInfo;
-use crate::scheduler::order_witness::{OrderWitness, prepare as prepare_order_witness};
-#[cfg(feature = "scheduler-registration-benchmark")]
-use crate::scheduler::registration_benchmark::{Phase, Timer, build_graph_enabled, record};
 use crate::scheduler::{Batches, Step, TypeInfo};
-use alloc::boxed::Box;
-use alloc::format;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::any::TypeId;
 use core::iter::once;
-use core::sync::atomic::{AtomicU64, Ordering};
-use serde_json::{json, to_writer_pretty};
-use std::env::var_os;
-use std::error::Error;
-use std::fs::{File, create_dir_all};
-use std::io::{BufWriter, Write};
-use std::path::PathBuf;
-use std::process::id as process_id;
 
 /// Private TypeId tag; never exposed as a user-facing scheduling label.
 pub(crate) struct Fallible;
@@ -37,27 +23,25 @@ pub(crate) struct DagNode {
     pub(crate) system_index: usize,
     pub(crate) predecessors: usize,
     pub(crate) successors: Vec<usize>,
-    pub(crate) occurrence: usize,
 }
 
 pub(crate) struct DagGraph {
     pub(crate) nodes: Vec<DagNode>,
     pub(crate) roots: Vec<usize>,
-    pub(crate) raw_edge_count: usize,
 }
 
 pub(crate) enum DagEpoch {
-    /// Retains original condition evaluation, caller affinity, and failure boundary.
+    /// Retains regroup, condition, caller affinity, and failure boundaries.
     Fence(usize),
     Graph(DagGraph),
 }
 
+#[derive(Default)]
 pub(crate) struct DagPlan {
     pub(crate) epochs: Vec<DagEpoch>,
-    pub(crate) order_witness: Option<OrderWitness>,
 }
 
-pub(crate) fn step_system(step: Step) -> Option<usize> {
+fn step_system(step: Step) -> Option<usize> {
     match step {
         Step::System(index) => Some(index),
         Step::Regroup(_) => None,
@@ -67,28 +51,10 @@ pub(crate) fn step_system(step: Step) -> Option<usize> {
 /// Compile from the final upstream schedule, after regroup preparation and
 /// tracking registration succeeded. Conditions contribute their full footprint.
 pub(crate) fn finish_registration(
-    name: &dyn Label,
-    names: &[Box<dyn Label>],
-    registered_fallible: &[bool],
+    fallible_by_occurrence: &[bool],
     batches: &mut Batches,
     info: &WorkloadInfo,
 ) {
-    #[cfg(feature = "scheduler-registration-benchmark")]
-    if !build_graph_enabled() {
-        record(
-            info.batches_info
-                .iter()
-                .map(|batch| batch.systems().count())
-                .sum(),
-            batches.parallel.len(),
-            false,
-            false,
-        );
-        let _ = prepare_order_witness(name, names, &[], &[], batches);
-        return;
-    }
-    #[cfg(feature = "scheduler-registration-benchmark")]
-    let timer = Timer::start();
     let mut indexed: Vec<_> = info
         .batches_info
         .iter()
@@ -100,7 +66,7 @@ pub(crate) fn finish_registration(
                     system_index: system.unique_id,
                     hard_after: system.after.clone(),
                     borrow_constraints: system.occurrence.footprint.clone(),
-                    fallible: registered_fallible[system.unique_id],
+                    fallible: fallible_by_occurrence[system.occurrence.id],
                 },
             )
         })
@@ -127,39 +93,19 @@ pub(crate) fn finish_registration(
                 .collect()
         })
         .collect();
-    #[cfg(feature = "scheduler-registration-benchmark")]
-    timer.finish(Phase::DagInputCapture);
-    #[cfg(feature = "scheduler-registration-benchmark")]
-    let timer = Timer::start();
-    batches.dag = DagPlan::build(&inputs, &occurrences, batches);
-    #[cfg(feature = "scheduler-registration-benchmark")]
-    {
-        timer.finish(Phase::DagPlanBuild);
-        record(
-            inputs.len(),
-            batches.parallel.len(),
-            true,
-            batches.dag.is_some(),
-        );
-    }
-    write_plan_output(name, names, &inputs, &occurrences, batches);
-    let witness = prepare_order_witness(name, names, &inputs, &occurrences, batches);
-    if let Some(plan) = &mut batches.dag {
-        plan.order_witness = witness;
-    }
+    batches.dag = DagPlan::build(&inputs, &occurrences, batches)
+        .expect("registered workload must have a complete acyclic schedule");
 }
 
 impl DagPlan {
     /// Input uses the upstream sorter's final occurrence metadata.
     /// Each integer identifies an occurrence, not a registered function/type.
-    /// An unexpected mapping fails closed to the original batch executor.
     pub(crate) fn build(
         inputs: &[DagInput],
         occurrences: &[Vec<usize>],
         batches: &Batches,
     ) -> Option<Self> {
-        if !batches.regroups.is_empty()
-            || occurrences.len() != batches.parallel.len()
+        if occurrences.len() != batches.parallel.len()
             || occurrences.len() != batches.parallel_run_if.len()
         {
             return None;
@@ -179,8 +125,8 @@ impl DagPlan {
                 .iter()
                 .copied()
                 .chain(batches.parallel[batch].1.iter().copied())
-                .map(step_system)
-                .collect::<Option<Vec<_>>>()?;
+                .filter_map(step_system)
+                .collect();
             let mut actual: Vec<_> = ids.iter().map(|&id| inputs[id].system_index).collect();
             expected.sort_unstable();
             actual.sort_unstable();
@@ -205,6 +151,7 @@ impl DagPlan {
         for (batch, ids) in occurrences.iter().enumerate() {
             let conditions = &batches.parallel_run_if[batch];
             let is_fence = batches.parallel[batch].0.is_some()
+                || batches.parallel[batch].1.iter().any(|step| matches!(step, Step::Regroup(_)))
                 || conditions.0 != usize::MAX
                 || conditions
                     .1
@@ -228,17 +175,12 @@ impl DagPlan {
                 inputs, &pending, &batch_of,
             )?));
         }
-        Some(Self {
-            epochs,
-            order_witness: None,
-        })
+        Some(Self { epochs })
     }
 }
 
 impl DagGraph {
     fn build(inputs: &[DagInput], occurrences: &[usize], batch_of: &[usize]) -> Option<Self> {
-        #[cfg(feature = "scheduler-registration-benchmark")]
-        let timer = Timer::start();
         let mut local = vec![usize::MAX; inputs.len()];
         for (position, &id) in occurrences.iter().enumerate() {
             local[id] = position;
@@ -249,7 +191,6 @@ impl DagGraph {
                 system_index: inputs[id].system_index,
                 predecessors: 0,
                 successors: Vec::new(),
-                occurrence: id,
             })
             .collect();
         for (after, &after_id) in occurrences.iter().enumerate() {
@@ -283,24 +224,13 @@ impl DagGraph {
                 }
             }
         }
-        let raw_edge_count = nodes.iter().map(|node| node.successors.len()).sum();
-        #[cfg(feature = "scheduler-registration-benchmark")]
-        timer.finish(Phase::DagEdges);
-        #[cfg(feature = "scheduler-registration-benchmark")]
-        let timer = Timer::start();
         reduce_transitive_edges(&mut nodes);
-        #[cfg(feature = "scheduler-registration-benchmark")]
-        timer.finish(Phase::DagReduction);
         let roots = nodes
             .iter()
             .enumerate()
             .filter_map(|(id, node)| (node.predecessors == 0).then_some(id))
             .collect();
-        Some(Self {
-            nodes,
-            roots,
-            raw_edge_count,
-        })
+        Some(Self { nodes, roots })
     }
 }
 
@@ -353,97 +283,6 @@ fn conflicts(left: &[TypeInfo], right: &[TypeInfo]) -> bool {
                 || b.storage_id == TypeId::of::<AllStorages>()
         })
     })
-}
-
-/// Optional registration-only evidence. Neither mode selection nor ticks perform IO.
-pub(crate) fn write_plan_output(
-    workload_name: &dyn Label,
-    names: &[Box<dyn Label>],
-    inputs: &[DagInput],
-    occurrences: &[Vec<usize>],
-    batches: &Batches,
-) {
-    let Some(directory) = var_os("BATTLE_SCHEDULER_PLAN_OUTPUT_DIR") else {
-        return;
-    };
-    let directory = PathBuf::from(directory);
-    let write = || -> Result<(), Box<dyn Error>> {
-        create_dir_all(&directory)?;
-        static SEQUENCE: AtomicU64 = AtomicU64::new(0);
-        let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
-        let file = directory.join(format!(
-            "scheduler-plan-{}-{sequence:04}.json",
-            process_id()
-        ));
-        let mut graph_nodes = 0;
-        let mut edges = 0;
-        let mut raw_edges = 0;
-        let mut fence_count = 0;
-        let mut fence_nodes = 0;
-        let mut graph_epochs = 0;
-        let epochs: Vec<_> = batches.dag.as_ref().map_or(&[][..], |plan| &plan.epochs)
-            .iter().enumerate().map(|(index, epoch)| match epoch {
-                DagEpoch::Fence(batch) => {
-                    fence_count += 1;
-                    fence_nodes += occurrences[*batch].len();
-                    json!({"index": index, "kind": "fence", "baseline_batch": batch,
-                        "occurrences": occurrences[*batch]})
-                }
-                DagEpoch::Graph(graph) => {
-                    graph_epochs += 1;
-                    graph_nodes += graph.nodes.len();
-                    edges += graph.nodes.iter().map(|node| node.successors.len()).sum::<usize>();
-                    raw_edges += graph.raw_edge_count;
-                    let nodes: Vec<_> = graph.nodes.iter().enumerate().map(|(local, node)| {
-                        json!({"local": local, "occurrence": node.occurrence,
-                            "system_index": node.system_index, "name": format!("{:?}", names[node.system_index]),
-                            "predecessor_count": node.predecessors, "successors": node.successors})
-                    }).collect();
-                    json!({"index": index, "kind": "graph", "roots": graph.roots, "nodes": nodes,
-                        "raw_edge_count": graph.raw_edge_count,
-                        "reduced_edge_count": graph.nodes.iter().map(|node| node.successors.len()).sum::<usize>()})
-                }
-            }).collect();
-        let baseline: Vec<_> = occurrences.iter().enumerate().map(|(index, ids)| {
-            let condition = &batches.parallel_run_if[index];
-            json!({"index": index, "occurrences": ids, "size": ids.len(),
-                "required_caller_system": batches.parallel[index].0.and_then(step_system),
-                "contains_regroup": batches.parallel[index].0.iter().chain(&batches.parallel[index].1)
-                    .any(|step| matches!(step, Step::Regroup(_))),
-                "has_run_if": condition.0 != usize::MAX || condition.1.iter().any(|&id| id != usize::MAX),
-                "has_registered_fallible": ids.iter().any(|&id| inputs[id].fallible)})
-        }).collect();
-        let input_nodes: Vec<_> = inputs.iter().enumerate().map(|(occurrence, input)| {
-            let borrow: Vec<_> = input.borrow_constraints.iter().map(|constraint| json!({
-                "name": constraint.name, "storage": format!("{:?}", constraint.storage_id),
-                "mutability": format!("{:?}", constraint.mutability), "thread_safe": constraint.thread_safe,
-            })).collect();
-            json!({"occurrence": occurrence, "system_index": input.system_index,
-                "name": format!("{:?}", names[input.system_index]),
-                "hard_after": input.hard_after, "borrow": borrow, "registered_fallible": input.fallible})
-        }).collect();
-        let output = json!({"schema": 1, "workload_name": format!("{:?}", workload_name),
-            "plan_valid": batches.dag.is_some(),
-            "fallback_reason": if batches.dag.is_some() { None } else if !batches.regroups.is_empty() {
-                Some("Upstream regroup steps retained by the original batch executor")
-            } else {
-                Some("Occurrence membership, hard ordering, or forward-edge validation failed; original batch execution retained") },
-            "node_count": inputs.len(), "ordinary_count": graph_nodes, "graph_node_count": graph_nodes,
-            "fence_count": fence_count, "fence_node_count": fence_nodes,
-            "epoch_count": epochs.len(), "graph_epoch_count": graph_epochs, "edge_count": edges,
-            "raw_edge_count": raw_edges, "reduced_edge_count": edges,
-            "baseline_batch_count": batches.parallel.len(), "baseline_batches": baseline,
-            "input_nodes": input_nodes, "epochs": epochs,
-            "contract": "local opt-in experiment; known-fallible/run_if/owner batches remain fenced; unexpected errors or panics may follow already admitted independent effects"});
-        let mut writer = BufWriter::new(File::create(file)?);
-        to_writer_pretty(&mut writer, &output)?;
-        writer.write_all(b"\n")?;
-        writer.flush()?;
-        Ok(())
-    };
-    if let Err(error) = write() {
-        panic!("requested scheduler plan evidence write failed: {error}");
-    }
 }
 
 #[cfg(test)]
@@ -501,9 +340,7 @@ mod tests {
             let Ok(batches) = scheduler.workload(&name) else {
                 panic!("registered workload");
             };
-            let Some(plan) = &batches.dag else {
-                panic!("valid plan");
-            };
+            let plan = &batches.dag;
             assert!(matches!(plan.epochs.as_slice(), [DagEpoch::Fence(0)]));
         }
     }
@@ -536,8 +373,8 @@ mod tests {
         let Some(graph) = DagGraph::build(&inputs, &[0, 1, 2], &[0, 0, 1]) else {
             panic!("valid graph");
         };
-        assert_eq!(graph.nodes[0].occurrence, 0);
-        assert_eq!(graph.nodes[1].occurrence, 1);
+
+
         assert_eq!(graph.nodes[2].predecessors, 2);
         assert_eq!(graph.nodes[0].successors, vec![2]);
         assert_eq!(graph.nodes[1].successors, vec![2]);
@@ -557,8 +394,7 @@ mod tests {
                 panic!("valid repeated-reader graph");
             };
             assert_eq!(graph.roots, vec![0, 1]);
-            assert_eq!(graph.raw_edge_count, 4);
-            assert_eq!(graph.nodes[0].occurrence, occurrences[0]);
+
             assert_eq!(graph.nodes[0].successors, vec![2, 3]);
             assert_eq!(graph.nodes[1].successors, vec![2, 3]);
             assert_eq!(graph.nodes[2].predecessors, 2);
@@ -596,7 +432,7 @@ mod tests {
         assert_eq!(graph.nodes[2].predecessors, 1);
         assert_eq!(graph.nodes[1].successors, vec![3]);
         assert_eq!(graph.nodes[3].predecessors, 2);
-        assert_eq!(graph.raw_edge_count, 4);
+
     }
 
     #[test]
@@ -654,7 +490,6 @@ mod tests {
                 system_index: id,
                 predecessors: 0,
                 successors: Vec::new(),
-                occurrence: id,
             })
             .collect();
         // Dense chain plus a branch/merge, with intentionally redundant edges.

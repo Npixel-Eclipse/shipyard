@@ -1,6 +1,6 @@
 mod builder;
 mod run_batches;
-#[cfg(feature = "scheduler-experiment")]
+#[cfg(feature = "parallel")]
 mod run_batches_dag;
 #[cfg(test)]
 mod tests;
@@ -820,7 +820,7 @@ let i = world.run(sys1);
 
         #[cfg(feature = "parallel")]
         {
-            self.run_batches_parallel(systems, system_names, batches, workload_name)
+            self.run_batches_dag(systems, system_names, batches, workload_name)
         }
 
         #[cfg(not(feature = "parallel"))]

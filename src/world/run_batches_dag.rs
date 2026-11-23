@@ -1,10 +1,7 @@
-//! Opt-in experiment: ready successors may cross incidental batch boundaries.
-//! This intentionally changes how much independent work can already have run
-//! when an unanticipated error/panic is observed. Explicit fences are retained.
+//! Executes ready systems when their prerequisites finish, retaining explicit fences.
 
 use crate::error::{Run, RunWorkload};
 use crate::scheduler::dag::{DagEpoch, DagGraph};
-use crate::scheduler::order_witness::ensure_bound as ensure_order_witness_bound;
 use crate::scheduler::{Batches, Label};
 use crate::world::World;
 use alloc::boxed::Box;
@@ -89,51 +86,37 @@ impl World {
         batches: &Batches,
         #[cfg_attr(not(feature = "tracing"), allow(unused))] workload_name: &dyn Label,
     ) -> Result<(), RunWorkload> {
-        ensure_order_witness_bound();
-        if batches.dag.is_none() || !batches.regroups.is_empty() {
-            // Regroup steps and invalid/unavailable plans use the upstream
-            // executor, including its conditions and caller-thread affinity.
-            return self.run_batches_parallel_baseline(systems, system_names, batches, workload_name);
-        }
         #[cfg(feature = "tracing")]
         let parent_span = info_span!("workload", name = ?workload_name);
         #[cfg(feature = "tracing")]
         let _parent_span = parent_span.enter();
-        let run = || -> Result<(), RunWorkload> {
-            if let Some(witness) = batches.dag.as_ref().and_then(|plan| plan.order_witness.as_ref()) {
-                return self.run_order_witness(
-                    systems,
-                    system_names,
-                    batches,
-                    witness,
-                    #[cfg(feature = "tracing")]
-                    &parent_span,
-                );
-            }
-            if let Some(plan) = &batches.dag {
-                for epoch in &plan.epochs {
-                    match epoch {
-                        DagEpoch::Fence(batch) => self.run_one_batch_direct(
+        for epoch in &batches.dag.epochs {
+            match epoch {
+                DagEpoch::Fence(batch) => self.run_one_batch_parallel(
+                    &batches.parallel[*batch],
+                    &batches.parallel_run_if[*batch],
+                    &|step, run_if| {
+                        self.run_step(
                             systems,
                             system_names,
                             batches,
-                            *batch,
                             #[cfg(feature = "tracing")]
                             &parent_span,
-                        )?,
-                        DagEpoch::Graph(graph) => self.run_dag_graph(
-                            systems,
-                            system_names,
-                            graph,
-                            #[cfg(feature = "tracing")]
-                            &parent_span,
-                        )?,
-                    }
-                }
+                            step,
+                            run_if,
+                        )
+                    },
+                )?,
+                DagEpoch::Graph(graph) => self.run_dag_graph(
+                    systems,
+                    system_names,
+                    graph,
+                    #[cfg(feature = "tracing")]
+                    &parent_span,
+                )?,
             }
-            Ok(())
-        };
-        run()
+        }
+        Ok(())
     }
 
     fn run_dag_graph(
@@ -184,5 +167,3 @@ impl World {
 
 #[cfg(test)]
 mod tests;
-
-mod order_witness;

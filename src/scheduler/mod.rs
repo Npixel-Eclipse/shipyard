@@ -1,5 +1,5 @@
 mod batches;
-#[cfg(feature = "scheduler-experiment")]
+#[cfg(feature = "parallel")]
 pub(crate) mod dag;
 pub mod info;
 mod into_workload;
@@ -8,10 +8,6 @@ mod into_workload_system;
 #[cfg(feature = "std")]
 mod into_workload_try_system;
 mod label;
-#[cfg(feature = "scheduler-experiment")]
-pub(crate) mod order_witness;
-#[cfg(feature = "scheduler-registration-benchmark")]
-pub mod registration_benchmark;
 mod system;
 mod system_modificator;
 mod workload;
@@ -45,7 +41,7 @@ use core::any::TypeId;
 // a batch lists systems that can run in parallel
 #[allow(clippy::type_complexity)]
 pub(crate) struct Scheduler {
-    #[cfg(feature = "scheduler-experiment")]
+    #[cfg(feature = "parallel")]
     dag_registered_fallible: Vec<bool>,
     pub(crate) systems: Vec<Box<dyn Fn(&World) -> Result<(), error::Run> + Send + Sync + 'static>>,
     pub(crate) system_names: Vec<Box<dyn Label>>,
@@ -62,7 +58,7 @@ pub(crate) struct Scheduler {
 impl Default for Scheduler {
     fn default() -> Self {
         Scheduler {
-            #[cfg(feature = "scheduler-experiment")]
+            #[cfg(feature = "parallel")]
             dag_registered_fallible: Vec::new(),
             systems: Vec::new(),
             system_names: Vec::new(),

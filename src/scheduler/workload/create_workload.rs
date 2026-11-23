@@ -2,15 +2,13 @@ use crate::ShipHashMap;
 use crate::all_storages::AllStorages;
 use crate::borrow::Mutability;
 use crate::error;
-#[cfg(feature = "scheduler-experiment")]
+#[cfg(feature = "parallel")]
 use crate::scheduler::dag::Fallible;
 use crate::scheduler::info::{
     BatchInfo, BeforeAfterConstraint, Conflict, DedupedLabels, OccurrenceRef, OrderingOrigin,
     Predecessor, SystemInfo, SystemOccurrence,
 };
 use crate::scheduler::label::SequentialLabel;
-#[cfg(feature = "scheduler-registration-benchmark")]
-use crate::scheduler::registration_benchmark::{Phase, Timer};
 use crate::scheduler::{
     Batches, Label, Step, TypeId, TypeInfo, Workload, WorkloadInfo, WorkloadSystem,
 };
@@ -126,12 +124,8 @@ pub(super) fn create_workload(
     system_generators: &mut Vec<Box<dyn Fn(&mut Vec<TypeInfo>) -> TypeId + Send + Sync + 'static>>,
     lookup_table: &mut ShipHashMap<TypeId, usize>,
     tracking_to_enable: &mut Vec<fn(&AllStorages) -> Result<(), error::GetStorage>>,
-    #[cfg(feature = "scheduler-experiment")] dag_registered_fallible: &mut Vec<bool>,
+    #[cfg(feature = "parallel")] dag_registered_fallible: &mut Vec<bool>,
 ) -> Result<(Batches, WorkloadInfo, Dependencies), error::AddWorkload> {
-    #[cfg(feature = "scheduler-registration-benchmark")]
-    let complete_timer = Timer::start();
-    #[cfg(feature = "scheduler-registration-benchmark")]
-    let timer = Timer::start();
     let mut to_be_placed_systems = insert_systems_in_scheduler(
         &mut builder,
         systems,
@@ -139,13 +133,9 @@ pub(super) fn create_workload(
         system_generators,
         lookup_table,
         tracking_to_enable,
-        #[cfg(feature = "scheduler-experiment")]
+        #[cfg(feature = "parallel")]
         dag_registered_fallible,
     );
-    #[cfg(feature = "scheduler-registration-benchmark")]
-    timer.finish(Phase::InsertSystems);
-    #[cfg(feature = "scheduler-registration-benchmark")]
-    let timer = Timer::start();
 
     if let Err(err) = check_require_in_workload(&mut to_be_placed_systems) {
         return Err(err);
@@ -182,8 +172,6 @@ pub(super) fn create_workload(
     }
 
     // The top-level condition isn't propagated to the systems, so we collect its tracking here.
-    #[cfg(feature = "scheduler-registration-benchmark")]
-    timer.finish(Phase::Requirements);
     if let Some(workload_run_if) = &workload_run_if {
         tracking_to_enable.extend(workload_run_if.tracking_to_enable.iter().copied());
     }
@@ -201,30 +189,32 @@ pub(super) fn create_workload(
             .map(|system| system.borrow_constraints.clone())
             .collect(),
         conflicts: vec![None; to_be_placed_systems.len()],
+        #[cfg(feature = "parallel")]
+        fallible: to_be_placed_systems
+            .iter()
+            .map(|system| dag_registered_fallible[system.index])
+            .collect(),
     };
 
-    #[cfg(feature = "scheduler-registration-benchmark")]
-    let timer = Timer::start();
     let batches_info = order_systems(
         to_be_placed_systems,
         dependencies.nodes.clone(),
         &mut dependencies.conflicts,
         &mut batches,
     )?;
-    #[cfg(feature = "scheduler-registration-benchmark")]
-    timer.finish(Phase::BaselineBatches);
     let workload_info = WorkloadInfo {
         name: format!("{:?}", workload_name),
         batches_info,
     };
 
-    #[cfg(feature = "scheduler-registration-benchmark")]
-    complete_timer.finish(Phase::CreateWorkload);
     Ok((batches, workload_info, dependencies))
 }
 
 /// What placing regroups among a workload's systems needs to know about them, indexed by occurrence.
 pub(super) struct Dependencies {
+    /// Whether each occurrence may return a user error.
+    #[cfg(feature = "parallel")]
+    pub(super) fallible: Vec<bool>,
     /// Each occurrence's node, with all its edges.
     pub(super) nodes: Vec<Node>,
     /// What each occurrence's system borrows, without its conditions. Regroups are triggered by it.
@@ -388,7 +378,7 @@ fn insert_systems_in_scheduler(
     system_generators: &mut Vec<Box<dyn Fn(&mut Vec<TypeInfo>) -> TypeId + Send + Sync + 'static>>,
     lookup_table: &mut ShipHashMap<TypeId, usize>,
     all_tracking_to_enable: &mut Vec<fn(&AllStorages) -> Result<(), error::GetStorage>>,
-    #[cfg(feature = "scheduler-experiment")] dag_registered_fallible: &mut Vec<bool>,
+    #[cfg(feature = "parallel")] dag_registered_fallible: &mut Vec<bool>,
 ) -> Vec<ToBePlacedSystem> {
     // An occurrence is identified by its position in the final list.
     // We don't use `WorkloadSystem::unique_id`, only `with_system` keeps it in sync with positions.
@@ -419,12 +409,12 @@ fn insert_systems_in_scheduler(
                     require_after,
                 },
             )| {
-                #[cfg(feature = "scheduler-experiment")]
+                #[cfg(feature = "parallel")]
                 let marked_fallible = tags.iter().any(|tag| {
                     tag.as_any().downcast_ref::<TypeId>() == Some(&TypeId::of::<Fallible>())
                 });
                 let system_index = *lookup_table.entry(type_id).or_insert_with(|| {
-                    #[cfg(feature = "scheduler-experiment")]
+                    #[cfg(feature = "parallel")]
                     dag_registered_fallible.push(marked_fallible);
                     systems.push(system_fn);
                     system_names.push(display_name.clone());

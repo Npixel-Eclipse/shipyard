@@ -7,8 +7,6 @@ use crate::tracking::{
     Inserted, InsertedOrModified, InsertionOrModificationTracking, InsertionTracking,
     ModificationTracking, Modified,
 };
-#[cfg(feature = "scheduler-experiment")]
-use crate::tracking_observation::{enabled, hit};
 
 const TRACKING_FACTOR: f32 = 2.0;
 
@@ -17,11 +15,11 @@ const TRACKING_FACTOR: f32 = 2.0;
 /// Each filter only exists for windows whose `Track` has its `$capability`, so the storage
 /// keeps the timestamps `$is_tracked` reads.
 macro_rules! impl_tracking_filter {
-    ($($filter: ident: $capability: ident, $is_tracked: ident, $kind: literal, $unstable: literal;)+) => {$(
-        impl_tracking_filter!(@window $filter, $capability, $is_tracked, $kind, FullRawWindow, false);
-        impl_tracking_filter!(@window $filter, $capability, $is_tracked, $kind, FullRawWindowMut, $unstable);
+    ($($filter: ident: $capability: ident, $is_tracked: ident, $unstable: literal;)+) => {$(
+        impl_tracking_filter!(@window $filter, $capability, $is_tracked, FullRawWindow, false);
+        impl_tracking_filter!(@window $filter, $capability, $is_tracked, FullRawWindowMut, $unstable);
     )+};
-    (@window $filter: ident, $capability: ident, $is_tracked: ident, $kind: literal, $window: ident, $unstable: literal) => {
+    (@window $filter: ident, $capability: ident, $is_tracked: ident, $window: ident, $unstable: literal) => {
         impl<'tmp, T: Component, Track: $capability> crate::iter::planned_tracking::TrackingFilter for $filter<$window<'tmp, T, Track>>
         where $window<'tmp, T, Track>: Shiperator<Index = usize> {
             fn segment_start(&self) -> usize { self.0.segment_start }
@@ -67,7 +65,7 @@ macro_rules! impl_tracking_filter {
             #[inline]
             unsafe fn captain_indices_of(
                 &self,
-                entities: &EntityCursor,
+                _entities: &EntityCursor,
                 index: usize,
             ) -> Option<Self::Index> {
                 // Timestamps are stored at the component's absolute index.
@@ -76,14 +74,6 @@ macro_rules! impl_tracking_filter {
                 // SAFE: Our caller passes a local index of the segment we entered, whose start
                 // `enter_segment`'s caller picked so it resolves to one of our storage's components.
                 unsafe { self.0.$is_tracked(index) }.then_some(index)
-                    .inspect(|_| {
-                        #[cfg(feature = "scheduler-experiment")]
-                        if enabled() {
-                            hit::<T>($kind, entities.current(), self.0.current);
-                        }
-                        #[cfg(not(feature = "scheduler-experiment"))]
-                        let _ = entities;
-                    })
             }
 
             #[inline]
@@ -92,10 +82,6 @@ macro_rules! impl_tracking_filter {
 
                 // SAFE: `index_of` only returns indices of our storage's components.
                 unsafe { self.0.$is_tracked(index) }.then_some(index)
-                    .inspect(|_| {
-                        #[cfg(feature = "scheduler-experiment")]
-                        hit::<T>($kind, eid, self.0.current);
-                    })
             }
 
             #[inline]
@@ -113,7 +99,7 @@ macro_rules! impl_tracking_filter {
 }
 
 impl_tracking_filter![
-    Inserted: InsertionTracking, is_inserted, "inserted", false;
-    Modified: ModificationTracking, is_modified, "modified", true;
-    InsertedOrModified: InsertionOrModificationTracking, is_inserted_or_modified, "inserted_or_modified", true;
+    Inserted: InsertionTracking, is_inserted, false;
+    Modified: ModificationTracking, is_modified, true;
+    InsertedOrModified: InsertionOrModificationTracking, is_inserted_or_modified, true;
 ];

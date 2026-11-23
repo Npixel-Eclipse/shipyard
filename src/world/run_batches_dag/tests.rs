@@ -23,16 +23,7 @@ impl Component for Y {
 }
 
 fn run(world: &World) -> Result<(), RunWorkload> {
-    let Ok(scheduler) = world.scheduler.borrow() else {
-        panic!("scheduler borrow");
-    };
-    let batches = scheduler.workload(&"test")?;
-    world.run_batches_dag(
-        &scheduler.systems,
-        &scheduler.system_names,
-        batches,
-        &"test",
-    )
+    world.run_workload("test")
 }
 
 fn two_workers() -> World {
@@ -45,7 +36,7 @@ fn two_workers() -> World {
 fn assert_first_batch_is_fenced(world: &World) {
     let scheduler = world.scheduler.borrow().expect("scheduler borrow");
     let batches = scheduler.workload(&"test").expect("registered workload");
-    let plan = batches.dag.as_ref().expect("ordinary workload needs a DAG plan");
+    let plan = &batches.dag;
     assert!(matches!(plan.epochs.first(), Some(DagEpoch::Fence(0))), "fallible batch must be fenced");
 }
 
@@ -272,23 +263,19 @@ fn concurrent_errors_choose_lowest_node_and_do_not_release_successors() {
                 system_index: 0,
                 predecessors: 0,
                 successors: vec![2],
-                occurrence: 0,
             },
             DagNode {
                 system_index: 1,
                 predecessors: 0,
                 successors: vec![2],
-                occurrence: 1,
             },
             DagNode {
                 system_index: 2,
                 predecessors: 2,
                 successors: vec![],
-                occurrence: 2,
             },
         ],
         roots: vec![0, 1],
-        raw_edge_count: 2,
     };
     #[cfg(feature = "tracing")]
     let span = Span::none();
@@ -379,9 +366,7 @@ fn reused_read_only_tracking_system_keeps_its_original_batch_boundaries() {
             panic!("registered workload");
         };
         assert_eq!(batches.parallel, vec![(None, vec![Step::System(0), Step::System(1)]), (None, vec![Step::System(0), Step::System(0)])]);
-        let Some(plan) = &batches.dag else {
-            panic!("valid DAG plan");
-        };
+        let plan = &batches.dag;
         let [DagEpoch::Graph(graph)] = plan.epochs.as_slice() else {
             panic!("read-only systems must remain in one graph epoch");
         };

@@ -1,15 +1,13 @@
 use crate::all_storages::AllStorages;
 use crate::borrow::{BorrowInfo, Mutability, WorldBorrow};
 use crate::error::{self, SystemError};
-#[cfg(feature = "scheduler-experiment")]
+#[cfg(feature = "parallel")]
 use crate::scheduler::dag::Fallible;
 use crate::scheduler::info::DedupedLabels;
 use crate::scheduler::label::{SystemLabel, WorkloadLabel};
 use crate::scheduler::{AsLabel, Label, TypeInfo, Workload, WorkloadSystem};
 use crate::storage::StorageId;
 use crate::tracking::TrackingTimestamp;
-#[cfg(feature = "scheduler-experiment")]
-use crate::tracking_observation::system_started;
 use crate::world::World;
 use alloc::boxed::Box;
 use alloc::vec;
@@ -57,7 +55,7 @@ pub struct Nothing;
 fn system_tags<R: 'static>(label: Box<dyn Label>) -> Vec<Box<dyn Label>> {
     #[allow(unused_mut)]
     let mut tags = vec![label];
-    #[cfg(feature = "scheduler-experiment")]
+    #[cfg(feature = "parallel")]
     if TypeId::of::<R>() == TypeId::of::<Result<(), SystemError>>() {
         tags.push(Box::new(TypeId::of::<Fallible>()));
     }
@@ -184,8 +182,6 @@ macro_rules! impl_into_workload_system {
                     system_fn: Box::new(move |world: &World| {
                         let current = world.get_current();
                         let last_run = TrackingTimestamp::new(last_run.swap(current.get(), Ordering::Acquire));
-                        #[cfg(feature = "scheduler-experiment")]
-                        let _observation = system_started(current, type_name::<Func>());
                         workload_result((&&self)($($type::world_borrow(&world, Some(last_run), current)?),+))
                     }),
                     type_id: TypeId::of::<Func>(),

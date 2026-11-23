@@ -12,8 +12,6 @@ use crate::tracking::{
     InsertionTracking, ModificationTracking, Modified, RemovalTracking, Tracking,
     TrackingTimestamp,
 };
-#[cfg(feature = "scheduler-experiment")]
-use crate::tracking_observation::{hit, matched};
 use core::fmt;
 use core::marker::PhantomData;
 use core::ops::Deref;
@@ -213,10 +211,7 @@ where
     /// Returns `false` if `entity` does not have a component in this storage.
     #[inline]
     pub fn is_inserted(&self, entity: EntityId) -> bool {
-        let value = Track::is_inserted(self.sparse_set, entity, self.last_insertion, self.current);
-        #[cfg(feature = "scheduler-experiment")]
-        let value = matched::<T>(value, "inserted", entity, self.current);
-        value
+        Track::is_inserted(self.sparse_set, entity, self.last_insertion, self.current)
     }
 }
 
@@ -235,15 +230,12 @@ where
     /// Returns `false` if `entity` does not have a component in this storage.
     #[inline]
     pub fn is_modified(&self, entity: EntityId) -> bool {
-        let value = Track::is_modified(
+        Track::is_modified(
             self.sparse_set,
             entity,
             self.last_modification,
             self.current,
-        );
-        #[cfg(feature = "scheduler-experiment")]
-        let value = matched::<T>(value, "modified", entity, self.current);
-        value
+        )
     }
 }
 
@@ -263,16 +255,13 @@ where
     /// Returns `false` if `entity` does not have a component in this storage.
     #[inline]
     pub fn is_inserted_or_modified(&self, entity: EntityId) -> bool {
-        let value = Track::is_inserted(self.sparse_set, entity, self.last_insertion, self.current)
+        Track::is_inserted(self.sparse_set, entity, self.last_insertion, self.current)
             || Track::is_modified(
                 self.sparse_set,
                 entity,
                 self.last_modification,
                 self.current,
-            );
-        #[cfg(feature = "scheduler-experiment")]
-        let value = matched::<T>(value, "inserted_or_modified", entity, self.current);
-        value
+            )
     }
 }
 
@@ -287,8 +276,6 @@ where
             .iter()
             .filter_map(move |(entity, timestamp, component)| {
                 if timestamp.is_within(self.last_removal_or_deletion, self.current) {
-                    #[cfg(feature = "scheduler-experiment")]
-                    hit::<T>("deleted", *entity, self.current);
                     Some((*entity, component))
                 } else {
                     None
@@ -301,10 +288,7 @@ where
     /// Returns `false` if `entity` does not have a component in this storage.
     #[inline]
     pub fn is_deleted(&self, entity: EntityId) -> bool {
-        let value = Track::is_deleted(self, entity, self.last_removal_or_deletion, self.current);
-        #[cfg(feature = "scheduler-experiment")]
-        let value = matched::<T>(value, "deleted", entity, self.current);
-        value
+        Track::is_deleted(self, entity, self.last_removal_or_deletion, self.current)
     }
 }
 
@@ -319,8 +303,6 @@ where
             .iter()
             .filter_map(move |(entity, timestamp)| {
                 if timestamp.is_within(self.last_removal_or_deletion, self.current) {
-                    #[cfg(feature = "scheduler-experiment")]
-                    hit::<T>("removed", *entity, self.current);
                     Some(*entity)
                 } else {
                     None
@@ -333,10 +315,7 @@ where
     /// Returns `false` if `entity` does not have a component in this storage.
     #[inline]
     pub fn is_removed(&self, entity: EntityId) -> bool {
-        let value = Track::is_removed(self, entity, self.last_removal_or_deletion, self.current);
-        #[cfg(feature = "scheduler-experiment")]
-        let value = matched::<T>(value, "removed", entity, self.current);
-        value
+        Track::is_removed(self, entity, self.last_removal_or_deletion, self.current)
     }
 }
 
@@ -348,8 +327,6 @@ where
     pub fn removed_or_deleted(&self) -> impl Iterator<Item = EntityId> + '_ {
         Track::removed_or_deleted(self.sparse_set).filter_map(move |(entity, timestamp)| {
             if timestamp.is_within(self.last_removal_or_deletion, self.current) {
-                #[cfg(feature = "scheduler-experiment")]
-                hit::<T>("removed_or_deleted", entity, self.current);
                 Some(entity)
             } else {
                 None
@@ -362,11 +339,8 @@ where
     /// Returns `false` if `entity` does not have a component in this storage.
     #[inline]
     pub fn is_removed_or_deleted(&self, entity: EntityId) -> bool {
-        let value = Track::is_deleted(self, entity, self.last_removal_or_deletion, self.current)
-            || Track::is_removed(self, entity, self.last_removal_or_deletion, self.current);
-        #[cfg(feature = "scheduler-experiment")]
-        let value = matched::<T>(value, "removed_or_deleted", entity, self.current);
-        value
+        Track::is_deleted(self, entity, self.last_removal_or_deletion, self.current)
+            || Track::is_removed(self, entity, self.last_removal_or_deletion, self.current)
     }
 }
 

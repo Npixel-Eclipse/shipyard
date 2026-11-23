@@ -1,7 +1,7 @@
 use crate::all_storages::{ConnectedSet, Grouping};
 use crate::borrow::Mutability;
 use crate::error;
-#[cfg(feature = "scheduler-experiment")]
+#[cfg(feature = "parallel")]
 use crate::scheduler::dag::DagPlan;
 use crate::scheduler::info::{RegroupInfo, RegroupOccurrence, RegroupTrigger, TypeInfo};
 use crate::scheduler::system::WorkloadRunIfFn;
@@ -13,8 +13,8 @@ use alloc::vec::Vec;
 #[derive(Default)]
 #[allow(clippy::type_complexity)]
 pub(crate) struct Batches {
-    #[cfg(feature = "scheduler-experiment")]
-    pub(crate) dag: Option<DagPlan>,
+    #[cfg(feature = "parallel")]
+    pub(crate) dag: DagPlan,
     /// Steps of each batch, the first one runs on the calling thread.
     pub(crate) parallel: Vec<(Option<Step>, Vec<Step>)>,
     /// Index into `systems_run_if`

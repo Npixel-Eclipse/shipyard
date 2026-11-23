@@ -27,8 +27,8 @@ fn single_immutable() {
             workload_run_if: None,
             systems_run_if: Vec::new(),
             regroups: Vec::new(),
-            #[cfg(feature = "scheduler-experiment")]
-            dag: None,
+            #[cfg(feature = "parallel")]
+            dag: Default::default(),
         })
     );
     assert_eq!(&scheduler.default, &label);
@@ -61,8 +61,8 @@ fn single_mutable() {
             workload_run_if: None,
             systems_run_if: Vec::new(),
             regroups: Vec::new(),
-            #[cfg(feature = "scheduler-experiment")]
-            dag: None,
+            #[cfg(feature = "parallel")]
+            dag: Default::default(),
         })
     );
     assert_eq!(&scheduler.default, &label);
@@ -97,8 +97,8 @@ fn multiple_immutable() {
             workload_run_if: None,
             systems_run_if: Vec::new(),
             regroups: Vec::new(),
-            #[cfg(feature = "scheduler-experiment")]
-            dag: None,
+            #[cfg(feature = "parallel")]
+            dag: Default::default(),
         })
     );
     assert_eq!(&scheduler.default, &label);
@@ -133,8 +133,8 @@ fn multiple_mutable() {
             workload_run_if: None,
             systems_run_if: Vec::new(),
             regroups: Vec::new(),
-            #[cfg(feature = "scheduler-experiment")]
-            dag: None,
+            #[cfg(feature = "parallel")]
+            dag: Default::default(),
         })
     );
     assert_eq!(&scheduler.default, &label);
@@ -169,8 +169,8 @@ fn multiple_mixed() {
             workload_run_if: None,
             systems_run_if: Vec::new(),
             regroups: Vec::new(),
-            #[cfg(feature = "scheduler-experiment")]
-            dag: None,
+            #[cfg(feature = "parallel")]
+            dag: Default::default(),
         })
     );
     assert_eq!(&scheduler.default, &label);
@@ -199,8 +199,8 @@ fn multiple_mixed() {
             workload_run_if: None,
             systems_run_if: Vec::new(),
             regroups: Vec::new(),
-            #[cfg(feature = "scheduler-experiment")]
-            dag: None,
+            #[cfg(feature = "parallel")]
+            dag: Default::default(),
         })
     );
     assert_eq!(&scheduler.default, &label);
@@ -242,8 +242,8 @@ fn append_optimizes_batches() {
             workload_run_if: None,
             systems_run_if: Vec::new(),
             regroups: Vec::new(),
-            #[cfg(feature = "scheduler-experiment")]
-            dag: None,
+            #[cfg(feature = "parallel")]
+            dag: Default::default(),
         })
     );
     assert_eq!(&scheduler.default, &label);
@@ -277,8 +277,8 @@ fn all_storages() {
             workload_run_if: None,
             systems_run_if: Vec::new(),
             regroups: Vec::new(),
-            #[cfg(feature = "scheduler-experiment")]
-            dag: None,
+            #[cfg(feature = "parallel")]
+            dag: Default::default(),
         })
     );
     assert_eq!(&scheduler.default, &label);
@@ -306,8 +306,8 @@ fn all_storages() {
             workload_run_if: None,
             systems_run_if: Vec::new(),
             regroups: Vec::new(),
-            #[cfg(feature = "scheduler-experiment")]
-            dag: None,
+            #[cfg(feature = "parallel")]
+            dag: Default::default(),
         })
     );
     assert_eq!(&scheduler.default, &label);
@@ -336,8 +336,8 @@ fn all_storages() {
             workload_run_if: None,
             systems_run_if: Vec::new(),
             regroups: Vec::new(),
-            #[cfg(feature = "scheduler-experiment")]
-            dag: None,
+            #[cfg(feature = "parallel")]
+            dag: Default::default(),
         })
     );
     assert_eq!(&scheduler.default, &label);
@@ -365,8 +365,8 @@ fn all_storages() {
             workload_run_if: None,
             systems_run_if: Vec::new(),
             regroups: Vec::new(),
-            #[cfg(feature = "scheduler-experiment")]
-            dag: None,
+            #[cfg(feature = "parallel")]
+            dag: Default::default(),
         })
     );
     assert_eq!(&scheduler.default, &label);
@@ -413,8 +413,8 @@ fn non_send() {
             workload_run_if: None,
             systems_run_if: Vec::new(),
             regroups: Vec::new(),
-            #[cfg(feature = "scheduler-experiment")]
-            dag: None,
+            #[cfg(feature = "parallel")]
+            dag: Default::default(),
         })
     );
     assert_eq!(&scheduler.default, &label);
@@ -447,8 +447,8 @@ fn non_send() {
             workload_run_if: None,
             systems_run_if: Vec::new(),
             regroups: Vec::new(),
-            #[cfg(feature = "scheduler-experiment")]
-            dag: None,
+            #[cfg(feature = "parallel")]
+            dag: Default::default(),
         })
     );
     assert_eq!(&scheduler.default, &label);
@@ -476,8 +476,8 @@ fn non_send() {
             workload_run_if: None,
             systems_run_if: Vec::new(),
             regroups: Vec::new(),
-            #[cfg(feature = "scheduler-experiment")]
-            dag: None,
+            #[cfg(feature = "parallel")]
+            dag: Default::default(),
         })
     );
     assert_eq!(&scheduler.default, &label);
@@ -505,8 +505,8 @@ fn non_send() {
             workload_run_if: None,
             systems_run_if: Vec::new(),
             regroups: Vec::new(),
-            #[cfg(feature = "scheduler-experiment")]
-            dag: None,
+            #[cfg(feature = "parallel")]
+            dag: Default::default(),
         })
     );
     assert_eq!(&scheduler.default, &label);
@@ -539,8 +539,8 @@ fn non_send() {
             workload_run_if: None,
             systems_run_if: Vec::new(),
             regroups: Vec::new(),
-            #[cfg(feature = "scheduler-experiment")]
-            dag: None,
+            #[cfg(feature = "parallel")]
+            dag: Default::default(),
         })
     );
     assert_eq!(&scheduler.default, &label);
@@ -575,8 +575,8 @@ fn unique_and_non_unique() {
             workload_run_if: None,
             systems_run_if: Vec::new(),
             regroups: Vec::new(),
-            #[cfg(feature = "scheduler-experiment")]
-            dag: None,
+            #[cfg(feature = "parallel")]
+            dag: Default::default(),
         })
     );
     assert_eq!(&scheduler.default, &label);
@@ -604,8 +604,8 @@ fn empty_workload() {
             workload_run_if: None,
             systems_run_if: Vec::new(),
             regroups: Vec::new(),
-            #[cfg(feature = "scheduler-experiment")]
-            dag: None,
+            #[cfg(feature = "parallel")]
+            dag: Default::default(),
         })
     );
     assert_eq!(&scheduler.default, &label);
@@ -652,8 +652,8 @@ fn append_ensures_multiple_batches_can_be_optimized_over() {
             workload_run_if: None,
             systems_run_if: Vec::new(),
             regroups: Vec::new(),
-            #[cfg(feature = "scheduler-experiment")]
-            dag: None,
+            #[cfg(feature = "parallel")]
+            dag: Default::default(),
         })
     );
     assert_eq!(&scheduler.default, &label);
@@ -696,8 +696,8 @@ fn non_send_distinct_storage() {
             workload_run_if: None,
             systems_run_if: Vec::new(),
             regroups: Vec::new(),
-            #[cfg(feature = "scheduler-experiment")]
-            dag: None,
+            #[cfg(feature = "parallel")]
+            dag: Default::default(),
         })
     );
 }

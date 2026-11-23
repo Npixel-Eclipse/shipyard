@@ -1,9 +1,12 @@
 use super::*;
+use super::pending::read_a;
 use crate::all_storages::GroupMember;
 use crate::borrow::Mutability;
 use crate::error;
 use crate::scheduler::info::{RegroupInfo, RegroupOccurrence, RegroupTrigger, TypeInfo};
 use crate::scheduler::{RegroupStep, Step};
+#[cfg(feature = "parallel")]
+use crate::scheduler::dag::{DagEpoch, DagPlan};
 use crate::sparse_set::SparseSet;
 use alloc::borrow::Cow;
 use core::any::type_name;
@@ -36,6 +39,8 @@ fn one_batch(regroups: Vec<RegroupStep>) -> Batches {
     let steps: Vec<Step> = (0..regroups.len()).map(Step::Regroup).collect();
 
     Batches {
+        #[cfg(feature = "parallel")]
+        dag: DagPlan { epochs: vec![DagEpoch::Fence(0)] },
         parallel: vec![(None, steps.clone())],
         parallel_run_if: vec![(usize::MAX, vec![usize::MAX; steps.len()])],
         sequential_run_if: vec![usize::MAX; steps.len()],
@@ -143,19 +148,10 @@ fn next_to_system() {
     let world = two_sets();
     world.add_unique(Usize(0));
     Workload::new("")
+        .with_system(read_a)
         .with_system(count)
         .add_to_world(&world)
         .unwrap();
-    let regroup = entry_regroup::<A>(&world);
-    {
-        let mut scheduler = world.scheduler.borrow_mut().unwrap();
-        let batches = scheduler.workloads.values_mut().next().unwrap();
-        batches.regroups.push(regroup);
-        batches.parallel[0].1.push(Step::Regroup(0));
-        batches.parallel_run_if[0].1.push(usize::MAX);
-        batches.sequential.push(Step::Regroup(0));
-        batches.sequential_run_if.push(usize::MAX);
-    }
 
     world.run_default_workload().unwrap();
 
@@ -225,7 +221,7 @@ fn non_send() {
 /// stops the workload's regroup, with an error naming it.
 #[test]
 fn transitive_member() {
-    use super::pending::{prepare, read_a, run};
+    use super::pending::{prepare, run};
 
     let world = World::builder_for_test()
         .with_group::<(A, B)>()

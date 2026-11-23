@@ -36,7 +36,7 @@
 #![warn(missing_docs)]
 #![no_std]
 
-#[cfg(feature = "std")]
+#[cfg(any(feature = "std", feature = "parallel"))]
 extern crate std;
 
 extern crate alloc;
@@ -81,8 +81,6 @@ pub mod sparse_set;
 mod storage;
 /// Module related to storage tracking, like insertion or modification.
 pub mod track;
-#[cfg(feature = "scheduler-experiment")]
-pub mod tracking_observation;
 mod unique;
 /// Contains all view types used to borrow components in a [`World`].
 pub mod views;

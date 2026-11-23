@@ -209,8 +209,8 @@ fn after_all_single_system() {
             workload_run_if: None,
             systems_run_if: Vec::new(),
             regroups: Vec::new(),
-            #[cfg(feature = "scheduler-experiment")]
-            dag: None,
+            #[cfg(feature = "parallel")]
+            dag: Default::default(),
         }
     );
 }
